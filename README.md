@@ -4,6 +4,8 @@
 
 `ootils-core` gives AI agents — and the developers who build them — a principled, batteries-included library for making intelligent supply chain decisions. It implements the classical inventory-management algorithms (EOQ, safety stock, reorder point) in a clean, dependency-free Python package and wraps them in an **agent-first tool interface** that integrates directly with OpenAI function calling, Anthropic tool use, and any other LLM framework that supports structured tool schemas.
 
+This library is the first executable slice of the broader Ootils vision: AI-native supply chain operations built on deterministic, explainable decision primitives that agents can actually use.
+
 ---
 
 ## Features
