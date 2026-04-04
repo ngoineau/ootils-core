@@ -8,7 +8,7 @@ Pipeline:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -77,9 +77,8 @@ class PropagationEngine:
             logger.info("Scenario %s is already locked — skipping", scenario_id)
             return None
 
-        db.execute("SAVEPOINT propagation_start")
-
         try:
+            db.execute("SAVEPOINT propagation_start")
             # Determine time window for dirty expansion
             trigger_node_id = (
                 UUID(str(event_row["trigger_node_id"]))
@@ -108,7 +107,6 @@ class PropagationEngine:
                 window_end = new_date + timedelta(days=365)
             else:
                 # No date context — recompute full downstream
-                from datetime import date
                 window_start = date.min
                 window_end = date.max
 
@@ -354,35 +352,18 @@ class PropagationEngine:
         changed = old_values != new_values
 
         # ------------------------------------------------------------------
-        # 6. Persist
+        # 6. Persist via GraphStore (all DB writes go through the store layer)
         # ------------------------------------------------------------------
-        from datetime import datetime, timezone
-        db.execute(
-            """
-            UPDATE nodes
-            SET opening_stock = %s,
-                inflows = %s,
-                outflows = %s,
-                closing_stock = %s,
-                has_shortage = %s,
-                shortage_qty = %s,
-                is_dirty = FALSE,
-                last_calc_run_id = %s,
-                updated_at = %s
-            WHERE node_id = %s AND scenario_id = %s
-            """,
-            (
-                result["opening_stock"],
-                result["inflows"],
-                result["outflows"],
-                result["closing_stock"],
-                result["has_shortage"],
-                result["shortage_qty"],
-                calc_run_id,
-                datetime.now(timezone.utc),
-                node_id,
-                scenario_id,
-            ),
+        self._store.update_pi_result(
+            node_id=node_id,
+            scenario_id=scenario_id,
+            calc_run_id=calc_run_id,
+            opening_stock=result["opening_stock"],
+            inflows=result["inflows"],
+            outflows=result["outflows"],
+            closing_stock=result["closing_stock"],
+            has_shortage=result["has_shortage"],
+            shortage_qty=result["shortage_qty"],
         )
 
         return changed
