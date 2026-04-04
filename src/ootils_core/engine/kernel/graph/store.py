@@ -275,6 +275,52 @@ class GraphStore:
                 if neighbour not in visited:
                     stack.append(neighbour)
 
+    def update_pi_result(
+        self,
+        node_id: UUID,
+        scenario_id: UUID,
+        calc_run_id: UUID,
+        opening_stock: Decimal,
+        inflows: Decimal,
+        outflows: Decimal,
+        closing_stock: Decimal,
+        has_shortage: bool,
+        shortage_qty: Decimal,
+    ) -> None:
+        """
+        Persist the result of a PI node computation.
+        Updates only the computation result fields + clears is_dirty.
+        Called exclusively by the propagation engine — keeps all DB writes in the store.
+        """
+        from datetime import datetime, timezone
+        self._conn.execute(
+            """
+            UPDATE nodes
+            SET opening_stock    = %s,
+                inflows          = %s,
+                outflows         = %s,
+                closing_stock    = %s,
+                has_shortage     = %s,
+                shortage_qty     = %s,
+                is_dirty         = FALSE,
+                last_calc_run_id = %s,
+                updated_at       = %s
+            WHERE node_id = %s AND scenario_id = %s
+            """,
+            (
+                opening_stock,
+                inflows,
+                outflows,
+                closing_stock,
+                has_shortage,
+                shortage_qty,
+                calc_run_id,
+                datetime.now(timezone.utc),
+                node_id,
+                scenario_id,
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Projection series
     # ------------------------------------------------------------------

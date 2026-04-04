@@ -195,6 +195,16 @@ class CalcRunManager:
         Return all 'pending' runs so the engine can retry them.
 
         Called once on engine startup.
+
+        Advisory lock note:
+        PostgreSQL advisory locks are session-scoped. If the engine process crashes,
+        the DB connection is closed, and Postgres automatically releases all advisory
+        locks held by that session. There is therefore no risk of orphaned advisory
+        locks surviving a crash — they are cleaned up at the transport level.
+
+        What this method handles: the *calc_runs table state*, which does not auto-recover.
+        Running rows must be transitioned to 'failed' so the engine does not think
+        a run is in progress when it restarts.
         """
         now = datetime.now(timezone.utc)
 
