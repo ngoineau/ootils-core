@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID, uuid4
 
 
@@ -350,3 +350,30 @@ class ScenarioDiff:
     baseline_value: Optional[str]
     scenario_value: Optional[str]
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# AI Agent models (Sprint M7)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentRecommendation:
+    """A single actionable recommendation produced by the autonomous agent."""
+    issue_node_id: UUID
+    root_cause_summary: str
+    action_type: str          # 'expedite_supply' | 'reduce_demand' | 'no_action' | 'escalate'
+    action_detail: str
+    simulation_scenario_id: Optional[UUID]
+    confidence: str           # 'high' | 'medium' | 'low'
+
+
+@dataclass
+class AgentReport:
+    """Full report produced by a single OotilsAgent.run() execution."""
+    issues_found: int
+    issues_analyzed: int
+    simulations_run: int
+    recommendations: List[AgentRecommendation]
+    run_at: datetime
+    summary: str              # 1-paragraph plain English
