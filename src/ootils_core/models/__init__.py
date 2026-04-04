@@ -311,3 +311,42 @@ class AllocationResult:
     edges_created: int
     edges_updated: int
     run_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Scenario M5 models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScenarioOverride:
+    """
+    A user/agent override applied to a specific node field within a scenario.
+    Values are serialized as TEXT — this is intentional: overrides represent
+    user intent, not computed state.
+    """
+    override_id: UUID
+    scenario_id: UUID
+    node_id: UUID
+    field_name: str
+    old_value: Optional[str]
+    new_value: str
+    applied_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    applied_by: Optional[str] = None
+
+
+@dataclass
+class ScenarioDiff:
+    """
+    One field-level difference between a baseline calc_run result and a
+    scenario calc_run result on the same node.
+    """
+    diff_id: UUID
+    scenario_id: UUID
+    baseline_calc_run_id: UUID
+    scenario_calc_run_id: UUID
+    node_id: UUID
+    field_name: str
+    baseline_value: Optional[str]
+    scenario_value: Optional[str]
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
