@@ -17,10 +17,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 
+from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import Node, NodeTypeTemporalPolicy
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,10 @@ class TemporalBridge:
 
     All methods accept a psycopg Connection with dict_row factory.
     NEVER writes to the database.
+
+    GraphStore is instantiated once per connection in _load_series_nodes
+    via the provided connection — this avoids storing a long-lived store
+    and keeps the Bridge stateless across calls.
     """
 
     # ------------------------------------------------------------------
@@ -151,7 +156,6 @@ class TemporalBridge:
         if row is None:
             raise KeyError(f"No active temporal policy found for node_type={node_type!r}")
 
-        from uuid import UUID
         return NodeTypeTemporalPolicy(
             policy_id=UUID(str(row["policy_id"])),
             node_type=row["node_type"],
@@ -362,7 +366,6 @@ class TemporalBridge:
         db: psycopg.Connection,
     ) -> list[Node]:
         """Load all active PI nodes for a series, ordered by bucket_sequence."""
-        from ootils_core.engine.kernel.graph.store import GraphStore
         store = GraphStore(db)
         return store.get_nodes_by_series(series_id)
 
