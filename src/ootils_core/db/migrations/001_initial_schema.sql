@@ -1,19 +1,14 @@
 -- ============================================================
--- Ootils Core — Migration 001: Initial Schema
--- ADR-005: Storage Layer and Data Model
+-- Ootils Core — Migration 001: DEPRECATED (SQLite legacy)
 -- ============================================================
--- Run via: connection.py apply_migrations()
--- Engine: SQLite >= 3.38 (json_extract / jsonb support)
--- Conventions:
---   - All PKs are TEXT UUID v4
---   - All timestamps are TEXT ISO 8601 UTC
---   - attributes column is TEXT containing valid JSON object
---   - No UPDATE/DELETE on events table (enforced by application)
+-- This file was the original SQLite schema (pre-Sprint 1).
+-- The engine migrated to PostgreSQL in Sprint 1 (migration 002).
+-- This file is intentionally a no-op — kept for historical reference only.
+-- All PostgreSQL schema is in migrations 002 and above.
 -- ============================================================
 
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA synchronous = NORMAL;
+-- No-op: migration 002 defines the full PostgreSQL schema.
+SELECT 1;
 
 -- ============================================================
 -- 0. REFERENCE TABLES (scenario-independent)

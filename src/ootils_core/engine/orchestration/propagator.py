@@ -173,6 +173,26 @@ class PropagationEngine:
 
         self._calc_run_mgr.complete_calc_run(calc_run, scenario, db)
 
+        # Resolve stale shortages: any shortage from a previous calc_run
+        # that was NOT re-detected in this run should be marked resolved.
+        if self._shortage_detector is not None:
+            try:
+                resolved = self._shortage_detector.resolve_stale(
+                    scenario_id=scenario_id,
+                    calc_run_id=calc_run.calc_run_id,
+                    db=db,
+                )
+                if resolved > 0:
+                    logger.info(
+                        "_finish_run: resolved %d stale shortages for scenario=%s",
+                        resolved, scenario_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "_finish_run: resolve_stale failed for scenario=%s: %s",
+                    scenario_id, exc,
+                )
+
     # ------------------------------------------------------------------
     # Propagation internals
     # ------------------------------------------------------------------
