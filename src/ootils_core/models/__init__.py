@@ -240,3 +240,23 @@ class CycleDetectedError(Exception):
 class EngineStartupError(Exception):
     """Raised by startup_cycle_check if the graph has a cycle."""
     pass
+
+
+# ---------------------------------------------------------------------------
+# Allocation Engine results
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AllocationResult:
+    """Summary of a completed allocation pass."""
+    scenario_id: UUID
+    demands_total: int
+    demands_fully_allocated: int
+    demands_partially_allocated: int
+    demands_unallocated: int
+    total_qty_demanded: Decimal
+    total_qty_allocated: Decimal
+    edges_created: int
+    edges_updated: int
+    run_at: datetime

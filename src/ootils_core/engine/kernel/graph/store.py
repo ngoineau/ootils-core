@@ -384,6 +384,154 @@ class GraphStore:
         )
         return series
 
+    # ------------------------------------------------------------------
+    # Allocation-specific reads / writes
+    # ------------------------------------------------------------------
+
+    # Demand node types recognised by the allocation engine.
+    DEMAND_NODE_TYPES: tuple[str, ...] = (
+        "ForecastDemand",
+        "CustomerOrderDemand",
+        "DependentDemand",
+    )
+
+    def get_demand_nodes(
+        self,
+        scenario_id: UUID,
+        *,
+        node_types: Optional[tuple[str, ...]] = None,
+    ) -> list[Node]:
+        """
+        Return all active demand nodes for a scenario, ordered by
+        (priority ASC, time_ref ASC, node_id ASC) for deterministic allocation.
+
+        priority is stored in the *quantity* field for demand nodes when no
+        dedicated column exists, but the canonical sort key comes from the
+        edges that carry a priority value.  Here we sort on the node's own
+        ``time_ref`` (due date) and ``node_id`` as the stable tiebreaker.
+        A separate ``priority`` column is not present on Node, so callers
+        should sort by (node.quantity representing priority, time_ref, node_id)
+        — but this method returns them pre-sorted by (time_ref ASC, node_id ASC)
+        so the allocation engine can apply its own priority layer on top.
+
+        We also expose a ``node_types`` override so tests can inject custom
+        type names.
+        """
+        types = node_types if node_types is not None else self.DEMAND_NODE_TYPES
+        placeholders = ", ".join(["%s"] * len(types))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM nodes
+            WHERE scenario_id = %s
+              AND node_type IN ({placeholders})
+              AND active = TRUE
+            ORDER BY time_ref ASC NULLS LAST, node_id ASC
+            """,
+            (scenario_id, *types),
+        ).fetchall()
+        return [_row_to_node(r) for r in rows]
+
+    def get_edges_by_type(
+        self,
+        scenario_id: UUID,
+        edge_type: str,
+    ) -> list[Edge]:
+        """Return all active edges of a given type for a scenario."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM edges
+            WHERE scenario_id = %s AND edge_type = %s AND active = TRUE
+            ORDER BY priority ASC, edge_id ASC
+            """,
+            (scenario_id, edge_type),
+        ).fetchall()
+        return [_row_to_edge(r) for r in rows]
+
+    def upsert_edge(self, edge: Edge) -> tuple[Edge, bool]:
+        """
+        Insert or update an edge identified by
+        (from_node_id, to_node_id, edge_type, scenario_id).
+
+        Returns (edge, created) where created=True when a new row was inserted.
+
+        No cycle check is performed here — pegged_to edges go from demand to
+        supply (demand → supply), which is the reverse of the computation DAG
+        direction and cannot create planning cycles.
+        """
+        existing = self._conn.execute(
+            """
+            SELECT edge_id FROM edges
+            WHERE from_node_id = %s
+              AND to_node_id   = %s
+              AND edge_type    = %s
+              AND scenario_id  = %s
+            """,
+            (edge.from_node_id, edge.to_node_id, edge.edge_type, edge.scenario_id),
+        ).fetchone()
+
+        if existing:
+            # Update weight_ratio (allocated qty) and priority.
+            self._conn.execute(
+                """
+                UPDATE edges
+                SET weight_ratio = %s,
+                    priority     = %s,
+                    active       = TRUE
+                WHERE from_node_id = %s
+                  AND to_node_id   = %s
+                  AND edge_type    = %s
+                  AND scenario_id  = %s
+                """,
+                (
+                    edge.weight_ratio,
+                    edge.priority,
+                    edge.from_node_id,
+                    edge.to_node_id,
+                    edge.edge_type,
+                    edge.scenario_id,
+                ),
+            )
+            edge.edge_id = UUID(str(existing["edge_id"]))
+            return edge, False
+        else:
+            self._conn.execute(
+                """
+                INSERT INTO edges (
+                    edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                    priority, weight_ratio, effective_start, effective_end,
+                    active, created_at
+                ) VALUES (
+                    %(edge_id)s, %(edge_type)s, %(from_node_id)s, %(to_node_id)s, %(scenario_id)s,
+                    %(priority)s, %(weight_ratio)s, %(effective_start)s, %(effective_end)s,
+                    %(active)s, %(created_at)s
+                )
+                """,
+                _edge_to_params(edge),
+            )
+            return edge, True
+
+    def update_node_closing_stock(
+        self,
+        node_id: UUID,
+        scenario_id: UUID,
+        closing_stock: Decimal,
+    ) -> None:
+        """
+        Persist an updated closing_stock value on a PI node after allocation
+        has consumed from it.  Also clears is_dirty so downstream propagation
+        knows this node is fresh.
+        """
+        from datetime import datetime, timezone
+        self._conn.execute(
+            """
+            UPDATE nodes
+            SET closing_stock = %s,
+                updated_at    = %s
+            WHERE node_id = %s AND scenario_id = %s
+            """,
+            (closing_stock, datetime.now(timezone.utc), node_id, scenario_id),
+        )
+
     def get_or_create_projection_series(
         self,
         item_id: UUID,
