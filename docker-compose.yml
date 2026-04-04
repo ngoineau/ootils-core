@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ootils
+      POSTGRES_PASSWORD: ootils
+      POSTGRES_DB: ootils_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ootils -d ootils_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ootils:ootils@postgres:5432/ootils_dev
+      OOTILS_API_TOKEN: dev-token
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: uvicorn ootils_core.api.app:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
