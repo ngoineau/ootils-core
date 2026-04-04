@@ -243,6 +243,34 @@ class EngineStartupError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Explainability models (Sprint M3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CausalStep:
+    """One step in a causal chain explaining a planning result."""
+    step: int
+    node_id: Optional[UUID]
+    node_type: Optional[str]
+    edge_type: Optional[str]
+    fact: str  # human-readable description of this step
+
+
+@dataclass
+class Explanation:
+    """Structured, traversable causal explanation for a planning result node."""
+    explanation_id: UUID
+    calc_run_id: UUID
+    target_node_id: UUID
+    target_type: str          # e.g. 'Shortage', 'ProjectedInventory'
+    root_cause_node_id: Optional[UUID]
+    causal_path: list[CausalStep]
+    summary: str              # 1-line plain English
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
 # Allocation Engine results
 # ---------------------------------------------------------------------------
 

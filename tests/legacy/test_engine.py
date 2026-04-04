@@ -1,3 +1,7 @@
+# DEPRECATED: legacy tests from pre-graph-architecture. Skipped — models removed.
+import pytest
+pytestmark = pytest.mark.skip(reason="Legacy pre-graph API — InventoryState removed in Sprint 1")
+
 """Integration tests for the SupplyChainDecisionEngine."""
 
 import pytest
