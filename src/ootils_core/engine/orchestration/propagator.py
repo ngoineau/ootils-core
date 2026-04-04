@@ -19,6 +19,7 @@ from ootils_core.engine.kernel.graph.traversal import GraphTraversal
 from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
 from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.kernel.calc.projection import ProjectionKernel
+from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,14 @@ class PropagationEngine:
         dirty: DirtyFlagManager,
         calc_run_mgr: CalcRunManager,
         kernel: ProjectionKernel,
+        explanation_builder: Optional[ExplanationBuilder] = None,
     ) -> None:
         self._store = store
         self._traversal = traversal
         self._dirty = dirty
         self._calc_run_mgr = calc_run_mgr
         self._kernel = kernel
+        self._explanation_builder = explanation_builder
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -365,5 +368,28 @@ class PropagationEngine:
             has_shortage=result["has_shortage"],
             shortage_qty=result["shortage_qty"],
         )
+
+        # ------------------------------------------------------------------
+        # 7. Explainability (Sprint M3) — inline causal chain generation
+        # ------------------------------------------------------------------
+        if result["has_shortage"] and self._explanation_builder is not None:
+            # Reload node to get freshly persisted shortage fields
+            fresh_node = self._store.get_node(node_id, scenario_id)
+            if fresh_node is not None:
+                try:
+                    explanation = self._explanation_builder.build_pi_explanation(
+                        pi_node=fresh_node,
+                        calc_run_id=calc_run_id,
+                        store=self._store,
+                        db=db,
+                    )
+                    self._explanation_builder.persist(explanation, db)
+                except Exception as exc:  # noqa: BLE001
+                    # Explanation failure must never break the propagation pipeline
+                    logger.warning(
+                        "ExplanationBuilder failed for node %s: %s",
+                        node_id,
+                        exc,
+                    )
 
         return changed
