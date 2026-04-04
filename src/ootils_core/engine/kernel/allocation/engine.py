@@ -21,6 +21,7 @@ Design constraints:
 from __future__ import annotations
 
 import logging
+from datetime import date as _date_type
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -313,8 +314,6 @@ class AllocationEngine:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-from datetime import date as _date_type  # noqa: E402
 
 _SENTINEL_DATE = _date_type(9999, 12, 31)
 
