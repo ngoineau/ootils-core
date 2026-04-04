@@ -19,17 +19,24 @@ from ootils_core.api.dependencies import get_db, resolve_scenario_id
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/events", tags=["events"])
 
+# Must stay in sync with events.event_type CHECK constraint in migrations 002 + 006.
+# Any new event type requires both a DB migration (ALTER TABLE ... ADD CONSTRAINT)
+# and an addition here.
 VALID_EVENT_TYPES = {
-    "demand_qty_changed",
-    "demand_date_changed",
-    "supply_qty_changed",
+    # From migration 002 CHECK constraint
     "supply_date_changed",
-    "onhand_changed",
-    "capacity_changed",
-    "constraint_changed",
+    "supply_qty_changed",
+    "demand_qty_changed",
+    "onhand_updated",
     "policy_changed",
     "structure_changed",
-    "scenario_override_applied",
+    "scenario_created",
+    "calc_triggered",
+    "ingestion_complete",
+    "po_date_changed",
+    "test_event",
+    # From migration 006 CHECK constraint extension
+    "scenario_merge",
 }
 
 

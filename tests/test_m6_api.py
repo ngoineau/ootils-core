@@ -178,7 +178,7 @@ def test_post_event_inserts_to_db(app, auth_headers):
     with TestClient(app) as c:
         c.post(
             "/v1/events",
-            json={"event_type": "onhand_changed", "source": "manual"},
+            json={"event_type": "onhand_updated", "source": "manual"},
             headers=auth_headers,
         )
 
