@@ -20,6 +20,7 @@ from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
 from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.kernel.calc.projection import ProjectionKernel
 from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
+from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class PropagationEngine:
         calc_run_mgr: CalcRunManager,
         kernel: ProjectionKernel,
         explanation_builder: Optional[ExplanationBuilder] = None,
+        shortage_detector: Optional[ShortageDetector] = None,
     ) -> None:
         self._store = store
         self._traversal = traversal
@@ -44,6 +46,7 @@ class PropagationEngine:
         self._calc_run_mgr = calc_run_mgr
         self._kernel = kernel
         self._explanation_builder = explanation_builder
+        self._shortage_detector = shortage_detector
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -391,5 +394,29 @@ class PropagationEngine:
                         node_id,
                         exc,
                     )
+
+        # ------------------------------------------------------------------
+        # 8. Shortage Detection (Sprint M4) — detect and persist shortage records
+        # ------------------------------------------------------------------
+        if self._shortage_detector is not None:
+            try:
+                # Reload node to get freshly persisted state
+                fresh_node = self._store.get_node(node_id, scenario_id)
+                if fresh_node is not None:
+                    shortage = self._shortage_detector.detect(
+                        pi_node=fresh_node,
+                        calc_run_id=calc_run_id,
+                        scenario_id=scenario_id,
+                        db=db,
+                    )
+                    if shortage is not None:
+                        self._shortage_detector.persist(shortage, db)
+            except Exception as exc:  # noqa: BLE001
+                # Shortage detection failure must never break the propagation pipeline
+                logger.warning(
+                    "ShortageDetector failed for node %s: %s",
+                    node_id,
+                    exc,
+                )
 
         return changed

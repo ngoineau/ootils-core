@@ -271,6 +271,29 @@ class Explanation:
 
 
 # ---------------------------------------------------------------------------
+# Shortage Detection models (Sprint M4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ShortageRecord:
+    """A detected inventory shortage on a ProjectedInventory node."""
+    shortage_id: UUID
+    scenario_id: UUID
+    pi_node_id: UUID        # the PI node with closing_stock < 0
+    item_id: Optional[UUID]
+    location_id: Optional[UUID]
+    shortage_date: date     # time_span_start of the PI node
+    shortage_qty: Decimal   # abs(closing_stock)
+    severity_score: Decimal  # qty × days_at_shortage × unit_cost_proxy
+    explanation_id: Optional[UUID]  # FK to explanations (M3)
+    calc_run_id: UUID
+    status: str = "active"  # active | resolved
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
 # Allocation Engine results
 # ---------------------------------------------------------------------------
 
