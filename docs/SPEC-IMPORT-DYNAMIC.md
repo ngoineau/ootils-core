@@ -49,12 +49,15 @@ Ces événements sont consommés par le moteur de propagation qui recalcule les 
 
 ## 2. Flux : On-Hand Supply
 
-### Champs CSV batch
+> **Pourquoi TSV plutôt que CSV ?**
+> Les données supply chain contiennent fréquemment des virgules dans les libellés (noms d'articles, descriptions, adresses). Le tab comme séparateur élimine ce risque sans guillemets d'échappement. SAP exporte nativement en tab (transactions SE16, MB52, ME2M). L'extension `.tsv` est reconnue par Excel, pandas, et tous les outils ETL standard.
+
+### Champs TSV batch
 
 ```
-item_external_id,location_external_id,quantity,uom,as_of_date,lot_number
-SKU-001,DC-PARIS,450,EA,2026-04-05,LOT-2024-001
-SKU-002,DC-PARIS,120,EA,2026-04-05,
+item_external_id	location_external_id	quantity	uom	as_of_date	lot_number
+SKU-001	DC-PARIS	450	EA	2026-04-05	LOT-2024-001
+SKU-002	DC-PARIS	120	EA	2026-04-05	
 ```
 
 **Champs obligatoires :** `item_external_id`, `location_external_id`, `quantity`, `uom`, `as_of_date`  
@@ -87,12 +90,12 @@ POST /v1/events
 
 ## 3. Flux : Purchase Orders
 
-### Champs CSV
+### Champs TSV
 
 ```
-po_number,line_number,item_external_id,supplier_external_id,location_external_id,quantity,uom,expected_date,status
-PO-2026-001,1,SKU-001,SUP-001,DC-PARIS,500,EA,2026-04-20,confirmed
-PO-2026-001,2,SKU-002,SUP-001,DC-PARIS,200,EA,2026-04-22,pending
+po_number	line_number	item_external_id	supplier_external_id	location_external_id	quantity	uom	expected_date	status
+PO-2026-001	1	SKU-001	SUP-001	DC-PARIS	500	EA	2026-04-20	confirmed
+PO-2026-001	2	SKU-002	SUP-001	DC-PARIS	200	EA	2026-04-22	pending
 ```
 
 **Clé métier :** `(po_number, line_number)`  
@@ -133,12 +136,12 @@ POST /v1/events
 
 ## 4. Flux : Customer Orders
 
-### Champs CSV
+### Champs TSV
 
 ```
-order_number,line_number,item_external_id,location_external_id,quantity,uom,requested_date,confirmed_date,status
-CO-2026-001,1,SKU-001,DC-PARIS,100,EA,2026-04-15,2026-04-15,confirmed
-CO-2026-001,2,SKU-003,DC-PARIS,50,EA,2026-04-15,,pending
+order_number	line_number	item_external_id	location_external_id	quantity	uom	requested_date	confirmed_date	status
+CO-2026-001	1	SKU-001	DC-PARIS	100	EA	2026-04-15	2026-04-15	confirmed
+CO-2026-001	2	SKU-003	DC-PARIS	50	EA	2026-04-15		pending
 ```
 
 **Clé métier :** `(order_number, line_number)`  
@@ -174,13 +177,13 @@ POST /v1/events
 
 ## 5. Flux : Forecasts
 
-### Champs CSV
+### Champs TSV
 
 ```
-item_external_id,location_external_id,forecast_date,quantity,uom,bucket_type,source
-SKU-001,DC-PARIS,2026-04-05,15,EA,day,statistical
-SKU-001,DC-PARIS,2026-W15,90,EA,week,consensus
-SKU-001,DC-PARIS,2026-04,350,EA,month,budget
+item_external_id	location_external_id	forecast_date	quantity	uom	bucket_type	source
+SKU-001	DC-PARIS	2026-04-05	15	EA	day	statistical
+SKU-001	DC-PARIS	2026-W15	90	EA	week	consensus
+SKU-001	DC-PARIS	2026-04	350	EA	month	budget
 ```
 
 **Clé métier :** `(item_external_id, location_external_id, forecast_date, bucket_type, source)`  
@@ -208,12 +211,12 @@ Les forecasts ne sont pas envoyés en streaming — ils résultent de processus 
 
 ## 6. Flux : Work Orders
 
-### Champs CSV
+### Champs TSV
 
 ```
-wo_number,item_external_id,location_external_id,quantity,uom,start_date,end_date,status
-WO-2026-001,SKU-FIN-001,USINE-NORD,200,EA,2026-04-10,2026-04-15,released
-WO-2026-002,SKU-FIN-002,USINE-NORD,100,EA,2026-04-12,2026-04-18,planned
+wo_number	item_external_id	location_external_id	quantity	uom	start_date	end_date	status
+WO-2026-001	SKU-FIN-001	USINE-NORD	200	EA	2026-04-10	2026-04-15	released
+WO-2026-002	SKU-FIN-002	USINE-NORD	100	EA	2026-04-12	2026-04-18	planned
 ```
 
 **Clé métier :** `wo_number`  
@@ -249,12 +252,12 @@ POST /v1/events
 
 ## 7. Flux : Transfers
 
-### Champs CSV
+### Champs TSV
 
 ```
-transfer_number,item_external_id,from_location,to_location,quantity,uom,ship_date,expected_receipt_date,status
-TR-2026-001,SKU-001,USINE-NORD,DC-PARIS,300,EA,2026-04-08,2026-04-10,planned
-TR-2026-002,SKU-002,DC-PARIS,DC-LYON,150,EA,2026-04-09,2026-04-11,in_transit
+transfer_number	item_external_id	from_location	to_location	quantity	uom	ship_date	expected_receipt_date	status
+TR-2026-001	SKU-001	USINE-NORD	DC-PARIS	300	EA	2026-04-08	2026-04-10	planned
+TR-2026-002	SKU-002	DC-PARIS	DC-LYON	150	EA	2026-04-09	2026-04-11	in_transit
 ```
 
 **Clé métier :** `transfer_number`  
@@ -369,13 +372,13 @@ POST /v1/events
 
 | # | Sujet | Description | Priorité |
 |---|-------|-------------|----------|
-| 1 | Endpoint `/v1/import/batch/{type}` | Non encore implémenté — à créer (sprint 2). Format multipart/form-data ou JSON body avec CSV encodé en base64 ? | Haute |
+| 1 | Endpoint `/v1/import/batch/{type}` | Non encore implémenté — à créer (sprint 2). Format multipart/form-data ou JSON body avec TSV encodé en base64 ? | Haute |
 | 2 | `on_hand_update` vs `onhand_updated` | Le task brief utilise `on_hand_update` mais la contrainte CHECK DB et l'API utilisent `onhand_updated`. **Retenir `onhand_updated`** comme canonical. | Résolu |
 | 3 | Payload events streaming | L'API events n'accepte pas de `payload` libre (pas de JSONB) — les champs sont typés (`old_date`, `new_date`, etc.). Les exemples de cette spec sont alignés sur le schéma réel. | Résolu |
-| 4 | Gestion lot (lot_number) | Champ présent dans On-Hand CSV mais pas de nœud `Lot` dans le graphe actuel. Modélisation à confirmer. | Moyenne |
+| 4 | Gestion lot (lot_number) | Champ présent dans On-Hand TSV mais pas de nœud `Lot` dans le graphe actuel. Modélisation à confirmer. | Moyenne |
 | 5 | Transfers → deux nœuds | La création atomique des deux nœuds (TransferDemand + TransferSupply) et de leur edge doit être transactionnelle. | Haute |
 | 6 | Forecasts Full replace par source | Full replace scoped par `(item × location × source)` ou global `(item × location)` ? Impacte les scénarios multi-sources (stat + budget coexistants). | Haute |
 | 7 | Auth batch endpoint | Bearer token comme `/v1/events` ? Ou API key dédiée pour les jobs ERP ? | Moyenne |
 | 8 | Idempotence batch | Rejouer le même fichier deux fois doit être idempotent. Géré par UPSERT mais à valider sur Full replace. | Haute |
-| 9 | `partially_received` PO | Quantité résiduelle = quantité originale - quantité reçue. Ce calcul est-il dans le payload CSV ou calculé par Ootils à partir d'un champ `received_quantity` ? | Moyenne |
+| 9 | `partially_received` PO | Quantité résiduelle = quantité originale - quantité reçue. Ce calcul est-il dans le payload TSV ou calculé par Ootils à partir d'un champ `received_quantity` ? | Moyenne |
 | 10 | Streaming WO composants | Les consommations BOM liées à un WO released génèrent-elles des `demand_qty_changed` automatiquement ou faut-il les envoyer explicitement ? | Moyenne |
