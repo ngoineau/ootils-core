@@ -512,9 +512,9 @@ def _seed_onhand_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump, ser
     pi_pump  = _find_first_pi(conn, series_pump)
     pi_valve = _find_first_pi(conn, series_valve)
     if pi_pump:
-        _insert_edge(conn, "contributes_to:OnHand-PUMP-01:DC-ATL", "contributes_to", oh_pump_id, pi_pump)
+        _insert_edge(conn, "contributes_to:OnHand-PUMP-01:DC-ATL", "replenishes", oh_pump_id, pi_pump)
     if pi_valve:
-        _insert_edge(conn, "contributes_to:OnHand-VALVE-02:DC-LAX", "contributes_to", oh_valve_id, pi_valve)
+        _insert_edge(conn, "contributes_to:OnHand-VALVE-02:DC-LAX", "replenishes", oh_valve_id, pi_valve)
     print("  ✓ Edges: OnHandSupply → ProjectedInventory[0] (contributes_to)")
 
 
@@ -617,7 +617,7 @@ def _seed_forecast_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump, s
             LIMIT 1
         """, (series_id, capped_day)).fetchone()
         if pi_row:
-            _insert_edge(conn, f"drives:{fc_node_id}:pi{capped_day}", "drives", fc_node_id, pi_row["node_id"])
+            _insert_edge(conn, f"drives:{fc_node_id}:pi{capped_day}", "consumes", fc_node_id, pi_row["node_id"])
             edge_count += 1
 
     print(f"  ✓ Edges: ForecastDemand → ProjectedInventory (drives) — {edge_count} edges")
@@ -662,7 +662,7 @@ def _seed_co_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump, series_
             LIMIT 1
         """, (series_id, bucket)).fetchone()
         if pi_row:
-            _insert_edge(conn, f"drives:{co_id}:bucket{bucket}", "drives", co_id, pi_row["node_id"])
+            _insert_edge(conn, f"drives:{co_id}:bucket{bucket}", "consumes", co_id, pi_row["node_id"])
 
     print("  ✓ Edges: CustomerOrderDemand → ProjectedInventory (drives)")
 
