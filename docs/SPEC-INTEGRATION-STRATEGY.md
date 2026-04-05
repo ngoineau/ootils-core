@@ -12,7 +12,7 @@
 │                    SYSTÈMES SOURCES                         │
 │  ERP (SAP/Dynamics/Sage)  WMS  EDI  Excel  API tierces     │
 └──────────┬──────────────────────────────────────────────────┘
-           │ CSV/SFTP (batch)  |  REST/Webhook (streaming)
+           │ TSV/SFTP (batch)  |  REST/Webhook (streaming)
            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              COUCHE D'INTÉGRATION OOTILS                    │
@@ -33,7 +33,7 @@
            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                       OUTPUTS                               │
-│  UI Ootils  |  Export CSV  |  Recommandations → ERP (P2)   │
+│  UI Ootils  |  Export TSV  |  Recommandations → ERP (P2)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,27 +45,27 @@
 
 | Connecteur | Source | Données | Direction | Protocole | Priorité | Complexité |
 |------------|--------|---------|-----------|-----------|----------|------------|
-| Excel/CSV manuel | Fichier local | Toutes | Inbound | Upload UI ou SFTP | P0 | Faible |
+| Excel/TSV manuel | Fichier local | Toutes | Inbound | Upload UI ou SFTP | P0 | Faible |
 | API REST générique | Tout système | Toutes | Inbound | REST POST | P0 | Faible |
 | SAP (BAPI/RFC) | SAP ECC/S4 | PO, Stock, CO, Items | Inbound | RFC/REST | P1 | Haute |
 | MS Dynamics | D365 F&O | PO, Stock, CO | Inbound | REST OData | P1 | Moyenne |
 | WMS générique | WMS | On-Hand, Transfers | Inbound | REST/SFTP | P1 | Moyenne |
 | EDI 850/856/810 | Partenaires | CO, PO, ASN | Inbound | SFTP/AS2 | P1 | Haute |
 | Webhook ERP | ERP moderne | Événements temps réel | Inbound | Webhook POST | P2 | Faible |
-| Recommendations → ERP | Ootils | PlannedSupply | Outbound | REST/CSV | P2 | Moyenne |
+| Recommendations → ERP | Ootils | PlannedSupply | Outbound | REST/TSV | P2 | Moyenne |
 
 **Règle de priorisation :** P0 = nécessaire au premier POC client / zéro dépendance ERP ; P1 = nécessaire à la signature d'un client récurrent ; P2 = différenciateur compétitif post-product-market-fit.
 
 ---
 
-## 3. Format standard Ootils (batch CSV)
+## 3. Format standard Ootils (batch TSV)
 
 ### Conventions
 
 | Paramètre | Valeur |
 |-----------|--------|
 | Encoding | UTF-8 (BOM interdit) |
-| Séparateur | Virgule `,` |
+| Séparateur | Tabulation `\t` |
 | Dates | ISO 8601 : `YYYY-MM-DD` |
 | Décimaux | Point `.` (jamais virgule) |
 | Boolean | `true` / `false` (minuscules) |
@@ -73,16 +73,19 @@
 | Header | Obligatoire en ligne 1 |
 | Line endings | LF (`\n`) — CRLF toléré à l'import |
 
+> **Pourquoi TSV plutôt que CSV ?**
+> Les données supply chain contiennent fréquemment des virgules dans les libellés (noms d'articles, descriptions, adresses). Le tab comme séparateur élimine ce risque sans guillemets d'échappement. SAP exporte nativement en tab (transactions SE16, MB52, ME2M). L'extension `.tsv` est reconnue par Excel, pandas, et tous les outils ETL standard.
+
 ### Nommage des fichiers
 
 ```
-{type}_{source}_{YYYYMMDD}_{HHMMSS}.csv
+{type}_{source}_{YYYYMMDD}_{HHMMSS}.tsv
 
 Exemples :
-  items_sap_20260405_090000.csv
-  purchase_orders_dynamics_20260405_143022.csv
-  on_hand_wms_20260405_060000.csv
-  customer_orders_edi_20260405_120000.csv
+  items_sap_20260405_090000.tsv
+  purchase_orders_dynamics_20260405_143022.tsv
+  on_hand_wms_20260405_060000.tsv
+  customer_orders_edi_20260405_120000.tsv
 ```
 
 ### Gestion des codes ERP vs UUIDs Ootils
@@ -194,32 +197,32 @@ Ootils calcule
   → UI affiche recommandation (statut : DRAFT)
   → Planificateur révise / ajuste / valide
   → Statut → APPROVED
-  → Export CSV ou API push vers ERP
+  → Export TSV ou API push vers ERP
 ```
 
 Aucun mécanisme d'auto-push ne sera implémenté, même en Phase 3. Le push API vers ERP reste déclenché par une action utilisateur.
 
-### 5.3 Format export recommandations (CSV)
+### 5.3 Format export recommandations (TSV)
 
-```csv
-recommendation_type,item_external_id,location_external_id,supplier_external_id,quantity,uom,suggested_date,priority,reason
-planned_po,SKU-001,DC-PARIS,SUP-001,500,EA,2026-04-20,high,Shortage detected J+12
-planned_po,SKU-042,DC-LYON,,1200,KG,2026-04-18,critical,Stockout risk J+8
-shortage_alert,SKU-007,DC-PARIS,,0,EA,2026-04-15,high,Zero stock projected
+```tsv
+recommendation_type	item_external_id	location_external_id	supplier_external_id	quantity	uom	suggested_date	priority	reason
+planned_po	SKU-001	DC-PARIS	SUP-001	500	EA	2026-04-20	high	Shortage detected J+12
+planned_po	SKU-042	DC-LYON		1200	KG	2026-04-18	critical	Stockout risk J+8
+shortage_alert	SKU-007	DC-PARIS		0	EA	2026-04-15	high	Zero stock projected
 ```
 
 ---
 
 ## 6. Roadmap d'intégration
 
-### Phase 0 — Quick win CSV/Excel (aujourd'hui)
+### Phase 0 — Quick win TSV/Excel (aujourd'hui)
 
 **Objectif :** premier POC client sans aucun développement connecteur.
 
-- Upload CSV manuel via UI (page Import dédiée ou page Events)
+- Upload TSV manuel via UI (page Import dédiée ou page Events)
 - Support SFTP entrant optionnel (dépôt fichier → polling)
 - Couvre 100% des besoins POC si le client accepte d'exporter manuellement depuis son ERP
-- Templates CSV fournis par Ootils pour chaque entité
+- Templates TSV fournis par Ootils pour chaque entité
 
 ### Phase 1 — API REST générique (POC → Pilot)
 
@@ -244,7 +247,7 @@ shortage_alert,SKU-007,DC-PARIS,,0,EA,2026-04-15,high,Zero stock projected
 
 **Objectif :** boucle fermée planificateur → ERP, toujours avec validation humaine.
 
-- Export recommandations en CSV téléchargeable (disponible dès Phase 1)
+- Export recommandations en TSV téléchargeable (disponible dès Phase 1)
 - Push API vers ERP (SAP BAPI create PO, Dynamics PO API) avec écran de validation obligatoire
 - Historique des recommandations acceptées / modifiées / rejetées (feedback loop futur ML)
 
