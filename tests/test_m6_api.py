@@ -625,3 +625,56 @@ def test_openapi_schema_accessible(client, auth_headers):
     schema = resp.json()
     assert schema["info"]["title"] == "Ootils Core API"
     assert schema["info"]["version"] == "1.0.0"
+
+
+def test_post_simulate_invalid_node_returns_422(app, auth_headers):
+    """
+    Non-regression #48: POST /v1/simulate with an invalid node_id must return 422,
+    not 500. All overrides fail → 422 with failed_overrides detail.
+    """
+    mock_conn = _mock_db()
+    new_scenario = Scenario(
+        scenario_id=uuid4(),
+        name="bad-node-sim",
+        parent_scenario_id=BASELINE_ID,
+        is_baseline=False,
+        status="active",
+    )
+
+    from ootils_core.engine.scenario.manager import ScenarioManager
+
+    with patch.object(ScenarioManager, "create_scenario", return_value=new_scenario), \
+         patch.object(
+             ScenarioManager,
+             "apply_override",
+             side_effect=ValueError("Node 00000000-0000-0000-0000-000000000000 not found in scenario"),
+         ):
+
+        def override_db():
+            yield mock_conn
+
+        app.dependency_overrides[get_db] = override_db
+
+        with TestClient(app) as c:
+            resp = c.post(
+                "/v1/simulate",
+                json={
+                    "scenario_name": "bad-node-sim",
+                    "overrides": [
+                        {
+                            "node_id": "00000000-0000-0000-0000-000000000000",
+                            "field_name": "shortage_qty",
+                            "new_value": "0",
+                        }
+                    ],
+                },
+                headers=auth_headers,
+            )
+
+    app.dependency_overrides.clear()
+    assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    detail = data.get("detail", {})
+    assert "failed_overrides" in detail, f"Expected failed_overrides in detail: {detail}"
+    assert len(detail["failed_overrides"]) == 1
+    assert "not found" in detail["failed_overrides"][0]["error"].lower()
