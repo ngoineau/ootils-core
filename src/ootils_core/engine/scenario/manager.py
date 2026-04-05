@@ -217,14 +217,20 @@ class ScenarioManager:
         """
         _validate_field_name(field_name)
 
-        # 1. Fetch current node value
+        # 1. Fetch current node value — also validates that the node exists
         row = db.execute(
             f"SELECT {field_name} FROM nodes WHERE node_id = %s AND scenario_id = %s",
             (node_id, scenario_id),
         ).fetchone()
 
+        if row is None:
+            raise ValueError(
+                f"Node {node_id} not found in scenario {scenario_id}. "
+                "Override cannot be applied to a non-existent node."
+            )
+
         old_value: Optional[str] = None
-        if row is not None and row[field_name] is not None:
+        if row[field_name] is not None:
             old_value = str(row[field_name])
 
         now = datetime.now(timezone.utc)

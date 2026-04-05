@@ -71,6 +71,7 @@ async def create_simulation(
 
     # Apply overrides
     applied = 0
+    failed_overrides: list[dict] = []
     for override in body.overrides:
         try:
             manager.apply_override(
@@ -82,13 +83,28 @@ async def create_simulation(
                 db=db,
             )
             applied += 1
-        except ValueError as exc:
+        except Exception as exc:
             logger.warning(
-                "simulate.override_skipped node=%s field=%s: %s",
+                "simulate.override_failed node=%s field=%s: %s",
                 override.node_id,
                 override.field_name,
                 exc,
             )
+            failed_overrides.append({
+                "node_id": str(override.node_id),
+                "field_name": override.field_name,
+                "error": str(exc),
+            })
+
+    # If all overrides failed, return 422 with details instead of 500
+    if body.overrides and applied == 0 and failed_overrides:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "All overrides failed validation — no changes applied.",
+                "failed_overrides": failed_overrides,
+            },
+        )
 
     logger.info(
         "simulate.created scenario=%s base=%s overrides=%d",
