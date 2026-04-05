@@ -250,10 +250,14 @@ def test_07_migration_002_deferrable_fk_on_nodes_projection_series(conn):
         VALUES (%s::UUID, %s::UUID, %s::UUID, %s::UUID, 'Day')
     """, (series_id, scenario_id, item_id, location_id))
 
-    # Commit succeeds — FK constraint satisfied within the same transaction
-    # (fixture will rollback after test, but we verify commit would not fail)
+    # Commit — the deferred FK is validated HERE, not at insert time.
+    # If DEFERRABLE INITIALLY DEFERRED is not set correctly, this raises.
+    # The fixture will rollback on teardown, so state is cleaned up.
+    conn.commit()
+
+    # Verify the node persisted through commit
     row = conn.execute("SELECT node_id FROM nodes WHERE node_id = %s::UUID", (node_id,)).fetchone()
-    assert row is not None, "Node not found after deferred FK insert sequence"
+    assert row is not None, "Node not found after deferred FK commit — constraint may have prevented commit"
 
 
 # ---------------------------------------------------------------------------
