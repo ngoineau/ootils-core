@@ -131,18 +131,15 @@ def test_29_docker_compose_up_build():
         pytest.skip(f"docker-compose.yml not found at {COMPOSE_FILE}")
 
     env_file = REPO_ROOT / ".env"
-    if not env_file.exists():
-        # Create minimal .env for smoke test
-        env_content = (
-            "POSTGRES_USER=ootils\n"
-            "POSTGRES_PASSWORD=ootils\n"
-            "POSTGRES_DB=ootils_smoke\n"
-            f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
-        )
-        env_file.write_text(env_content)
-        created_env = True
-    else:
-        created_env = False
+    # Bug 5 fix: always use ephemeral .env, never reuse prod/dev .env
+    existing_env_backup = env_file.read_text(encoding="utf-8") if env_file.exists() else None
+    smoke_env_content = (
+        "POSTGRES_USER=ootils\n"
+        "POSTGRES_PASSWORD=ootils\n"
+        "POSTGRES_DB=ootils_smoke\n"
+        f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
+    )
+    env_file.write_text(smoke_env_content)
 
     try:
         # Build and start
@@ -183,7 +180,10 @@ def test_29_docker_compose_up_build():
             ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
             capture_output=True, timeout=60, cwd=str(REPO_ROOT),
         )
-        if created_env and env_file.exists():
+        # Restore original .env or remove ephemeral one
+        if existing_env_backup is not None:
+            env_file.write_text(existing_env_backup)
+        elif env_file.exists():
             env_file.unlink()
 
 
@@ -203,17 +203,15 @@ def test_30_full_smoke_migrate_seed_health_issues():
         pytest.skip(f"docker-compose.yml not found at {COMPOSE_FILE}")
 
     env_file = REPO_ROOT / ".env"
-    created_env = False
-
-    if not env_file.exists():
-        env_content = (
-            "POSTGRES_USER=ootils\n"
-            "POSTGRES_PASSWORD=ootils\n"
-            "POSTGRES_DB=ootils_smoke30\n"
-            f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
-        )
-        env_file.write_text(env_content)
-        created_env = True
+    # Bug 5 fix: always use ephemeral .env, never reuse prod/dev .env
+    existing_env_backup = env_file.read_text(encoding="utf-8") if env_file.exists() else None
+    env_content = (
+        "POSTGRES_USER=ootils\n"
+        "POSTGRES_PASSWORD=ootils\n"
+        "POSTGRES_DB=ootils_smoke30\n"
+        f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
+    )
+    env_file.write_text(env_content)
 
     db_url = "postgresql://ootils:ootils@localhost:5432/ootils_smoke30"
 
@@ -224,8 +222,9 @@ def test_30_full_smoke_migrate_seed_health_issues():
             capture_output=True, text=True, timeout=300,
             cwd=str(REPO_ROOT),
         )
+        # Bug 2 fix: FAIL (not skip) when Docker is available but compose fails
         if up_result.returncode != 0:
-            pytest.skip(f"docker compose up failed: {up_result.stderr[-1000:]}")
+            pytest.fail(f"docker compose up failed: {up_result.stderr[-1000:]}")
 
         # 2. Wait for postgres healthcheck
         max_wait = 60
@@ -274,8 +273,9 @@ def test_30_full_smoke_migrate_seed_health_issues():
             except Exception:
                 pass
 
+        # Bug 2 fix: FAIL (not skip) when Docker is running but API is unreachable
         if not api_ready:
-            pytest.skip("API not reachable on localhost:8000 — port may not be exposed")
+            pytest.fail("API not reachable on localhost:8000 — port may not be exposed in docker-compose.yml")
 
         # 5. Health check
         resp = requests.get("http://localhost:8000/health", timeout=10)
@@ -298,5 +298,8 @@ def test_30_full_smoke_migrate_seed_health_issues():
             ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
             capture_output=True, timeout=60, cwd=str(REPO_ROOT),
         )
-        if created_env and env_file.exists():
+        # Restore original .env or remove ephemeral one
+        if existing_env_backup is not None:
+            env_file.write_text(existing_env_backup)
+        elif env_file.exists():
             env_file.unlink()

@@ -152,10 +152,12 @@ def test_15_seed_idempotent(migrated_db):
             "(expected idempotent ON CONFLICT DO NOTHING)"
         )
     else:
-        # Acceptable failure: ensure the DB still has all expected tables
-        tables_query = conn.execute("""
-            SELECT tablename FROM pg_tables WHERE schemaname = 'public'
-        """).fetchall()
+        # Acceptable failure: open a fresh connection to verify DB integrity
+        # (the previous `with psycopg.connect(...)` block is already closed)
+        with psycopg.connect(migrated_db, row_factory=dict_row) as check_conn:
+            tables_query = check_conn.execute("""
+                SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+            """).fetchall()
         tables = {r["tablename"] for r in tables_query}
         assert "nodes" in tables, "DB corrupted after failed second seed run"
 
