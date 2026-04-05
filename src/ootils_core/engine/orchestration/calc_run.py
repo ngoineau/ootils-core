@@ -39,7 +39,7 @@ class CalcRunManager:
         """
         # Try advisory lock — hashtext truncates to int32 internally
         row = db.execute(
-            "SELECT pg_try_advisory_lock(hashtext(%s)) AS locked",
+            "SELECT pg_try_advisory_lock(('x' || md5(%s))::bit(64)::bigint) AS locked",
             (str(scenario_id),),
         ).fetchone()
 
@@ -153,7 +153,7 @@ class CalcRunManager:
 
         # Release advisory lock
         db.execute(
-            "SELECT pg_advisory_unlock(hashtext(%s))",
+            "SELECT pg_advisory_unlock(('x' || md5(%s))::bit(64)::bigint)",
             (str(run.scenario_id),),
         )
 
@@ -163,27 +163,56 @@ class CalcRunManager:
         error: str,
         db,
     ) -> None:
-        """Mark a calc run as failed with an error message."""
+        """Mark a calc run as failed with an error message.
+
+        Uses autocommit on the failure UPDATE so the audit record is persisted
+        even if the caller's transaction rolls back (HIGH-4).
+        """
         now = datetime.now(timezone.utc)
         run.status = "failed"
         run.completed_at = now
         run.error_message = error
 
-        db.execute(
-            """
-            UPDATE calc_runs
-            SET status = 'failed',
-                completed_at = %s,
-                error_message = %s
-            WHERE calc_run_id = %s
-            """,
-            (now, error, run.calc_run_id),
-        )
+        # Persist failure record independently of the caller's transaction.
+        # autocommit=True ensures the UPDATE commits immediately even if the
+        # outer transaction is about to roll back.
+        try:
+            with db.connection.cursor() as fail_cur:
+                prev_autocommit = db.connection.autocommit
+                db.connection.autocommit = True
+                try:
+                    fail_cur.execute(
+                        """
+                        UPDATE calc_runs
+                        SET status = 'failed',
+                            completed_at = %s,
+                            error_message = %s
+                        WHERE calc_run_id = %s
+                        """,
+                        (now, error, run.calc_run_id),
+                    )
+                finally:
+                    db.connection.autocommit = prev_autocommit
+        except Exception:
+            # Last-resort fallback: use the connection as-is
+            try:
+                db.execute(
+                    """
+                    UPDATE calc_runs
+                    SET status = 'failed',
+                        completed_at = %s,
+                        error_message = %s
+                    WHERE calc_run_id = %s
+                    """,
+                    (now, error, run.calc_run_id),
+                )
+            except Exception:
+                pass
 
-        # Release advisory lock (best-effort on failure)
+        # Release advisory lock (best-effort on failure) — HIGH-3: use 64-bit hash
         try:
             db.execute(
-                "SELECT pg_advisory_unlock(hashtext(%s))",
+                "SELECT pg_advisory_unlock(('x' || md5(%s))::bit(64)::bigint)",
                 (str(run.scenario_id),),
             )
         except Exception:

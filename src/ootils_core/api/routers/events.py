@@ -7,7 +7,7 @@ import logging
 from datetime import date
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -57,7 +57,6 @@ class EventResponse(BaseModel):
     status: str
     scenario_id: UUID
     affected_nodes_estimate: int
-    calc_run_id: UUID
 
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -84,8 +83,8 @@ async def create_event(
         effective_scenario_id = scenario_id
 
     from datetime import datetime, timezone
+    from uuid import uuid4
     event_id = uuid4()
-    calc_run_id = uuid4()
     now = datetime.now(timezone.utc)
 
     db.execute(
@@ -123,5 +122,4 @@ async def create_event(
         status="queued",
         scenario_id=effective_scenario_id,
         affected_nodes_estimate=0,
-        calc_run_id=calc_run_id,
     )

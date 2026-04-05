@@ -526,6 +526,7 @@ class GraphStore:
             """
             UPDATE nodes
             SET closing_stock = %s,
+                is_dirty      = FALSE,
                 updated_at    = %s
             WHERE node_id = %s AND scenario_id = %s
             """,

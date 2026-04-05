@@ -7,6 +7,6 @@ COPY pyproject.toml .
 COPY src/ /app/src/
 COPY scripts/ /app/scripts/
 
-RUN pip install --no-cache-dir -e ".[dev]"
+RUN pip install --no-cache-dir .
 
 CMD ["uvicorn", "ootils_core.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
