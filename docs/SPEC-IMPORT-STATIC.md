@@ -55,12 +55,12 @@ location_id UUID PK | name TEXT | location_type TEXT (enum) | country TEXT | tim
 
 ## 2. Principes directeurs
 
-1. **UUID natif** — Tous les PKs sont des UUID v4 générés côté serveur. Les imports CSV utilisent des `external_id` (code métier) mappés à l'UUID interne.
+1. **UUID natif** — Tous les PKs sont des UUID v4 générés côté serveur. Les imports TSV utilisent des `external_id` (code métier) mappés à l'UUID interne.
 2. **Upsert par défaut** — Le comportement standard est `INSERT ... ON CONFLICT DO UPDATE`. Aucun import ne rejette silencieusement des données existantes sans flag explicite.
-3. **Validation avant persistence** — Les erreurs de validation sont retournées en bloc (pas row-by-row) avec références aux lignes CSV concernées.
+3. **Validation avant persistence** — Les erreurs de validation sont retournées en bloc (pas row-by-row) avec références aux lignes TSV concernées.
 4. **Idempotence** — Un import rejoué avec les mêmes données ne doit pas changer l'état du système.
 5. **Traçabilité** — Chaque import génère un `ingestion_complete` event dans la table `events`.
-6. **Format CSV universel** — Premier format car compatible avec tous les ERP/WMS (SAP, Oracle, JDE). Le JSON est accepté pour les intégrations API directes.
+6. **Format TSV universel** — Premier format car compatible avec tous les ERP/WMS (SAP, Oracle, JDE). Le JSON est accepté pour les intégrations API directes.
 
 ---
 
@@ -94,42 +94,45 @@ Les dépendances entre entités imposent l'ordre suivant :
 
 > **Note :** `item_id` (UUID interne) est généré par le serveur. L'`external_id` est le référentiel côté ERP. Il est stocké en colonne dédiée et indexé pour les lookups.
 
-### 4.2 Format CSV
+### 4.2 Format TSV
 
-**Nom de fichier recommandé :** `items.csv`
+**Nom de fichier recommandé :** `items.tsv`
 
-```csv
-external_id,name,item_type,uom,status
-SKU-PUMP-01,Hydraulic Pump 12V,finished_good,EA,active
-SKU-PUMP-02,Hydraulic Pump 24V,finished_good,EA,active
-SKU-COMP-001,Impeller Blade,component,EA,active
-SKU-RAW-STEEL,Steel Sheet 2mm,raw_material,KG,active
-SKU-SEMI-BODY,Pump Body (machined),semi_finished,EA,phase_out
-SKU-BOX-STD,Standard Packaging Box,component,EA,active
-SKU-FILTER-01,Oil Filter 10µm,component,EA,active
-SKU-MOTOR-12V,DC Motor 12V 5A,component,EA,active
-SKU-SEAL-KIT,Hydraulic Seal Kit,component,EA,obsolete
-SKU-FG-ASSEMBLY,Pump Assembly Unit,finished_good,EA,active
+```tsv
+external_id	name	item_type	uom	status
+SKU-PUMP-01	Hydraulic Pump 12V	finished_good	EA	active
+SKU-PUMP-02	Hydraulic Pump 24V	finished_good	EA	active
+SKU-COMP-001	Impeller Blade	component	EA	active
+SKU-RAW-STEEL	Steel Sheet 2mm	raw_material	KG	active
+SKU-SEMI-BODY	Pump Body (machined)	semi_finished	EA	phase_out
+SKU-BOX-STD	Standard Packaging Box	component	EA	active
+SKU-FILTER-01	Oil Filter 10µm	component	EA	active
+SKU-MOTOR-12V	DC Motor 12V 5A	component	EA	active
+SKU-SEAL-KIT	Hydraulic Seal Kit	component	EA	obsolete
+SKU-FG-ASSEMBLY	Pump Assembly Unit	finished_good	EA	active
 ```
 
 **Colonnes obligatoires :** `external_id`, `name`  
 **Colonnes facultatives :** toutes les autres (valeurs par défaut appliquées si absent)  
-**Encodage :** UTF-8, séparateur `,`, guillemets pour les champs contenant des virgules
+**Encodage :** UTF-8, séparateur `\t`, pas de guillemets requis
+
+> **Pourquoi TSV plutôt que CSV ?**
+> Les données supply chain contiennent fréquemment des virgules dans les libellés (noms d'articles, descriptions, adresses). Le tab comme séparateur élimine ce risque sans guillemets d'échappement. SAP exporte nativement en tab (transactions SE16, MB52, ME2M). L'extension `.tsv` est reconnue par Excel, pandas, et tous les outils ETL standard.
 
 ### 4.3 Endpoint API
 
 #### `POST /v1/import/items`
 
 **Content-Type supportés :**
-- `multipart/form-data` (upload CSV)
+- `multipart/form-data` (upload TSV)
 - `application/json` (tableau JSON)
 
-**Request — CSV upload :**
+**Request — TSV upload :**
 ```http
 POST /v1/import/items
 Content-Type: multipart/form-data
 
-file=<items.csv>
+file=<items.tsv>
 conflict_strategy=upsert    # upsert | reject_duplicates
 dry_run=false               # true = validation sans persistence
 ```
@@ -237,22 +240,22 @@ Content-Type: application/json
 
 > **Hiérarchie :** La colonne `parent_external_id` permet de modéliser les sites enfants (un entrepôt rattaché à un DC). L'auto-référence est résolue après insertion de toutes les lignes du fichier (tri topologique interne).
 
-### 5.2 Format CSV
+### 5.2 Format TSV
 
-**Nom de fichier recommandé :** `locations.csv`
+**Nom de fichier recommandé :** `locations.tsv`
 
-```csv
-external_id,name,location_type,country,timezone,parent_external_id
-DC-ATL,Atlanta Distribution Center,dc,US,America/New_York,
-DC-PARIS,Paris DC,dc,FR,Europe/Paris,
-WH-ATL-01,Atlanta Warehouse 1,warehouse,US,America/New_York,DC-ATL
-WH-ATL-02,Atlanta Warehouse 2,warehouse,US,America/New_York,DC-ATL
-PLANT-LYON,Lyon Manufacturing Plant,plant,FR,Europe/Paris,
-PLANT-DETROIT,Detroit Assembly Plant,plant,US,America/Detroit,
-SUP-VIRT-ACME,ACME Corp (Virtual),supplier_virtual,US,,
-CUST-VIRT-WALMART,Walmart (Virtual),customer_virtual,US,,
-WH-PARIS-01,Paris Entrepôt Central,warehouse,FR,Europe/Paris,DC-PARIS
-DC-CHICAGO,Chicago Distribution Hub,dc,US,America/Chicago,
+```tsv
+external_id	name	location_type	country	timezone	parent_external_id
+DC-ATL	Atlanta Distribution Center	dc	US	America/New_York	
+DC-PARIS	Paris DC	dc	FR	Europe/Paris	
+WH-ATL-01	Atlanta Warehouse 1	warehouse	US	America/New_York	DC-ATL
+WH-ATL-02	Atlanta Warehouse 2	warehouse	US	America/New_York	DC-ATL
+PLANT-LYON	Lyon Manufacturing Plant	plant	FR	Europe/Paris	
+PLANT-DETROIT	Detroit Assembly Plant	plant	US	America/Detroit	
+SUP-VIRT-ACME	ACME Corp (Virtual)	supplier_virtual	US		
+CUST-VIRT-WALMART	Walmart (Virtual)	customer_virtual	US		
+WH-PARIS-01	Paris Entrepôt Central	warehouse	FR	Europe/Paris	DC-PARIS
+DC-CHICAGO	Chicago Distribution Hub	dc	US	America/Chicago	
 ```
 
 ### 5.3 Endpoint API
@@ -380,22 +383,22 @@ CREATE INDEX IF NOT EXISTS idx_suppliers_status ON suppliers (status) WHERE stat
 | `currency` | ❌ | `string` | ISO 4217 (3 chars) | `USD` | Devise de facturation |
 | `status` | ❌ | `enum` | `active`, `inactive`, `approved`, `blocked` | `active` | Statut fournisseur |
 
-### 6.3 Format CSV
+### 6.3 Format TSV
 
-**Nom de fichier recommandé :** `suppliers.csv`
+**Nom de fichier recommandé :** `suppliers.tsv`
 
-```csv
-external_id,name,location_external_id,lead_time_days,reliability_score,moq,unit_cost_override,currency,status
-VENDOR-ACME,ACME Corporation,SUP-VIRT-ACME,7,0.97,100,,USD,active
-VENDOR-GLOBEX,Globex Industries,,14,0.92,50,45.00,USD,active
-VENDOR-INITECH,Initech Parts Co,,21,0.85,200,,EUR,active
-VENDOR-UMBRELLA,Umbrella Supply GmbH,,10,0.99,10,,EUR,approved
-VENDOR-SOYLENT,Soylent Industrial,,30,0.78,500,12.50,USD,active
-VENDOR-VERIDIAN,Veridian Dynamics,,5,0.95,25,,USD,active
-VENDOR-MASSIVE,Massive Dynamic,,18,0.88,75,88.00,USD,inactive
-VENDOR-WEYLAND,Weyland-Yutani Corp,,45,0.70,1000,,USD,blocked
-VENDOR-PAWNEE,Pawnee Industrial,,12,0.93,30,,USD,active
-VENDOR-STERLING,Sterling Cooper Supply,,8,0.96,100,22.00,USD,active
+```tsv
+external_id	name	location_external_id	lead_time_days	reliability_score	moq	unit_cost_override	currency	status
+VENDOR-ACME	ACME Corporation	SUP-VIRT-ACME	7	0.97	100		USD	active
+VENDOR-GLOBEX	Globex Industries		14	0.92	50	45.00	USD	active
+VENDOR-INITECH	Initech Parts Co		21	0.85	200		EUR	active
+VENDOR-UMBRELLA	Umbrella Supply GmbH		10	0.99	10		EUR	approved
+VENDOR-SOYLENT	Soylent Industrial		30	0.78	500	12.50	USD	active
+VENDOR-VERIDIAN	Veridian Dynamics		5	0.95	25		USD	active
+VENDOR-MASSIVE	Massive Dynamic		18	0.88	75	88.00	USD	inactive
+VENDOR-WEYLAND	Weyland-Yutani Corp		45	0.70	1000		USD	blocked
+VENDOR-PAWNEE	Pawnee Industrial		12	0.93	30		USD	active
+VENDOR-STERLING	Sterling Cooper Supply		8	0.96	100	22.00	USD	active
 ```
 
 ### 6.4 Endpoint API
@@ -523,22 +526,22 @@ CREATE INDEX IF NOT EXISTS idx_supplier_items_preferred ON supplier_items (item_
 | `effective_end` | ❌ | `date` | ISO 8601, > effective_start | `null` | Date fin validité |
 | `status` | ❌ | `enum` | `active`, `inactive`, `approved` | `active` | — |
 
-### 7.3 Format CSV
+### 7.3 Format TSV
 
-**Nom de fichier recommandé :** `supplier_items.csv`
+**Nom de fichier recommandé :** `supplier_items.tsv`
 
-```csv
-supplier_external_id,item_external_id,supplier_item_code,lead_time_days,unit_cost,moq,lot_multiple,reliability_score,preferred,effective_start,effective_end,status
-VENDOR-ACME,SKU-PUMP-01,ACME-HYD-12V,7,125.00,50,,0.97,true,2026-01-01,,active
-VENDOR-ACME,SKU-PUMP-02,ACME-HYD-24V,7,145.00,50,,0.97,false,2026-01-01,,active
-VENDOR-GLOBEX,SKU-PUMP-01,GLX-P12V,14,118.00,100,10,0.92,false,2026-01-01,,active
-VENDOR-ACME,SKU-COMP-001,ACME-IMP-001,5,8.50,500,100,0.99,true,2026-01-01,,active
-VENDOR-UMBRELLA,SKU-COMP-001,UMB-BLADE-01,10,9.00,200,50,0.99,false,2026-01-01,,active
-VENDOR-VERIDIAN,SKU-MOTOR-12V,VD-DCM-5A,5,32.00,25,,0.95,true,2026-01-01,,active
-VENDOR-GLOBEX,SKU-FILTER-01,GLX-F10U,14,4.50,1000,100,0.92,true,2026-01-01,,active
-VENDOR-STERLING,SKU-SEAL-KIT,SCS-SK-HYD,8,22.00,100,,0.96,true,2026-01-01,,active
-VENDOR-ACME,SKU-FG-ASSEMBLY,,14,280.00,10,,0.97,false,2026-01-01,2026-12-31,active
-VENDOR-INITECH,SKU-RAW-STEEL,ITC-SS2MM,21,3.20,500,100,0.85,true,2026-01-01,,active
+```tsv
+supplier_external_id	item_external_id	supplier_item_code	lead_time_days	unit_cost	moq	lot_multiple	reliability_score	preferred	effective_start	effective_end	status
+VENDOR-ACME	SKU-PUMP-01	ACME-HYD-12V	7	125.00	50		0.97	true	2026-01-01		active
+VENDOR-ACME	SKU-PUMP-02	ACME-HYD-24V	7	145.00	50		0.97	false	2026-01-01		active
+VENDOR-GLOBEX	SKU-PUMP-01	GLX-P12V	14	118.00	100	10	0.92	false	2026-01-01		active
+VENDOR-ACME	SKU-COMP-001	ACME-IMP-001	5	8.50	500	100	0.99	true	2026-01-01		active
+VENDOR-UMBRELLA	SKU-COMP-001	UMB-BLADE-01	10	9.00	200	50	0.99	false	2026-01-01		active
+VENDOR-VERIDIAN	SKU-MOTOR-12V	VD-DCM-5A	5	32.00	25		0.95	true	2026-01-01		active
+VENDOR-GLOBEX	SKU-FILTER-01	GLX-F10U	14	4.50	1000	100	0.92	true	2026-01-01		active
+VENDOR-STERLING	SKU-SEAL-KIT	SCS-SK-HYD	8	22.00	100		0.96	true	2026-01-01		active
+VENDOR-ACME	SKU-FG-ASSEMBLY		14	280.00	10		0.97	false	2026-01-01	2026-12-31	active
+VENDOR-INITECH	SKU-RAW-STEEL	ITC-SS2MM	21	3.20	500	100	0.85	true	2026-01-01		active
 ```
 
 ### 7.4 Endpoint API
@@ -640,22 +643,22 @@ CREATE TABLE IF NOT EXISTS item_location_policies (
 );
 ```
 
-### 8.2 Format CSV
+### 8.2 Format TSV
 
-**Nom de fichier recommandé :** `item_location_policies.csv`
+**Nom de fichier recommandé :** `item_location_policies.tsv`
 
-```csv
-item_external_id,location_external_id,safety_stock_qty,safety_stock_days,reorder_point,replenishment_type,fixed_order_qty,min_stock,max_stock,planning_horizon_days,preferred_supplier_external_id,status
-SKU-PUMP-01,DC-ATL,50,,100,eoq,,,,180,VENDOR-ACME,active
-SKU-PUMP-01,DC-PARIS,30,,60,fixed_qty,50,,,180,VENDOR-ACME,active
-SKU-COMP-001,DC-ATL,500,,1000,min_max,,500,5000,90,VENDOR-ACME,active
-SKU-MOTOR-12V,DC-ATL,25,,50,eoq,,,,180,VENDOR-VERIDIAN,active
-SKU-FILTER-01,DC-ATL,1000,,2000,fixed_qty,1000,,,90,VENDOR-GLOBEX,active
-SKU-FG-ASSEMBLY,DC-ATL,5,,10,jit,,,,30,,active
-SKU-PUMP-02,DC-CHICAGO,20,,40,eoq,,,,180,VENDOR-ACME,active
-SKU-RAW-STEEL,PLANT-LYON,,15,,,,,20000,365,VENDOR-INITECH,active
-SKU-SEAL-KIT,DC-ATL,200,,400,fixed_qty,200,,,90,VENDOR-STERLING,active
-SKU-SEMI-BODY,PLANT-DETROIT,100,,200,min_max,,100,1000,180,,active
+```tsv
+item_external_id	location_external_id	safety_stock_qty	safety_stock_days	reorder_point	replenishment_type	fixed_order_qty	min_stock	max_stock	planning_horizon_days	preferred_supplier_external_id	status
+SKU-PUMP-01	DC-ATL	50		100	eoq				180	VENDOR-ACME	active
+SKU-PUMP-01	DC-PARIS	30		60	fixed_qty	50			180	VENDOR-ACME	active
+SKU-COMP-001	DC-ATL	500		1000	min_max		500	5000	90	VENDOR-ACME	active
+SKU-MOTOR-12V	DC-ATL	25		50	eoq				180	VENDOR-VERIDIAN	active
+SKU-FILTER-01	DC-ATL	1000		2000	fixed_qty	1000			90	VENDOR-GLOBEX	active
+SKU-FG-ASSEMBLY	DC-ATL	5		10	jit				30		active
+SKU-PUMP-02	DC-CHICAGO	20		40	eoq				180	VENDOR-ACME	active
+SKU-RAW-STEEL	PLANT-LYON		15					20000	365	VENDOR-INITECH	active
+SKU-SEAL-KIT	DC-ATL	200		400	fixed_qty	200			90	VENDOR-STERLING	active
+SKU-SEMI-BODY	PLANT-DETROIT	100		200	min_max		100	1000	180		active
 ```
 
 ### 8.3 Endpoint API
@@ -693,8 +696,8 @@ Content-Type: application/json
 
 | Règle | Action | HTTP Code |
 |---|---|---|
-| Fichier CSV vide ou 0 ligne de données | Reject tout | 400 |
-| Header CSV manquant (colonnes obligatoires absentes) | Reject tout | 400 |
+| Fichier TSV vide ou 0 ligne de données | Reject tout | 400 |
+| Header TSV manquant (colonnes obligatoires absentes) | Reject tout | 400 |
 | Encodage non-UTF-8 | Reject tout | 400 |
 | JSON malformé | Reject tout | 400 |
 | `dry_run=true` — aucune persistence | Simulate, retourne le résultat simulé | 200 |
@@ -782,12 +785,12 @@ Le moteur de planification lit toujours la valeur la plus spécifique disponible
 | P1 | **Colonne `external_id` à ajouter à `items` et `locations`** — le schéma actuel n'a pas de colonne pour le code ERP. La PK UUID est interne. Faut-il ajouter `external_id TEXT UNIQUE` ou utiliser le `name` comme clé de déduplication ? | ⚠️ Breaking change si `name` est déjà utilisé comme clé dans les intégrations existantes | Architecture |
 | P2 | **Migration 003 à créer** — `suppliers`, `supplier_items`, `item_location_policies` sont spécifiés mais pas encore en base. Décision : créer la migration maintenant ou attendre la démo M8 ? | Medium | Backend lead |
 | P3 | **Authentification des endpoints import** — les endpoints `/v1/import/*` doivent-ils nécessiter un scope spécifique (`import:write`) distinct des scopes API ordinaires ? | Security | Platform |
-| P4 | **Taille maximale des fichiers CSV** — pas de limite définie. À borner (ex: 50 000 lignes par fichier, 50 MB max) pour éviter les OOM en prod. | Reliability | DevOps |
+| P4 | **Taille maximale des fichiers TSV** — pas de limite définie. À borner (ex: 50 000 lignes par fichier, 50 MB max) pour éviter les OOM en prod. | Reliability | DevOps |
 | P5 | **Import asynchrone pour gros volumes** — au-delà d'un seuil (ex: 10 000 lignes), l'import devrait être traité en background avec un job_id retourné immédiatement et un webhook/polling pour le résultat. | Performance | Backend lead |
 | P6 | **`item_id` sur les noeuds du graphe** — les nœuds `nodes` référencent `items.item_id` (UUID). Si un `Item` est importé via `external_id`, le mapping `external_id → item_id` doit être exposé via un endpoint `GET /v1/items?external_id=SKU-PUMP-01` pour que les intégrations puissent récupérer l'UUID interne. | Integration | Backend lead |
 | P7 | **Gestion des suppressions** — cette spec couvre l'import (create/update). La désactivation (`status=obsolete`) est couverte via upsert. La suppression physique n'est pas spécifiée. Recommandation : soft-delete uniquement via `status`. | Data integrity | Product |
 | P8 | **Multi-tenant / multi-org** — si Ootils devient multi-tenant, les `external_id` doivent être scopés par `org_id`. À anticiper dans le schéma maintenant. | Architecture | CTO |
-| P9 | **Format d'import alternatif : Excel (.xlsx)** — les équipes planning travaillent souvent sous Excel. Vaut-il la peine d'accepter `.xlsx` en plus du CSV ? Coût : dépendance `openpyxl`. | UX / Adoption | Product |
+| P9 | **Format d'import alternatif : Excel (.xlsx)** — les équipes planning travaillent souvent sous Excel. Vaut-il la peine d'accepter `.xlsx` en plus du TSV ? Coût : dépendance `openpyxl`. | UX / Adoption | Product |
 | P10 | **Versioning des imports** — tracer quel import a créé/modifié quel enregistrement master data (au minimum stocker un `import_batch_id` sur chaque ligne). | Auditability | Architecture |
 
 ---
