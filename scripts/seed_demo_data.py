@@ -667,8 +667,60 @@ def _seed_co_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump, series_
     print("  ✓ Edges: CustomerOrderDemand → ProjectedInventory (drives)")
 
 
+def seed_bom(conn):
+    """
+    Seed BOM (Bill of Materials) data for MidCo Electronics demo items.
+
+    BOMs:
+      - PUMP-01 (finished_good) → VALVE-02 (component × 2)
+      - VALVE-02 (component)    → no sub-BOM (leaf component in this demo)
+
+    This gives a simple 2-level BOM for MRP explosion testing:
+      PUMP-01 needs 2 × VALVE-02 per unit (2% scrap), EA.
+
+    LLC after import:
+      VALVE-02 → LLC = 1 (appears at level 1 under PUMP-01)
+    """
+    print("\n🔧 Seeding BOM data for MidCo Electronics...")
+
+    pump_id  = _uid("item:PUMP-01")
+    valve_id = _uid("item:VALVE-02")
+
+    # ── bom_headers: PUMP-01 v1.0 ────────────────────────────────────
+    bom_pump_id = _uid("bom:PUMP-01:v1.0")
+    conn.execute("""
+        INSERT INTO bom_headers (bom_id, parent_item_id, bom_version, effective_from, status)
+        VALUES (%s, %s, '1.0', %s, 'active')
+        ON CONFLICT (parent_item_id, bom_version) DO UPDATE
+            SET effective_from = EXCLUDED.effective_from,
+                status         = EXCLUDED.status
+    """, (bom_pump_id, pump_id, TODAY))
+    print(f"  ✓ bom_headers: PUMP-01 v1.0 ({bom_pump_id[:8]}...)")
+
+    # ── bom_lines: PUMP-01 → VALVE-02 (qty=2, scrap=2%) ─────────────
+    bom_line_id = _uid("bom_line:PUMP-01:v1.0:VALVE-02")
+    conn.execute("""
+        INSERT INTO bom_lines (line_id, bom_id, component_item_id, quantity_per, uom, scrap_factor, llc)
+        VALUES (%s, %s, %s, 2.0, 'EA', 0.02, 1)
+        ON CONFLICT (bom_id, component_item_id) DO UPDATE
+            SET quantity_per = EXCLUDED.quantity_per,
+                uom          = EXCLUDED.uom,
+                scrap_factor = EXCLUDED.scrap_factor,
+                llc          = EXCLUDED.llc
+    """, (bom_line_id, bom_pump_id, valve_id))
+    print(f"  ✓ bom_lines: PUMP-01 → VALVE-02 (qty=2, scrap=2%, LLC=1)")
+
+    conn.commit()
+    print("  ✅ BOM seed complete.")
+    print(f"     → Explode PUMP-01 × 100 units:")
+    print(f"        gross_requirement VALVE-02 = 100 × 2 × 1.02 = 204 units")
+    print(f"        on_hand @ DC-ATL = 30 units")
+    print(f"        net_requirement = 174 units (shortage!)")
+
+
 if __name__ == "__main__":
     print(f"Connecting to {DATABASE_URL}...")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         seed(conn)
         seed_enrichment(conn)
+        seed_bom(conn)
