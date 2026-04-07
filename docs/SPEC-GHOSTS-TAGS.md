@@ -55,15 +55,22 @@ Un Ghost est un **nœud virtuel dans le graphe Ootils**. Il n'est pas un item ph
 
 **Fonctionnement :**
 - Le Ghost est créé dès la décision de lancement, avant même que B existe en stock.
-- La demande (ForecastDemand, CustomerOrderDemand) est portée **sur le Ghost**.
-- Des règles de transition définissent la courbe de migration A→B dans le temps.
-- Le moteur distribue la demande portée par le Ghost sur A et B selon le poids calculé à la date de planification.
-- Le planificateur pilote la transition comme une entité unique.
+- **La demande n'est pas portée par le Ghost.** Elle existe indépendamment au niveau des items A et B — les demand planners la pilotent à item level. Le Ghost n'interfère pas dans le forecast.
+- **Sémantique du Ghost :** il représente le niveau de demande agrégée qu'aurait eu A sans l'introduction de B. La somme A+B reste ~constante dans le temps — c'est une substitution, pas une création ou destruction de demande.
+- Des règles de transition définissent la courbe de migration A→B dans le temps (poids A/B à chaque date).
+- **Ce que le Ghost pilote réellement : la cohérence du flux de supply**
+  - Stock A baisse progressivement (déstockage contrôlé selon la courbe)
+  - Stock B monte progressivement (montée en charge)
+  - Safety stock : le volume global est conservé, mais se transfère de A vers B selon la courbe de transition
+  - Les plans de supply (PlannedSupply) de A et B doivent respecter la courbe
+- **Détection d'anomalie :** si `ProjectedInventory(A) + ProjectedInventory(B)` dévie significativement de la projection baseline (ce que A aurait eu seul), le moteur génère une alerte `transition_inconsistency`.
+- Le Ghost observe, surveille la cohérence supply, et génère des alertes. Il ne crée pas de nœuds de demande (pas de ForecastDemand produit par le Ghost).
 
 **Bénéfices :**
-- Anticipation des besoins sur B avant disponibilité stock
-- Gestion cohérente de la fin de vie de A (éviter les surstocks)
-- Traçabilité causale native : la demande sur B est explicitement issue du Ghost de transition
+- Anticipation des besoins supply sur B avant disponibilité stock
+- Gestion cohérente de la fin de vie de A (déstockage progressif contrôlé, évite les surstocks)
+- Détection automatique d'incohérences supply via alerte `transition_inconsistency`
+- Traçabilité : la courbe de transition est explicite et auditable dans le graphe
 
 #### Cas d'usage 2 — Agrégat capacitaire (RCCP graph-native)
 
@@ -169,9 +176,11 @@ weight_ratio = weight_at_start (référence initiale ; le poids calculé à t es
 
 ### 2.3 Règles de propagation
 
-#### Ghost phase_transition — distribution de la demande
+#### Ghost phase_transition — surveillance et cohérence supply
 
-**Input :** la demande portée sur le nœud Ghost (ForecastDemand, CustomerOrderDemand attachés au ghost_id).
+**Rôle :** le Ghost phase_transition est une **couche de surveillance supply**, pas un distributeur de demande. La demande existe indépendamment au niveau des items A et B, pilotée par les demand planners. Le Ghost ne crée aucun ForecastDemand. Il surveille que le flux de supply (stocks, PlannedSupply, safety stocks) reste cohérent avec la courbe de transition.
+
+**Calcul du poids de transition à la date t (référence pour la surveillance supply) :**
 
 **Calcul du poids à la date t :**
 
@@ -199,7 +208,22 @@ Pour t > T_end :
 
 **Invariant :** `weight_A(t) + weight_B(t) = 1.0` à tout instant t.
 
-**Résultat :** la demande du Ghost est distribuée en deux demands dérivées, une sur A et une sur B, avec les quantités ajustées par les poids.
+**Ce que le propagateur surveille :**
+
+```
+baseline(t) = ProjectedInventory hypothétique de A sans introduction de B
+observed(t) = ProjectedInventory(A, t) + ProjectedInventory(B, t)
+delta(t)    = observed(t) - baseline(t)
+
+|delta(t)| > seuil_transition → alerte transition_inconsistency émise
+```
+
+**Règles supply surveillées :**
+- `PlannedSupply_A(t)` doit décroître conformément à `weight_A(t)`
+- `PlannedSupply_B(t)` doit croître conformément à `weight_B(t)`
+- `SafetyStock_A(t) + SafetyStock_B(t)` = `SafetyStock_baseline` (volume total conservé, redistribué selon la courbe)
+
+**Résultat moteur :** aucun ForecastDemand créé sur les membres. Le moteur émet des alertes `transition_inconsistency` si la somme des inventaires projetés dévie de la baseline. Les PlannedSupply sont sous la responsabilité du planificateur, guidé par la courbe.
 
 **Les poids ne sont pas pré-matérialisés** — ils sont calculés à la demande lors de chaque passe de propagation (voir ADR-010 D3).
 
@@ -245,20 +269,35 @@ La capacité `capacity_resource(t)` est lue sur l'entité `Resource` associée (
 
 | Méthode | Route | Description |
 |---------|-------|-------------|
-| `GET` | `/v1/ghosts/{ghost_id}/transition` | Courbe de transition calculée sur l'horizon (poids A/B par date) |
-| `GET` | `/v1/ghosts/{ghost_id}/demand-split` | Répartition de demande sur les membres à une date (`?date=YYYY-MM-DD`) |
+| `GET` | `/v1/ghosts/{ghost_id}/transition` | Courbe de transition (poids A/B par date), projection agrégée A+B vs baseline, alertes `transition_inconsistency` actives |
+| `GET` | `/v1/ghosts/{ghost_id}/alerts` | Alertes `transition_inconsistency` actives pour ce Ghost |
 
-**Exemple de réponse `demand-split` :**
+> **Supprimé :** l'endpoint `demand-split` (présent dans des versions antérieures de cette spec) n'existe pas dans ce modèle. La demande est pilotée à item level par les demand planners — le Ghost ne crée pas et ne distribue pas de ForecastDemand. Il n'y a pas de "répartition de demande" à exposer.
+
+**Exemple de réponse `GET /v1/ghosts/{ghost_id}/transition` :**
 ```json
 {
   "ghost_id": "...",
-  "date": "2026-06-15",
   "ghost_type": "phase_transition",
-  "total_demand_qty": 1000,
-  "split": [
-    { "item_id": "...", "role": "outgoing", "weight": 0.35, "allocated_qty": 350 },
-    { "item_id": "...", "role": "incoming", "weight": 0.65, "allocated_qty": 650 }
-  ]
+  "transition_window": {
+    "start": "2026-05-01",
+    "end": "2026-08-31"
+  },
+  "curve": [
+    { "date": "2026-06-15", "weight_outgoing": 0.65, "weight_incoming": 0.35 }
+  ],
+  "inventory_projection": [
+    {
+      "date": "2026-06-15",
+      "projected_inventory_a": 420,
+      "projected_inventory_b": 580,
+      "sum_observed": 1000,
+      "baseline": 980,
+      "delta": 20,
+      "alert": false
+    }
+  ],
+  "active_alerts": []
 }
 ```
 
@@ -413,7 +452,7 @@ De même, un Ghost capacity_aggregate est associé à une ressource (ligne, four
 
 Le propagateur incrémental (ADR-003) doit traiter les `ghost_nodes` comme une couche de virtualisation au-dessus des items réels :
 
-1. **Dirty propagation depuis le Ghost** : si une demande sur un Ghost est modifiée → le Ghost est marqué dirty → le propagateur distribue la nouvelle demande sur les membres (phase_transition) ou recalcule la charge agrégée (capacity_aggregate) → les nodes membres sont marqués dirty → propagation normale.
+1. **Dirty propagation depuis le Ghost** : si les paramètres de transition d'un Ghost phase_transition sont modifiés (courbe, dates, poids) → le Ghost est marqué dirty → le propagateur recalcule la surveillance de cohérence supply (comparaison ProjectedInventory A+B vs baseline) et peut émettre ou résoudre des alertes `transition_inconsistency`. Pour un Ghost capacity_aggregate, si un WorkOrderSupply d'un membre est modifié → le Ghost est marqué dirty → recalcul de la charge agrégée.
 
 2. **Dirty propagation vers le Ghost** : si un WorkOrderSupply d'un membre est modifié → le Ghost capacity_aggregate associé est marqué dirty (recalcul de la charge agrégée nécessaire).
 
@@ -434,7 +473,7 @@ Les Tags ne participent pas à l'héritage de scénario (quand un scénario fork
 | # | Question | Décision attendue |
 |---|----------|-------------------|
 | PO-01 | Un Ghost peut-il lui-même être membre d'un autre Ghost ? (Ghost de Ghosts pour hiérarchie capacitaire à plusieurs niveaux) | À décider avec le PO — risque de complexité moteur |
-| PO-02 | Demande portée par le Ghost phase_transition : ForecastDemand seulement, ou aussi CustomerOrderDemand ? | Probablement les deux — à confirmer selon le process S&OP |
+| PO-02 | ~~Demande portée par le Ghost phase_transition~~ — **question caduque** : le Ghost phase_transition ne porte pas de demande. Demande pilotée à item level par les demand planners. | Clos — voir correction mécanique phase_transition |
 | PO-03 | Entité Resource (capacité) : dans quelle migration ? Bloquant pour le RCCP effectif | Dépend de la roadmap V2 |
 | PO-04 | Gestion des Tags orphelins (entity supprimée, tag attaché survivant) | Cron de nettoyage ou soft-delete sur les entités ? |
 | PO-05 | Un Ghost capacity_aggregate peut-il être attaché à plusieurs ressources (contraintes multiples) ? | Scénario à analyser (ex : ligne + fournisseur simultanément) |

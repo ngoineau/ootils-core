@@ -64,7 +64,9 @@ Deux types de Ghosts, avec des sémantiques et des contraintes de membership fon
 | Output moteur | Charge totale agrégée vs capacité de la ressource liée → détection surcharge |
 | Courbes | Sans objet (pas de distribution temporelle — agrégation brute par période) |
 
-> **Distinction sémantique fondamentale :** un Ghost `capacity_aggregate` n'agrège pas de demande. Le RCCP opère sur la charge (load de production), pas sur la demande brute. La demande est l'input du plan ; la charge est la conséquence du plan de production calculé pour répondre à cette demande. Agréger de la demande pour faire du RCCP serait une erreur conceptuelle — cela confondrait deux niveaux du processus S&OP.
+> **Distinctions sémantiques fondamentales :**
+> - Un Ghost `phase_transition` **ne distribue pas de demande**. Il surveille la cohérence du flux de supply lors d'une transition produit. La demande est pilotée à item level par les demand planners.
+> - Un Ghost `capacity_aggregate` **n'agrège pas de demande**. Le RCCP opère sur la charge (load de production), pas sur la demande brute. La demande est l'input du plan ; la charge est la conséquence du plan de production calculé pour répondre à cette demande. Agréger de la demande pour faire du RCCP serait une erreur conceptuelle — cela confondrait deux niveaux du processus S&OP.
 
 La capacité n'est pas portée par le Ghost — elle est un attribut de la ressource (`Resource`, entité V2). Le Ghost est le lien entre les items membres et leur ressource contrainte partagée.
 
@@ -151,7 +153,7 @@ Stocker les tags dans un champ JSONB `tags TEXT[]` sur les tables `items`, `loca
 
 ### Négatives / Points de vigilance
 
-- **Complexité moteur accrue :** le propagateur doit distinguer les ghost_nodes des nodes standards et appliquer la logique de distribution/agrégation. Risque de régression si mal isolé.
+- **Complexité moteur accrue :** le propagateur doit distinguer les ghost_nodes des nodes standards et appliquer la logique de surveillance/agrégation (selon ghost_type). Pour phase_transition : surveillance cohérence supply + émission alertes `transition_inconsistency`. Pour capacity_aggregate : agrégation de charge. Risque de régression si mal isolé.
 - **Migration 008 requise :** ajout des tables `ghost_nodes`, `ghost_members`, `tags`, `entity_tags` + mise à jour des CHECK constraints sur `nodes.node_type` et `edges.edge_type`.
 - **Entité Resource absente (V2) :** le Ghost `capacity_aggregate` est partiellement opérationnel sans l'entité Resource — la comparaison charge/capacité ne peut pas être automatisée tant que la capacité n'est pas modélisée. Mitigation temporaire : attribut `capacity_override` sur `ghost_nodes` en attendant.
 - **Contraintes de membership enforced applicativement :** les règles "exactement 1 outgoing + 1 incoming" ne peuvent pas être exprimées en SQL pur sans trigger. Elles doivent être dans le layer service — à tester explicitement.
