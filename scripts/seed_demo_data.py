@@ -63,10 +63,11 @@ def seed(conn):
     valve_id = _uid("item:VALVE-02")
 
     conn.execute("""
-        INSERT INTO items (item_id, name, item_type, uom, status)
-        VALUES (%s, 'PUMP-01 Industrial Pump', 'finished_good', 'EA', 'active'),
-               (%s, 'VALVE-02 Control Valve', 'component', 'EA', 'active')
-        ON CONFLICT DO NOTHING
+        INSERT INTO items (item_id, name, item_type, uom, status, external_id)
+        VALUES (%s, 'PUMP-01 Industrial Pump', 'finished_good', 'EA', 'active', 'PUMP-01'),
+               (%s, 'VALVE-02 Control Valve', 'component', 'EA', 'active', 'VALVE-02')
+        ON CONFLICT (item_id) DO UPDATE
+            SET external_id = EXCLUDED.external_id
     """, (pump_id, valve_id))
     print(f"  ✓ Items: PUMP-01 ({pump_id[:8]}...), VALVE-02 ({valve_id[:8]}...)")
 
@@ -77,10 +78,11 @@ def seed(conn):
     lax_id = _uid("location:DC-LAX")
 
     conn.execute("""
-        INSERT INTO locations (location_id, name, location_type, country)
-        VALUES (%s, 'DC-ATL Atlanta Distribution Center', 'dc', 'US'),
-               (%s, 'DC-LAX Los Angeles Distribution Center', 'dc', 'US')
-        ON CONFLICT DO NOTHING
+        INSERT INTO locations (location_id, name, location_type, country, external_id)
+        VALUES (%s, 'DC-ATL Atlanta Distribution Center', 'dc', 'US', 'DC-ATL'),
+               (%s, 'DC-LAX Los Angeles Distribution Center', 'dc', 'US', 'DC-LAX')
+        ON CONFLICT (location_id) DO UPDATE
+            SET external_id = EXCLUDED.external_id
     """, (atl_id, lax_id))
     print(f"  ✓ Locations: DC-ATL ({atl_id[:8]}...), DC-LAX ({lax_id[:8]}...)")
 

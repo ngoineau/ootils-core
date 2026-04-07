@@ -66,6 +66,8 @@ class OotilsDB:
 
     def _apply_migrations(self) -> None:
         """Apply all .sql migration files in order. Idempotent (IF NOT EXISTS throughout)."""
+        import sys
+
         migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
         if not migration_files:
             return
@@ -73,14 +75,29 @@ class OotilsDB:
         with psycopg.connect(self.database_url, autocommit=True) as conn:
             for migration_path in migration_files:
                 sql = migration_path.read_text(encoding="utf-8")
-                # Execute each statement individually to avoid transaction issues
-                # with DDL statements in PostgreSQL
                 try:
-                    conn.execute(sql)
+                    # Use cursor.execute() to handle multi-statement SQL files,
+                    # including files with DO $$ ... $$ PL/pgSQL blocks.
+                    # autocommit=True ensures each statement commits independently.
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
                 except Exception as e:
-                    # Ignore "already exists" errors — idempotent
-                    if "already exists" not in str(e):
-                        raise
+                    err_msg = str(e).lower()
+                    # Ignore "already exists" errors — idempotent migrations
+                    if any(phrase in err_msg for phrase in [
+                        "already exists",
+                        "duplicate key",
+                        "relation already exists",
+                        "column already exists",
+                        "constraint already exists",
+                    ]):
+                        continue
+                    # Log real errors instead of silently ignoring them
+                    print(
+                        f"[MIGRATION ERROR] {migration_path.name}: {e}",
+                        file=sys.stderr,
+                    )
+                    raise
 
     def health_check(self) -> dict:
         """
