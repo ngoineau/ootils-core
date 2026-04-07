@@ -720,9 +720,33 @@ def seed_bom(conn):
     print(f"        net_requirement = 174 units (shortage!)")
 
 
+def seed_calendars(conn):
+    """Seed US holidays for DC-ATL (2026)."""
+    atl_id = _uid("location:DC-ATL")
+    holidays = [
+        ("2026-01-01", "New Year's Day"),
+        ("2026-05-25", "Memorial Day"),
+        ("2026-07-04", "Independence Day"),
+        ("2026-09-07", "Labor Day"),
+        ("2026-11-26", "Thanksgiving"),
+        ("2026-12-25", "Christmas"),
+    ]
+    for date_str, note in holidays:
+        conn.execute("""
+            INSERT INTO operational_calendars
+                (location_id, calendar_date, is_working_day, capacity_factor, notes)
+            VALUES (%s, %s, false, 0.0, %s)
+            ON CONFLICT (location_id, calendar_date) DO UPDATE
+                SET is_working_day = false, notes = EXCLUDED.notes
+        """, (atl_id, date_str, note))
+    conn.commit()
+    print(f"  ✅ Calendars seeded: {len(holidays)} US holidays for DC-ATL")
+
+
 if __name__ == "__main__":
     print(f"Connecting to {DATABASE_URL}...")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         seed(conn)
         seed_enrichment(conn)
         seed_bom(conn)
+        seed_calendars(conn)
