@@ -46,23 +46,16 @@ Le Ghost est implémenté comme un **nœud typé dans le graphe Ootils**, avec `
 
 Deux types de Ghosts, avec des sémantiques et des contraintes de membership fondamentalement différentes :
 
-#### `phase_transition`
+#### Table comparative des deux ghost_types
 
-| Attribut | Valeur |
-|----------|--------|
-| Objet agrégé | Demande (ForecastDemand, CustomerOrderDemand) portée sur le Ghost |
-| Membres | Exactement 1 `outgoing` + 1 `incoming` |
-| Output moteur | Distribution de la demande du Ghost sur A et B selon poids calculé à t |
-| Courbes supportées | `linear`, `step`, `s_curve` |
-
-#### `capacity_aggregate`
-
-| Attribut | Valeur |
-|----------|--------|
-| Objet agrégé | **Charge** (load) — WorkOrderSupply et PlannedSupply des membres |
-| Membres | N `member` (N ≥ 1) |
-| Output moteur | Charge totale agrégée vs capacité de la ressource liée → détection surcharge |
-| Courbes | Sans objet (pas de distribution temporelle — agrégation brute par période) |
+| Dimension | `phase_transition` | `capacity_aggregate` |
+|-----------|-------------------|---------------------|
+| **Objet supervisé** | Flux de supply (PlannedSupply A et B) | Charge (WorkOrderSupply / PlannedSupply des membres) |
+| **Membres** | Exactement 1 `outgoing` + 1 `incoming` | N `member` (N ≥ 1) |
+| **Rôle demande** | Indépendante — pilotée par demand planners à item level. Somme A+B ~constante. | Sans objet (pas de demande agrégée) |
+| **Output moteur** | Alerte `transition_inconsistency` si ProjectedInventory(A)+ProjectedInventory(B) dévie de la baseline | Alerte surcharge si load agrégé > capacité ressource |
+| **Safety stock** | Volume global conservé, redistribué A→B selon la courbe | Par membre |
+| **Courbes supportées** | `linear`, `step`, `s_curve` | Sans objet (agrégation brute par période) |
 
 > **Distinctions sémantiques fondamentales :**
 > - Un Ghost `phase_transition` **ne distribue pas de demande**. Il surveille la cohérence du flux de supply lors d'une transition produit. La demande est pilotée à item level par les demand planners.
