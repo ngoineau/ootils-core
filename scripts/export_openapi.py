@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
-"""
-export_openapi.py — Export the Ootils Core API OpenAPI schema to docs/api/openapi.json.
-
-Usage:
-    python3 scripts/export_openapi.py
-"""
+"""Export FastAPI OpenAPI spec to docs/openapi.json."""
 import json
 import sys
 from pathlib import Path
 
-# Ensure src/ is on the path
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from ootils_core.api.app import app  # noqa: E402
+from ootils_core.api.app import create_app
 
-OUTPUT = ROOT / "docs" / "api" / "openapi.json"
-OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+app = create_app()
+spec = app.openapi()
 
-schema = app.openapi()
-OUTPUT.write_text(json.dumps(schema, indent=2, default=str), encoding="utf-8")
-print(f"✓ OpenAPI schema exported to {OUTPUT}")
+out = Path(__file__).parent.parent / "docs" / "openapi.json"
+out.write_text(json.dumps(spec, indent=2, ensure_ascii=False))
+print(f"Written: {out} ({len(spec['paths'])} paths)")

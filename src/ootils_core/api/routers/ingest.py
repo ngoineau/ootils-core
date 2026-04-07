@@ -104,11 +104,11 @@ VALID_ITEM_STATUSES = {"active", "obsolete", "phase_out"}
 
 
 class ItemRow(BaseModel):
-    external_id: str
-    name: str
-    item_type: str = "finished_good"
-    uom: str = "EA"
-    status: str = "active"
+    external_id: str = Field(..., description="Identifiant métier unique (ex: SKU ERP). Clé d'upsert.")
+    name: str = Field(..., description="Libellé de l'article.")
+    item_type: str = Field("finished_good", description="Type d'article. Valeurs: finished_good | component | raw_material | semi_finished.")
+    uom: str = Field("EA", description="Unité de mesure de base (ex: EA, KG, BOX).")
+    status: str = Field("active", description="Statut. Valeurs: active | obsolete | phase_out.")
 
     @field_validator("external_id", "name")
     @classmethod
@@ -124,7 +124,7 @@ class IngestItemsRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/items", response_model=IngestResponse)
+@router.post("/items", response_model=IngestResponse, summary="Import articles", description="Upsert batch d'articles. Clé d'upsert : external_id.")
 async def ingest_items(
     body: IngestItemsRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -193,12 +193,12 @@ VALID_LOCATION_TYPES = {"plant", "dc", "warehouse", "supplier_virtual", "custome
 
 
 class LocationRow(BaseModel):
-    external_id: str
-    name: str
-    location_type: str = "dc"
+    external_id: str = Field(..., description="Identifiant site/DC (ex: DC-ATL). Clé d'upsert.")
+    name: str = Field(..., description="Libellé du site.")
+    location_type: str = Field("dc", description="Type. Valeurs: warehouse | factory | supplier | customer.")
     country: Optional[str] = None
     timezone: Optional[str] = None
-    parent_external_id: Optional[str] = None
+    parent_external_id: Optional[str] = Field(None, description="External_id du site parent (optionnel, pour hiérarchies).")
 
     @field_validator("external_id", "name")
     @classmethod
@@ -214,7 +214,7 @@ class IngestLocationsRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/locations", response_model=IngestResponse)
+@router.post("/locations", response_model=IngestResponse, summary="Import sites", description="Upsert batch de sites/DCs. Clé d'upsert : external_id.")
 async def ingest_locations(
     body: IngestLocationsRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -295,11 +295,11 @@ VALID_SUPPLIER_STATUSES = {"active", "inactive", "blocked"}
 
 
 class SupplierRow(BaseModel):
-    external_id: str
-    name: str
+    external_id: str = Field(..., description="Code fournisseur ERP. Clé d'upsert.")
+    name: str = Field(..., description="Raison sociale.")
     # W-06: lead_time_days must be > 0 when provided
-    lead_time_days: Optional[int] = Field(None, gt=0)
-    reliability_score: Optional[float] = None
+    lead_time_days: Optional[int] = Field(None, gt=0, description="Délai d'approvisionnement standard en jours calendaires.")
+    reliability_score: Optional[float] = Field(None, description="Score de fiabilité [0.0–1.0]. 1.0 = parfait.")
     moq: Optional[float] = None          # not a suppliers column, accepted but not persisted
     currency: Optional[str] = None       # not a suppliers column, accepted but not persisted
     country: Optional[str] = None
@@ -319,7 +319,7 @@ class IngestSuppliersRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/suppliers", response_model=IngestResponse)
+@router.post("/suppliers", response_model=IngestResponse, summary="Import fournisseurs", description="Upsert batch de fournisseurs.")
 async def ingest_suppliers(
     body: IngestSuppliersRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -401,7 +401,7 @@ class IngestSupplierItemsRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/supplier-items", response_model=IngestResponse)
+@router.post("/supplier-items", response_model=IngestResponse, summary="Import conditions fournisseurs", description="Upsert des conditions d'approvisionnement par couple (fournisseur × article).")
 async def ingest_supplier_items(
     body: IngestSupplierItemsRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -521,7 +521,7 @@ class IngestOnHandRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/on-hand", response_model=IngestResponse)
+@router.post("/on-hand", response_model=IngestResponse, summary="Import stock physique", description="Upsert du stock disponible (OnHandSupply) par (article × site).")
 async def ingest_on_hand(
     body: IngestOnHandRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -636,13 +636,13 @@ VALID_PO_STATUSES = {"draft", "confirmed", "in_transit", "received", "cancelled"
 
 
 class PurchaseOrderRow(BaseModel):
-    external_id: str
-    item_external_id: str
-    location_external_id: str
-    supplier_external_id: str
-    quantity: float
+    external_id: str = Field(..., description="Numéro de PO ERP. Clé d'upsert.")
+    item_external_id: str = Field(..., description="Article commandé.")
+    location_external_id: str = Field(..., description="Site de réception.")
+    supplier_external_id: str = Field(..., description="Fournisseur. Optionnel.")
+    quantity: float = Field(..., description="Quantité commandée (> 0).")
     uom: str = "EA"
-    expected_delivery_date: date
+    expected_delivery_date: date = Field(..., description="Date de réception prévue (YYYY-MM-DD).")
     status: str = "confirmed"
 
     @field_validator("external_id")
@@ -658,7 +658,7 @@ class IngestPurchaseOrdersRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/purchase-orders", response_model=IngestResponse)
+@router.post("/purchase-orders", response_model=IngestResponse, summary="Import commandes d'achat", description="Upsert de POs (PurchaseOrderSupply) avec tracking external_id ERP.")
 async def ingest_purchase_orders(
     body: IngestPurchaseOrdersRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -771,11 +771,11 @@ VALID_FORECAST_SOURCES = {"statistical", "consensus", "manual", "ml"}
 
 
 class ForecastRow(BaseModel):
-    item_external_id: str
-    location_external_id: str
-    quantity: float
-    bucket_date: date
-    time_grain: str = "week"
+    item_external_id: str = Field(..., description="Article prévu.")
+    location_external_id: str = Field(..., description="Site de consommation.")
+    quantity: float = Field(..., description="Quantité prévisionnelle (>= 0).")
+    bucket_date: date = Field(..., description="Date de début du bucket (YYYY-MM-DD).")
+    time_grain: str = Field("week", description="Maille temporelle. Valeurs: day | week | month.")
     source: str = "statistical"
 
 
@@ -784,7 +784,7 @@ class IngestForecastRequest(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/forecast-demand", response_model=IngestResponse)
+@router.post("/forecast-demand", response_model=IngestResponse, summary="Import prévisions de demande", description="Upsert de prévisions (ForecastDemand) par (article × site × bucket × grain).")
 async def ingest_forecast_demand(
     body: IngestForecastRequest,
     db: psycopg.Connection = Depends(get_db),

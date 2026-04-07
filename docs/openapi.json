@@ -1,0 +1,3409 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ootils Core API",
+    "description": "Ootils Core REST API — supply chain planning engine.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Create Event",
+        "description": "Submit a planning event that triggers recalculation.",
+        "operationId": "create_event_v1_events_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projection": {
+      "get": {
+        "tags": [
+          "projection"
+        ],
+        "summary": "Get Projection",
+        "description": "Return projected inventory buckets for an item/location pair.",
+        "operationId": "get_projection_v1_projection_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Item identifier (UUID or string key)",
+              "title": "Item Id"
+            },
+            "description": "Item identifier (UUID or string key)"
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Location identifier (UUID or string key)",
+              "title": "Location Id"
+            },
+            "description": "Location identifier (UUID or string key)"
+          },
+          {
+            "name": "grain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "day / week / month",
+              "title": "Grain"
+            },
+            "description": "day / week / month"
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/issues": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get Issues",
+        "description": "Return active shortages filtered by severity and horizon.",
+        "operationId": "get_issues_v1_issues_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "low / medium / high / all",
+              "default": "all",
+              "title": "Severity"
+            },
+            "description": "low / medium / high / all"
+          },
+          {
+            "name": "horizon_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Look-ahead window in days",
+              "default": 90,
+              "title": "Horizon Days"
+            },
+            "description": "Look-ahead window in days"
+          },
+          {
+            "name": "item_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by item ID",
+              "title": "Item Id"
+            },
+            "description": "Filter by item ID"
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by location ID",
+              "title": "Location Id"
+            },
+            "description": "Filter by location ID"
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/explain": {
+      "get": {
+        "tags": [
+          "explain"
+        ],
+        "summary": "Get Explanation",
+        "description": "Return the causal explanation for a planning node.",
+        "operationId": "get_explanation_v1_explain_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Target node UUID to explain",
+              "title": "Node Id"
+            },
+            "description": "Target node UUID to explain"
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/simulate": {
+      "post": {
+        "tags": [
+          "simulate"
+        ],
+        "summary": "Create Simulation",
+        "description": "Create a new scenario with overrides and compute the delta vs base.",
+        "operationId": "create_simulation_v1_simulate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/graph": {
+      "get": {
+        "tags": [
+          "graph"
+        ],
+        "summary": "Get Graph",
+        "description": "Return nodes and edges for the planning graph at (item, location, scenario).",
+        "operationId": "get_graph_v1_graph_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Item UUID or name",
+              "title": "Item Id"
+            },
+            "description": "Item UUID or name"
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Location UUID or name",
+              "title": "Location Id"
+            },
+            "description": "Location UUID or name"
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 5,
+              "minimum": 1,
+              "description": "Graph traversal depth",
+              "default": 2,
+              "title": "Depth"
+            },
+            "description": "Graph traversal depth"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ingest/items": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import articles",
+        "description": "Upsert batch d'articles. Clé d'upsert : external_id.",
+        "operationId": "ingest_items_v1_ingest_items_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/locations": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import sites",
+        "description": "Upsert batch de sites/DCs. Clé d'upsert : external_id.",
+        "operationId": "ingest_locations_v1_ingest_locations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestLocationsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/suppliers": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import fournisseurs",
+        "description": "Upsert batch de fournisseurs.",
+        "operationId": "ingest_suppliers_v1_ingest_suppliers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestSuppliersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/supplier-items": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import conditions fournisseurs",
+        "description": "Upsert des conditions d'approvisionnement par couple (fournisseur × article).",
+        "operationId": "ingest_supplier_items_v1_ingest_supplier_items_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestSupplierItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/on-hand": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import stock physique",
+        "description": "Upsert du stock disponible (OnHandSupply) par (article × site).",
+        "operationId": "ingest_on_hand_v1_ingest_on_hand_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestOnHandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/purchase-orders": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import commandes d'achat",
+        "description": "Upsert de POs (PurchaseOrderSupply) avec tracking external_id ERP.",
+        "operationId": "ingest_purchase_orders_v1_ingest_purchase_orders_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestPurchaseOrdersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/forecast-demand": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Import prévisions de demande",
+        "description": "Upsert de prévisions (ForecastDemand) par (article × site × bucket × grain).",
+        "operationId": "ingest_forecast_demand_v1_ingest_forecast_demand_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestForecastRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/bom": {
+      "post": {
+        "tags": [
+          "bom"
+        ],
+        "summary": "Import nomenclature",
+        "description": "Importe une nomenclature complète (BOM) pour un article. Calcule les Low-Level Codes (LLC) automatiquement.",
+        "operationId": "ingest_bom_v1_ingest_bom_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestBOMRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestBOMResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/bom/{parent_external_id}": {
+      "get": {
+        "tags": [
+          "bom"
+        ],
+        "summary": "Lire nomenclature",
+        "description": "Retourne la nomenclature active d'un article avec ses composants et LLC.",
+        "operationId": "get_bom_v1_bom__parent_external_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "parent_external_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Parent External Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BOMResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bom/explode": {
+      "post": {
+        "tags": [
+          "bom"
+        ],
+        "summary": "Explosion MRP",
+        "description": "Calcule les besoins bruts et nets en composants pour une quantité donnée (explosion multi-niveau, netting sur stock disponible).",
+        "operationId": "explode_bom_v1_bom_explode_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplodeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/ingest/calendars": {
+      "post": {
+        "tags": [
+          "calendars"
+        ],
+        "summary": "Import calendrier",
+        "description": "Importe des jours non ouvrés pour un site. Upsert par (location × date). Absence d'entrée = jour ouvré par défaut.",
+        "operationId": "ingest_calendars_v1_ingest_calendars_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestCalendarsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestCalendarsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/calendars/{location_external_id}": {
+      "get": {
+        "tags": [
+          "calendars"
+        ],
+        "summary": "Lire calendrier",
+        "description": "Liste les entrées calendaires d'un site (optionnel: filtrage par plage de dates).",
+        "operationId": "get_calendars_v1_calendars__location_external_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "location_external_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Location External Id"
+            }
+          },
+          {
+            "name": "from_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From Date"
+            }
+          },
+          {
+            "name": "to_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Date"
+            }
+          },
+          {
+            "name": "working_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Working Only"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetCalendarsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/calendars/working-days": {
+      "post": {
+        "tags": [
+          "calendars"
+        ],
+        "summary": "Calcul jours ouvrés",
+        "description": "Retourne la date résultant de l'ajout de N jours ouvrés à une date de départ, en respectant le calendrier du site.",
+        "operationId": "compute_working_days_v1_calendars_working_days_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkingDaysRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkingDaysResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BOMComponentInput": {
+        "properties": {
+          "component_external_id": {
+            "type": "string",
+            "title": "Component External Id",
+            "description": "External_id du composant."
+          },
+          "quantity_per": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Quantity Per",
+            "description": "Quantité de composant pour 1 unité du parent (> 0)."
+          },
+          "uom": {
+            "type": "string",
+            "title": "Uom",
+            "description": "Unité de mesure du composant.",
+            "default": "EA"
+          },
+          "scrap_factor": {
+            "type": "number",
+            "exclusiveMaximum": 1.0,
+            "minimum": 0.0,
+            "title": "Scrap Factor",
+            "description": "Taux de rebut [0.0–1.0). Ex: 0.05 = 5% de perte.",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "component_external_id",
+          "quantity_per"
+        ],
+        "title": "BOMComponentInput"
+      },
+      "BOMComponentOutput": {
+        "properties": {
+          "component_external_id": {
+            "type": "string",
+            "title": "Component External Id"
+          },
+          "component_item_id": {
+            "type": "string",
+            "title": "Component Item Id"
+          },
+          "quantity_per": {
+            "type": "number",
+            "title": "Quantity Per"
+          },
+          "uom": {
+            "type": "string",
+            "title": "Uom"
+          },
+          "scrap_factor": {
+            "type": "number",
+            "title": "Scrap Factor"
+          },
+          "llc": {
+            "type": "integer",
+            "title": "Llc"
+          }
+        },
+        "type": "object",
+        "required": [
+          "component_external_id",
+          "component_item_id",
+          "quantity_per",
+          "uom",
+          "scrap_factor",
+          "llc"
+        ],
+        "title": "BOMComponentOutput"
+      },
+      "BOMResponse": {
+        "properties": {
+          "parent_external_id": {
+            "type": "string",
+            "title": "Parent External Id"
+          },
+          "parent_item_id": {
+            "type": "string",
+            "title": "Parent Item Id"
+          },
+          "bom_version": {
+            "type": "string",
+            "title": "Bom Version"
+          },
+          "effective_from": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective From"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/BOMComponentOutput"
+            },
+            "type": "array",
+            "title": "Components"
+          }
+        },
+        "type": "object",
+        "required": [
+          "parent_external_id",
+          "parent_item_id",
+          "bom_version",
+          "effective_from",
+          "components"
+        ],
+        "title": "BOMResponse"
+      },
+      "CalendarEntryInput": {
+        "properties": {
+          "calendar_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Calendar Date",
+            "description": "Date concernée (YYYY-MM-DD)."
+          },
+          "is_working_day": {
+            "type": "boolean",
+            "title": "Is Working Day",
+            "description": "False = jour non ouvré (férié, fermeture). Défaut = False.",
+            "default": false
+          },
+          "shift_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shift Count",
+            "description": "Nombre de shifts ce jour [0–3]. Optionnel."
+          },
+          "capacity_factor": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Factor",
+            "description": "Facteur de capacité [0.0–2.0]. 1.0 = capacité normale. Optionnel."
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes",
+            "description": "Commentaire (ex: 'Noël', 'Maintenance planifiée'). Optionnel."
+          }
+        },
+        "type": "object",
+        "required": [
+          "calendar_date"
+        ],
+        "title": "CalendarEntryInput"
+      },
+      "CalendarEntryOutput": {
+        "properties": {
+          "calendar_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Calendar Date"
+          },
+          "is_working_day": {
+            "type": "boolean",
+            "title": "Is Working Day"
+          },
+          "shift_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shift Count"
+          },
+          "capacity_factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Factor"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "calendar_date",
+          "is_working_day",
+          "shift_count",
+          "capacity_factor",
+          "notes"
+        ],
+        "title": "CalendarEntryOutput"
+      },
+      "CalendarIngestSummary": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "inserted": {
+            "type": "integer",
+            "title": "Inserted"
+          },
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          },
+          "errors": {
+            "type": "integer",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "inserted",
+          "updated",
+          "errors"
+        ],
+        "title": "CalendarIngestSummary"
+      },
+      "CausalStepOut": {
+        "properties": {
+          "step": {
+            "type": "integer",
+            "title": "Step"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "node_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Type"
+          },
+          "edge_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Type"
+          },
+          "fact": {
+            "type": "string",
+            "title": "Fact"
+          }
+        },
+        "type": "object",
+        "required": [
+          "step",
+          "node_id",
+          "node_type",
+          "edge_type",
+          "fact"
+        ],
+        "title": "CausalStepOut"
+      },
+      "EdgeOut": {
+        "properties": {
+          "edge_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Edge Id"
+          },
+          "edge_type": {
+            "type": "string",
+            "title": "Edge Type"
+          },
+          "from_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "From Node Id"
+          },
+          "to_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "To Node Id"
+          },
+          "priority": {
+            "type": "integer",
+            "title": "Priority"
+          },
+          "weight_ratio": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Weight Ratio"
+          }
+        },
+        "type": "object",
+        "required": [
+          "edge_id",
+          "edge_type",
+          "from_node_id",
+          "to_node_id",
+          "priority",
+          "weight_ratio"
+        ],
+        "title": "EdgeOut"
+      },
+      "EventRequest": {
+        "properties": {
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          },
+          "trigger_node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger Node Id"
+          },
+          "scenario_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario Id"
+          },
+          "field_changed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Changed"
+          },
+          "old_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Date"
+          },
+          "new_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Date"
+          },
+          "old_quantity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Quantity"
+          },
+          "new_quantity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Quantity"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "api"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_type"
+        ],
+        "title": "EventRequest"
+      },
+      "EventResponse": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Event Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "affected_nodes_estimate": {
+            "type": "integer",
+            "title": "Affected Nodes Estimate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "status",
+          "scenario_id",
+          "affected_nodes_estimate"
+        ],
+        "title": "EventResponse"
+      },
+      "ExplainResponse": {
+        "properties": {
+          "explanation_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Explanation Id"
+          },
+          "target_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Target Node Id"
+          },
+          "target_type": {
+            "type": "string",
+            "title": "Target Type"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "causal_path": {
+            "items": {
+              "$ref": "#/components/schemas/CausalStepOut"
+            },
+            "type": "array",
+            "title": "Causal Path"
+          },
+          "root_cause_node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Root Cause Node Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "explanation_id",
+          "target_node_id",
+          "target_type",
+          "summary",
+          "causal_path",
+          "root_cause_node_id"
+        ],
+        "title": "ExplainResponse"
+      },
+      "ExplodeLineOutput": {
+        "properties": {
+          "level": {
+            "type": "integer",
+            "title": "Level"
+          },
+          "component_external_id": {
+            "type": "string",
+            "title": "Component External Id"
+          },
+          "component_item_id": {
+            "type": "string",
+            "title": "Component Item Id"
+          },
+          "gross_requirement": {
+            "type": "number",
+            "title": "Gross Requirement"
+          },
+          "on_hand_qty": {
+            "type": "number",
+            "title": "On Hand Qty"
+          },
+          "net_requirement": {
+            "type": "number",
+            "title": "Net Requirement"
+          },
+          "has_shortage": {
+            "type": "boolean",
+            "title": "Has Shortage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "component_external_id",
+          "component_item_id",
+          "gross_requirement",
+          "on_hand_qty",
+          "net_requirement",
+          "has_shortage"
+        ],
+        "title": "ExplodeLineOutput"
+      },
+      "ExplodeRequest": {
+        "properties": {
+          "item_external_id": {
+            "type": "string",
+            "title": "Item External Id",
+            "description": "Article à exploser."
+          },
+          "quantity": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Quantity",
+            "description": "Quantité à produire (> 0)."
+          },
+          "location_external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location External Id",
+            "description": "Site de production. Optionnel."
+          },
+          "explosion_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explosion Date",
+            "description": "Date de référence pour l'explosion. Défaut = aujourd'hui."
+          },
+          "levels": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Levels",
+            "description": "Profondeur max d'explosion [1–20]. Défaut = 10.",
+            "default": 10
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_external_id",
+          "quantity"
+        ],
+        "title": "ExplodeRequest"
+      },
+      "ExplodeResponse": {
+        "properties": {
+          "parent_external_id": {
+            "type": "string",
+            "title": "Parent External Id"
+          },
+          "quantity": {
+            "type": "number",
+            "title": "Quantity"
+          },
+          "explosion": {
+            "items": {
+              "$ref": "#/components/schemas/ExplodeLineOutput"
+            },
+            "type": "array",
+            "title": "Explosion"
+          },
+          "total_components": {
+            "type": "integer",
+            "title": "Total Components"
+          },
+          "components_with_shortage": {
+            "type": "integer",
+            "title": "Components With Shortage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "parent_external_id",
+          "quantity",
+          "explosion",
+          "total_components",
+          "components_with_shortage"
+        ],
+        "title": "ExplodeResponse"
+      },
+      "ForecastRow": {
+        "properties": {
+          "item_external_id": {
+            "type": "string",
+            "title": "Item External Id",
+            "description": "Article prévu."
+          },
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id",
+            "description": "Site de consommation."
+          },
+          "quantity": {
+            "type": "number",
+            "title": "Quantity",
+            "description": "Quantité prévisionnelle (>= 0)."
+          },
+          "bucket_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Bucket Date",
+            "description": "Date de début du bucket (YYYY-MM-DD)."
+          },
+          "time_grain": {
+            "type": "string",
+            "title": "Time Grain",
+            "description": "Maille temporelle. Valeurs: day | week | month.",
+            "default": "week"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "statistical"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_external_id",
+          "location_external_id",
+          "quantity",
+          "bucket_date"
+        ],
+        "title": "ForecastRow"
+      },
+      "GetCalendarsResponse": {
+        "properties": {
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id"
+          },
+          "location_id": {
+            "type": "string",
+            "title": "Location Id"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/CalendarEntryOutput"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_external_id",
+          "location_id",
+          "entries",
+          "total"
+        ],
+        "title": "GetCalendarsResponse"
+      },
+      "GraphResponse": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeOut"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/EdgeOut"
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "item_id": {
+            "type": "string",
+            "title": "Item Id"
+          },
+          "location_id": {
+            "type": "string",
+            "title": "Location Id"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges",
+          "item_id",
+          "location_id",
+          "scenario_id",
+          "depth"
+        ],
+        "title": "GraphResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IngestBOMRequest": {
+        "properties": {
+          "parent_external_id": {
+            "type": "string",
+            "title": "Parent External Id",
+            "description": "External_id de l'article parent (article fabriqué)."
+          },
+          "bom_version": {
+            "type": "string",
+            "title": "Bom Version",
+            "description": "Version de la nomenclature (ex: '1.0', '2.1').",
+            "default": "1.0"
+          },
+          "effective_from": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective From",
+            "description": "Date d'entrée en vigueur de la nomenclature."
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/BOMComponentInput"
+            },
+            "type": "array",
+            "title": "Components",
+            "description": "Liste des composants de la nomenclature."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "description": "Si true, validation uniquement — aucune écriture en base.",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "parent_external_id",
+          "components"
+        ],
+        "title": "IngestBOMRequest"
+      },
+      "IngestBOMResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "bom_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Id"
+          },
+          "parent_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Item Id"
+          },
+          "components_imported": {
+            "type": "integer",
+            "title": "Components Imported"
+          },
+          "llc_updated": {
+            "type": "integer",
+            "title": "Llc Updated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "components_imported",
+          "llc_updated"
+        ],
+        "title": "IngestBOMResponse"
+      },
+      "IngestCalendarsRequest": {
+        "properties": {
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id",
+            "description": "External_id du site concerné."
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/CalendarEntryInput"
+            },
+            "type": "array",
+            "title": "Entries",
+            "description": "Entrées calendaires à importer (upsert par location × date)."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "description": "Si true, validation uniquement — aucune écriture en base.",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_external_id",
+          "entries"
+        ],
+        "title": "IngestCalendarsRequest"
+      },
+      "IngestCalendarsResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CalendarIngestSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "location_external_id",
+          "location_id",
+          "summary"
+        ],
+        "title": "IngestCalendarsResponse"
+      },
+      "IngestForecastRequest": {
+        "properties": {
+          "forecasts": {
+            "items": {
+              "$ref": "#/components/schemas/ForecastRow"
+            },
+            "type": "array",
+            "title": "Forecasts"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "forecasts"
+        ],
+        "title": "IngestForecastRequest"
+      },
+      "IngestItemsRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ItemRow"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "conflict_strategy": {
+            "type": "string",
+            "title": "Conflict Strategy",
+            "default": "upsert"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "IngestItemsRequest"
+      },
+      "IngestLocationsRequest": {
+        "properties": {
+          "locations": {
+            "items": {
+              "$ref": "#/components/schemas/LocationRow"
+            },
+            "type": "array",
+            "title": "Locations"
+          },
+          "conflict_strategy": {
+            "type": "string",
+            "title": "Conflict Strategy",
+            "default": "upsert"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "locations"
+        ],
+        "title": "IngestLocationsRequest"
+      },
+      "IngestOnHandRequest": {
+        "properties": {
+          "on_hand": {
+            "items": {
+              "$ref": "#/components/schemas/OnHandRow"
+            },
+            "type": "array",
+            "title": "On Hand"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "on_hand"
+        ],
+        "title": "IngestOnHandRequest"
+      },
+      "IngestPurchaseOrdersRequest": {
+        "properties": {
+          "purchase_orders": {
+            "items": {
+              "$ref": "#/components/schemas/PurchaseOrderRow"
+            },
+            "type": "array",
+            "title": "Purchase Orders"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "purchase_orders"
+        ],
+        "title": "IngestPurchaseOrdersRequest"
+      },
+      "IngestResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/IngestSummary"
+          },
+          "results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "results"
+        ],
+        "title": "IngestResponse"
+      },
+      "IngestSummary": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "inserted": {
+            "type": "integer",
+            "title": "Inserted"
+          },
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          },
+          "errors": {
+            "type": "integer",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "inserted",
+          "updated",
+          "errors"
+        ],
+        "title": "IngestSummary"
+      },
+      "IngestSupplierItemsRequest": {
+        "properties": {
+          "supplier_items": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierItemRow"
+            },
+            "type": "array",
+            "title": "Supplier Items"
+          },
+          "conflict_strategy": {
+            "type": "string",
+            "title": "Conflict Strategy",
+            "default": "upsert"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "supplier_items"
+        ],
+        "title": "IngestSupplierItemsRequest"
+      },
+      "IngestSuppliersRequest": {
+        "properties": {
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierRow"
+            },
+            "type": "array",
+            "title": "Suppliers"
+          },
+          "conflict_strategy": {
+            "type": "string",
+            "title": "Conflict Strategy",
+            "default": "upsert"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "suppliers"
+        ],
+        "title": "IngestSuppliersRequest"
+      },
+      "IssueRecord": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Node Id"
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "shortage_qty": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Shortage Qty"
+          },
+          "severity_score": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Severity Score"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "shortage_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shortage Date"
+          },
+          "explanation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explanation Id"
+          },
+          "explanation_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explanation Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "node_id",
+          "item_id",
+          "location_id",
+          "shortage_qty",
+          "severity_score",
+          "severity",
+          "shortage_date",
+          "explanation_id",
+          "explanation_url"
+        ],
+        "title": "IssueRecord"
+      },
+      "IssuesResponse": {
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/IssueRecord"
+            },
+            "type": "array",
+            "title": "Issues"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "as_of": {
+            "type": "string",
+            "title": "As Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "issues",
+          "total",
+          "as_of"
+        ],
+        "title": "IssuesResponse"
+      },
+      "ItemRow": {
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "title": "External Id",
+            "description": "Identifiant métier unique (ex: SKU ERP). Clé d'upsert."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Libellé de l'article."
+          },
+          "item_type": {
+            "type": "string",
+            "title": "Item Type",
+            "description": "Type d'article. Valeurs: finished_good | component | raw_material | semi_finished.",
+            "default": "finished_good"
+          },
+          "uom": {
+            "type": "string",
+            "title": "Uom",
+            "description": "Unité de mesure de base (ex: EA, KG, BOX).",
+            "default": "EA"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Statut. Valeurs: active | obsolete | phase_out.",
+            "default": "active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_id",
+          "name"
+        ],
+        "title": "ItemRow"
+      },
+      "LocationRow": {
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "title": "External Id",
+            "description": "Identifiant site/DC (ex: DC-ATL). Clé d'upsert."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Libellé du site."
+          },
+          "location_type": {
+            "type": "string",
+            "title": "Location Type",
+            "description": "Type. Valeurs: warehouse | factory | supplier | customer.",
+            "default": "dc"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "parent_external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent External Id",
+            "description": "External_id du site parent (optionnel, pour hiérarchies)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_id",
+          "name"
+        ],
+        "title": "LocationRow"
+      },
+      "NodeOut": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Node Id"
+          },
+          "node_type": {
+            "type": "string",
+            "title": "Node Type"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "time_ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ref"
+          },
+          "time_span_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Span Start"
+          },
+          "time_span_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Span End"
+          },
+          "time_grain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Grain"
+          },
+          "has_shortage": {
+            "type": "boolean",
+            "title": "Has Shortage"
+          },
+          "shortage_qty": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Shortage Qty"
+          },
+          "closing_stock": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closing Stock"
+          }
+        },
+        "type": "object",
+        "required": [
+          "node_id",
+          "node_type",
+          "quantity",
+          "time_ref",
+          "time_span_start",
+          "time_span_end",
+          "time_grain",
+          "has_shortage",
+          "shortage_qty",
+          "closing_stock"
+        ],
+        "title": "NodeOut"
+      },
+      "OnHandRow": {
+        "properties": {
+          "item_external_id": {
+            "type": "string",
+            "title": "Item External Id"
+          },
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id"
+          },
+          "quantity": {
+            "type": "number",
+            "title": "Quantity"
+          },
+          "uom": {
+            "type": "string",
+            "title": "Uom",
+            "default": "EA"
+          },
+          "as_of_date": {
+            "type": "string",
+            "format": "date",
+            "title": "As Of Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_external_id",
+          "location_external_id",
+          "quantity",
+          "as_of_date"
+        ],
+        "title": "OnHandRow"
+      },
+      "OverrideIn": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Node Id"
+          },
+          "field_name": {
+            "type": "string",
+            "title": "Field Name"
+          },
+          "new_value": {
+            "type": "string",
+            "title": "New Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "node_id",
+          "field_name",
+          "new_value"
+        ],
+        "title": "OverrideIn"
+      },
+      "ProjectionBucket": {
+        "properties": {
+          "bucket_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bucket Sequence"
+          },
+          "time_span_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Span Start"
+          },
+          "time_span_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Span End"
+          },
+          "time_grain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Grain"
+          },
+          "opening_stock": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opening Stock"
+          },
+          "inflows": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inflows"
+          },
+          "outflows": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outflows"
+          },
+          "closing_stock": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closing Stock"
+          },
+          "has_shortage": {
+            "type": "boolean",
+            "title": "Has Shortage"
+          },
+          "shortage_qty": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Shortage Qty"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket_sequence",
+          "time_span_start",
+          "time_span_end",
+          "time_grain",
+          "opening_stock",
+          "inflows",
+          "outflows",
+          "closing_stock",
+          "has_shortage",
+          "shortage_qty"
+        ],
+        "title": "ProjectionBucket"
+      },
+      "ProjectionResponse": {
+        "properties": {
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          },
+          "item_id": {
+            "type": "string",
+            "title": "Item Id"
+          },
+          "location_id": {
+            "type": "string",
+            "title": "Location Id"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "grain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grain"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectionBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "series_id",
+          "item_id",
+          "location_id",
+          "scenario_id",
+          "grain",
+          "buckets"
+        ],
+        "title": "ProjectionResponse"
+      },
+      "PurchaseOrderRow": {
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "title": "External Id",
+            "description": "Numéro de PO ERP. Clé d'upsert."
+          },
+          "item_external_id": {
+            "type": "string",
+            "title": "Item External Id",
+            "description": "Article commandé."
+          },
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id",
+            "description": "Site de réception."
+          },
+          "supplier_external_id": {
+            "type": "string",
+            "title": "Supplier External Id",
+            "description": "Fournisseur. Optionnel."
+          },
+          "quantity": {
+            "type": "number",
+            "title": "Quantity",
+            "description": "Quantité commandée (> 0)."
+          },
+          "uom": {
+            "type": "string",
+            "title": "Uom",
+            "default": "EA"
+          },
+          "expected_delivery_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Expected Delivery Date",
+            "description": "Date de réception prévue (YYYY-MM-DD)."
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "confirmed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_id",
+          "item_external_id",
+          "location_external_id",
+          "supplier_external_id",
+          "quantity",
+          "expected_delivery_date"
+        ],
+        "title": "PurchaseOrderRow"
+      },
+      "SimulateRequest": {
+        "properties": {
+          "scenario_name": {
+            "type": "string",
+            "title": "Scenario Name"
+          },
+          "base_scenario_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Scenario Id"
+          },
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/OverrideIn"
+            },
+            "type": "array",
+            "title": "Overrides",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_name"
+        ],
+        "title": "SimulateRequest"
+      },
+      "SimulateResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "scenario_name": {
+            "type": "string",
+            "title": "Scenario Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "override_count": {
+            "type": "integer",
+            "title": "Override Count"
+          },
+          "base_scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Base Scenario Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "scenario_name",
+          "status",
+          "override_count",
+          "base_scenario_id"
+        ],
+        "title": "SimulateResponse"
+      },
+      "SupplierItemRow": {
+        "properties": {
+          "supplier_external_id": {
+            "type": "string",
+            "title": "Supplier External Id"
+          },
+          "item_external_id": {
+            "type": "string",
+            "title": "Item External Id"
+          },
+          "lead_time_days": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Lead Time Days"
+          },
+          "moq": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moq"
+          },
+          "unit_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Cost"
+          },
+          "is_preferred": {
+            "type": "boolean",
+            "title": "Is Preferred",
+            "default": false
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "EUR"
+          }
+        },
+        "type": "object",
+        "required": [
+          "supplier_external_id",
+          "item_external_id",
+          "lead_time_days"
+        ],
+        "title": "SupplierItemRow"
+      },
+      "SupplierRow": {
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "title": "External Id",
+            "description": "Code fournisseur ERP. Clé d'upsert."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Raison sociale."
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days",
+            "description": "Délai d'approvisionnement standard en jours calendaires."
+          },
+          "reliability_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reliability Score",
+            "description": "Score de fiabilité [0.0–1.0]. 1.0 = parfait."
+          },
+          "moq": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moq"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external_id",
+          "name"
+        ],
+        "title": "SupplierRow"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WorkingDaysRequest": {
+        "properties": {
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id",
+            "description": "External_id du site."
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Start Date",
+            "description": "Date de départ (YYYY-MM-DD)."
+          },
+          "add_working_days": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Add Working Days",
+            "description": "Nombre de jours ouvrés à ajouter (>= 0)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_external_id",
+          "start_date",
+          "add_working_days"
+        ],
+        "title": "WorkingDaysRequest"
+      },
+      "WorkingDaysResponse": {
+        "properties": {
+          "location_external_id": {
+            "type": "string",
+            "title": "Location External Id"
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Start Date"
+          },
+          "add_working_days": {
+            "type": "integer",
+            "title": "Add Working Days"
+          },
+          "result_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Result Date"
+          },
+          "working_days_found": {
+            "type": "integer",
+            "title": "Working Days Found"
+          },
+          "non_working_days_skipped": {
+            "type": "integer",
+            "title": "Non Working Days Skipped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "location_external_id",
+          "start_date",
+          "add_working_days",
+          "result_date",
+          "working_days_found",
+          "non_working_days_skipped"
+        ],
+        "title": "WorkingDaysResponse"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
