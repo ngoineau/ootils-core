@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from ootils_core.api.routers import bom, calendars, dq, events, explain, ghosts, graph, ingest, issues, projection, rccp, simulate
+from ootils_core.api.routers.graph import nodes_router
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     application.include_router(explain.router)
     application.include_router(simulate.router)
     application.include_router(graph.router)
+    application.include_router(nodes_router)
     application.include_router(ingest.router)
     application.include_router(dq.router)
     application.include_router(bom.router)

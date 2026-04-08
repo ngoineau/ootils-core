@@ -174,3 +174,116 @@ async def get_graph(
         scenario_id=scenario_id,
         depth=depth,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/nodes — List nodes for UI dropdowns
+# ---------------------------------------------------------------------------
+
+class NodeListItem(BaseModel):
+    node_id: UUID
+    node_type: str
+    item_id: Optional[UUID]
+    location_id: Optional[UUID]
+    scenario_id: UUID
+    time_ref: Optional[date]
+    qty: Optional[Decimal]
+    item_code: Optional[str] = None
+    location_code: Optional[str] = None
+
+
+class NodeListResponse(BaseModel):
+    nodes: list[NodeListItem]
+    total: int
+
+
+nodes_router = APIRouter(prefix="/v1/nodes", tags=["nodes"])
+
+
+@nodes_router.get("", response_model=NodeListResponse)
+async def list_nodes(
+    item_id: Optional[UUID] = Query(default=None),
+    location_id: Optional[UUID] = Query(default=None),
+    node_type: Optional[str] = Query(default=None),
+    scenario_id: Optional[UUID] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> NodeListResponse:
+    """List nodes with optional filters — used for UI dropdowns (e.g. Simulate page)."""
+    effective_scenario_id = scenario_id or UUID("00000000-0000-0000-0000-000000000001")
+
+    conditions = ["n.scenario_id = %s", "n.active = TRUE"]
+    params: list = [effective_scenario_id]
+
+    if item_id is not None:
+        conditions.append("n.item_id = %s")
+        params.append(item_id)
+
+    if location_id is not None:
+        conditions.append("n.location_id = %s")
+        params.append(location_id)
+
+    if node_type is not None:
+        conditions.append("n.node_type = %s")
+        params.append(node_type)
+
+    where_clause = " AND ".join(conditions)
+
+    # Count total
+    count_row = db.execute(
+        f"SELECT COUNT(*) AS cnt FROM nodes n WHERE {where_clause}",
+        params,
+    ).fetchone()
+    total = int(count_row["cnt"]) if count_row else 0
+
+    # Fetch with item_code + location_code via LEFT JOIN
+    params_with_limit = params + [limit]
+    rows = db.execute(
+        f"""
+        SELECT
+            n.node_id,
+            n.node_type,
+            n.item_id,
+            n.location_id,
+            n.scenario_id,
+            n.time_ref,
+            n.quantity AS qty,
+            i.name    AS item_code,
+            l.name    AS location_code
+        FROM nodes n
+        LEFT JOIN items     i ON i.item_id     = n.item_id
+        LEFT JOIN locations l ON l.location_id = n.location_id
+        WHERE {where_clause}
+        ORDER BY n.node_type ASC, n.time_ref ASC NULLS LAST
+        LIMIT %s
+        """,
+        params_with_limit,
+    ).fetchall()
+
+    nodes = [
+        NodeListItem(
+            node_id=UUID(str(row["node_id"])),
+            node_type=row["node_type"],
+            item_id=UUID(str(row["item_id"])) if row["item_id"] else None,
+            location_id=UUID(str(row["location_id"])) if row["location_id"] else None,
+            scenario_id=UUID(str(row["scenario_id"])),
+            time_ref=row["time_ref"],
+            qty=row["qty"],
+            item_code=row["item_code"],
+            location_code=row["location_code"],
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "nodes.list scenario=%s item=%s location=%s type=%s total=%d returned=%d",
+        effective_scenario_id,
+        item_id,
+        location_id,
+        node_type,
+        total,
+        len(nodes),
+    )
+
+    return NodeListResponse(nodes=nodes, total=total)
