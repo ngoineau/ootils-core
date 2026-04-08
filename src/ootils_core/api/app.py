@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from ootils_core.api.routers import bom, calendars, events, explain, graph, ingest, issues, projection, simulate
+from ootils_core.api.routers import bom, calendars, events, explain, graph, ingest, issues, projection, rccp, simulate
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
     application.include_router(ingest.router)
     application.include_router(bom.router)
     application.include_router(calendars.router)
+    application.include_router(rccp.router)
 
     @application.exception_handler(Exception)
     async def generic_exception_handler(request, exc: Exception) -> JSONResponse:
