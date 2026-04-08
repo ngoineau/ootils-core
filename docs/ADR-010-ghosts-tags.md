@@ -1,6 +1,6 @@
 # ADR-010 : Ghosts et Tags — Virtualisation et Groupements ad-hoc
 
-**Statut :** PROPOSED — 2026-04-07  
+**Statut :** PARTIALLY_IMPLEMENTED — 2026-04-08 (Resource V1 implémentée, Ghosts en cours)  
 **Auteur :** Architecture (assisté par Claw)  
 **Références :** ADR-001 (graph model), ADR-003 (propagation incrémentale), ADR-009 (import pipeline), SPEC-HIERARCHIES, SPEC-GHOSTS-TAGS
 
@@ -148,7 +148,7 @@ Stocker les tags dans un champ JSONB `tags TEXT[]` sur les tables `items`, `loca
 
 - **Complexité moteur accrue :** le propagateur doit distinguer les ghost_nodes des nodes standards et appliquer la logique de surveillance/agrégation (selon ghost_type). Pour phase_transition : surveillance cohérence supply + émission alertes `transition_inconsistency`. Pour capacity_aggregate : agrégation de charge. Risque de régression si mal isolé.
 - **Migration 008 requise :** ajout des tables `ghost_nodes`, `ghost_members`, `tags`, `entity_tags` + mise à jour des CHECK constraints sur `nodes.node_type` et `edges.edge_type`.
-- **Entité Resource absente (V2) :** le Ghost `capacity_aggregate` est partiellement opérationnel sans l'entité Resource — la comparaison charge/capacité ne peut pas être automatisée tant que la capacité n'est pas modélisée. Mitigation temporaire : attribut `capacity_override` sur `ghost_nodes` en attendant.
+- **Entité Resource implémentée (V1) :** migration 009 — tables `resources` + `resource_capacity_overrides`, edge type `consumes_resource`, nœud `Resource` dans le graphe, endpoint `POST /v1/ingest/resources`, endpoint `GET /v1/rccp/{resource_external_id}` (grain day/week/month, charge vs capacité, overloaded detection). Statut : **IMPLÉMENTÉ V1** — 2026-04-08.
 - **Contraintes de membership enforced applicativement :** les règles "exactement 1 outgoing + 1 incoming" ne peuvent pas être exprimées en SQL pur sans trigger. Elles doivent être dans le layer service — à tester explicitement.
 - **Co-dépendance hiérarchies :** sans livraison parallèle des hiérarchies, les Ghosts sont sous-utilisables en contexte S&OP (voir D5).
 
