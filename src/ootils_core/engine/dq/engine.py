@@ -643,6 +643,14 @@ def run_dq(db: psycopg.Connection, batch_id: UUID) -> DQResult:
         batch_id, entity_type, len(ingest_rows), passed_rows, failed_rows, warning_rows, len(all_issues),
     )
 
+    # Auto-trigger DQ Agent (stat + temporal + impact + LLM) after L1+L2
+    try:
+        from ootils_core.engine.dq.agent import run_dq_agent
+        run_dq_agent(db, batch_id)
+    except Exception as agent_exc:
+        # Agent failure must never break the core DQ result
+        logger.warning("dq_agent failed for batch %s (non-fatal): %s", batch_id, agent_exc)
+
     return DQResult(
         batch_id=batch_id,
         total_rows=len(ingest_rows),
