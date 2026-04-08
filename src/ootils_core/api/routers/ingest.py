@@ -908,3 +908,157 @@ async def ingest_forecast_demand(
         len(body.forecasts), inserted, updated,
     )
     return _ok(inserted, updated, len(body.forecasts), results)
+
+
+# ─────────────────────────────────────────────────────────────
+# 8. POST /v1/ingest/resources
+# ─────────────────────────────────────────────────────────────
+
+VALID_RESOURCE_TYPES = {"machine", "line", "team", "tool"}
+
+
+class ResourceRow(BaseModel):
+    external_id: str = Field(..., description="Unique resource identifier. Upsert key.")
+    name: str = Field(..., description="Resource label.")
+    resource_type: str = Field(..., description="Resource type. Values: machine | line | team | tool.")
+    location_external_id: Optional[str] = Field(None, description="Site where the resource is located (optional).")
+    capacity_per_day: float = Field(1.0, gt=0, description="Nominal capacity per working day.")
+    capacity_unit: str = Field("units", description="Unit of the capacity measure.")
+    notes: Optional[str] = None
+
+    @field_validator("external_id", "name")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+
+class IngestResourcesRequest(BaseModel):
+    resources: list[ResourceRow]
+    conflict_strategy: str = "upsert"
+    dry_run: bool = False
+
+
+@router.post(
+    "/resources",
+    response_model=IngestResponse,
+    summary="Import resources",
+    description="Upsert a batch of resources. Upsert key: external_id. Also creates/updates a Resource node in the graph.",
+)
+async def ingest_resources(
+    body: IngestResourcesRequest,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """Upsert resources by external_id. Also maintains a Resource node in the graph."""
+    errors: list[dict] = []
+
+    # Validate resource_type
+    for i, res in enumerate(body.resources):
+        row_errs = []
+        if res.resource_type not in VALID_RESOURCE_TYPES:
+            row_errs.append(
+                f"resource_type '{res.resource_type}' invalid; valid: {sorted(VALID_RESOURCE_TYPES)}"
+            )
+        if row_errs:
+            errors.append({"external_id": res.external_id, "row": i, "errors": row_errs})
+
+    if errors:
+        _raise_422(errors)
+
+    # Resolve location FKs
+    loc_ext_ids = [r.location_external_id for r in body.resources if r.location_external_id]
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", loc_ext_ids) if loc_ext_ids else {}
+
+    fk_errors: list[dict] = []
+    for i, res in enumerate(body.resources):
+        if res.location_external_id and res.location_external_id not in loc_map:
+            fk_errors.append({
+                "external_id": res.external_id,
+                "row": i,
+                "errors": [f"location_external_id '{res.location_external_id}' not found in DB"],
+            })
+
+    if fk_errors:
+        _raise_422(fk_errors)
+
+    if body.dry_run:
+        return _dry_run_response(body.resources)
+
+    # Batch-fetch existing resources
+    existing_resources = _batch_existing(
+        db, "resources", "external_id", "resource_id",
+        [r.external_id for r in body.resources],
+    )
+
+    results: list[dict] = []
+    inserted = updated = 0
+
+    for res in body.resources:
+        location_id = loc_map.get(res.location_external_id) if res.location_external_id else None
+
+        if res.external_id in existing_resources:
+            resource_id = existing_resources[res.external_id]
+            db.execute(
+                """
+                UPDATE resources
+                SET name = %s, resource_type = %s, location_id = %s,
+                    capacity_per_day = %s, capacity_unit = %s, notes = %s,
+                    updated_at = now()
+                WHERE resource_id = %s
+                """,
+                (res.name, res.resource_type, location_id,
+                 res.capacity_per_day, res.capacity_unit, res.notes,
+                 resource_id),
+            )
+            # Update Resource graph node
+            db.execute(
+                """
+                UPDATE nodes
+                SET location_id = %s, updated_at = now()
+                WHERE node_type = 'Resource' AND external_id = %s
+                """,
+                (location_id, res.external_id),
+            )
+            results.append({
+                "external_id": res.external_id,
+                "resource_id": str(resource_id),
+                "action": "updated",
+            })
+            updated += 1
+        else:
+            resource_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO resources
+                    (resource_id, external_id, name, resource_type, location_id,
+                     capacity_per_day, capacity_unit, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (resource_id, res.external_id, res.name, res.resource_type, location_id,
+                 res.capacity_per_day, res.capacity_unit, res.notes),
+            )
+            # Create Resource graph node (for edge connectivity)
+            node_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO nodes
+                    (node_id, node_type, scenario_id, location_id, external_id, active)
+                VALUES (%s, 'Resource', %s, %s, %s, TRUE)
+                """,
+                (node_id, BASELINE_SCENARIO_ID, location_id, res.external_id),
+            )
+            results.append({
+                "external_id": res.external_id,
+                "resource_id": str(resource_id),
+                "node_id": str(node_id),
+                "action": "inserted",
+            })
+            inserted += 1
+
+    logger.info(
+        "ingest.resources total=%d inserted=%d updated=%d",
+        len(body.resources), inserted, updated,
+    )
+    return _ok(inserted, updated, len(body.resources), results)
