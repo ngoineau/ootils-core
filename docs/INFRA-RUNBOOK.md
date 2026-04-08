@@ -1,6 +1,6 @@
 # Documentation complete infrastructure OOTILS
 
-Mise a jour: 2026-04-05
+Mise a jour: 2026-04-08
 
 ## 1. Objectif
 
@@ -91,13 +91,17 @@ Etat connu:
 - Port API publie: 8000/tcp
 - Acces direct LAN: http://192.168.1.176:8000
 
-Etat connu au 2026-04-05:
-- repo: https://github.com/ngoineau/ootils-core.git
+Etat connu au 2026-04-08:
+- repo: git@github.com:ngoineau/ootils-core.git (SSH, pas HTTPS)
 - branche: main
-- commit deploye: 1ee0cd77f54bd150cf5b1a98ec790fa9002f8cae
+- commit deploye: 98e8084 (Merge PR #80 — fix API spec english)
+- remote git: correctement configure en SSH avec cle id_ed25519_github (voir section 4.1)
 - conteneurs en service:
   - ootils-core-api-1
   - ootils-core-postgres-1
+
+Note 2026-04-08: le clone initial etait partiel (refspec limite a live/v1-bootstrap).
+Fix applique: git remote set-branches origin '*' + git fetch --all + git reset --hard origin/main.
 
 ### 3.4 Poste admin Windows
 
@@ -110,18 +114,41 @@ Etat connu au 2026-04-05:
 
 ### 4.1 Identites SSH verifiees
 
-Depuis le poste admin, la configuration SSH effective observee pour les cibles suivantes utilise la meme identite:
-
+Depuis le poste admin Windows:
 - root@192.168.1.175 -> ~/.ssh/id_ed25519_ootils
 - root@192.168.1.124 -> ~/.ssh/id_ed25519_ootils
-- debian@192.168.1.176 -> ~/.ssh/id_ed25519_ootils avec IdentitiesOnly=yes verifie dans les usages d'exploitation
+- debian@192.168.1.176 -> ~/.ssh/id_ed25519_ootils avec IdentitiesOnly=yes
 
-Commande de verification utilisee localement:
+Depuis Claw (OpenClaw sur VM 200, ajout 2026-04-08):
+- Cle infra: ~/.ssh/id_ed25519_infra (ed25519, label: claw@openclaw)
+  - debian@192.168.1.176 (alias: ootils-core-vm201)
+  - root@192.168.1.124   (alias: openclaw-vm200)
+- Cle GitHub: ~/.ssh/id_ed25519_github
+  - utilisee pour git sur ootils-core (VM 201) et ootils-ui (VM 200)
+  - copiee sur les deux VMs dans ~/.ssh/id_ed25519_github
 
-```powershell
-ssh -G root@192.168.1.175 | Select-String '^identityfile '
-ssh -G root@192.168.1.124 | Select-String '^identityfile '
+Configuration ~/.ssh/config cote Claw:
 ```
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_github
+  IdentitiesOnly yes
+
+Host ootils-core-vm201
+  HostName 192.168.1.176
+  User debian
+  IdentityFile ~/.ssh/id_ed25519_infra
+  IdentitiesOnly yes
+
+Host openclaw-vm200
+  HostName 192.168.1.124
+  User root
+  IdentityFile ~/.ssh/id_ed25519_infra
+  IdentitiesOnly yes
+```
+
+En cas de reconstruction: regenerer id_ed25519_infra, reposter la cle publique sur les VMs dans ~/.ssh/authorized_keys.
 
 ### 4.2 GitHub CLI
 
@@ -165,49 +192,55 @@ Les secrets ne doivent pas etre republies dans GitHub. Pour reconstruire, verifi
 ### 5.1 Emplacement et etat courant
 
 - Hote: 192.168.1.124
-- Chemin repo: /opt/ootils-ui
-- Remote git: git@github.com:ngoineau/ootils-ui.git
-- Commit deploye observe: af9d590d5ed72fbf583eb39b449d89a40d21a5cf
+- Chemin repo: /home/ubuntu/ootils-ui
+- Remote git: git@github.com:ngoineau/ootils-ui.git (branche master)
+- Commit deploye: 3219df6 (infra: Dockerfile + docker-compose + standalone build)
 - Container: ootils-ui
+- Port: 3000
+
+Note: le runbook precedent indiquait /opt/ootils-ui — le deploiement 2026-04-08 a utilise /home/ubuntu/ootils-ui.
 
 ### 5.2 Publication reseau
 
-Compose actuel:
+Compose actuel (2026-04-08):
 
 ```yaml
 services:
   ootils-ui:
+    build: .
     container_name: ootils-ui
-    build:
-      context: /opt/ootils-ui
-      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:13000:3000"
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - OOTILS_API_URL=http://192.168.1.176:8000
 ```
 
-Consequences:
-- la UI n'est pas exposee directement sur le LAN
-- elle est joignable localement sur la VM: http://127.0.0.1:13000
-- elle est joignable depuis le poste admin via tunnel SSH local: http://127.0.0.1:13000
+Acces:
+- Directement sur le LAN: http://192.168.1.124:3000
+- Proxy API integre Next.js: /api/* -> http://192.168.1.176:8000/*
 
-Validation constatee le 2026-04-05:
-- docker compose ps -> container Up
-- curl -I http://127.0.0.1:13000 -> HTTP 200
+Validation:
+- curl http://192.168.1.124:3000/ -> HTTP 200 + HTML Next.js
 
-### 5.3 Script de redeploiement UI
+### 5.3 Redeploiement UI (Claw autonome)
 
-Script local: C:\dev\OpenClaw\scripts\deploy-ootils-ui-vm.sh
+Claw peut deployer directement via SSH:
 
-Ce script:
-- travaille sur /opt/ootils-ui
-- clone le repo si absent
-- fait un git fetch --all --tags
-- checkout le commit demande
-- genere un Dockerfile multi-stage base sur node:22-alpine
-- genere compose.yaml
-- lance docker compose up -d --build
-- verifie HTTP 200 sur 127.0.0.1:13000
+```bash
+ssh openclaw-vm200 "cd /home/ubuntu/ootils-ui && git pull && docker compose up -d --build"
+```
+
+Reconstruction from scratch sur VM 200:
+```bash
+ssh openclaw-vm200 "
+  # Prerequis: cle GitHub sur VM (voir section 4.1)
+  git clone git@github.com:ngoineau/ootils-ui.git /home/ubuntu/ootils-ui
+  cd /home/ubuntu/ootils-ui
+  docker compose up -d --build
+"
+```
 
 Commande type:
 
@@ -436,14 +469,17 @@ Get-Content C:\dev\OpenClaw\logs\openclaw-tunnel.log -Tail 100
 - ngoineau/ootils-ui
 - openclaw/openclaw
 
-### 9.2 Livraisons confirmees pendant cette sequence
+### 9.2 Livraisons confirmees
 
 - ootils-core#46 -> UI initiale, repo prive ngoineau/ootils-ui, deployee sur VM 200
 - ootils-ui#1 -> correction panneau d'explication, redeployee
 - ootils-core#47 -> Sprint UI-2, redeployee
 - ootils-ui#2 -> validation node_id requise pour simulate, redeployee
-- ootils-core#48 -> bug backend encore ouvert sur invalid payload /simulate
 - ootils-core#56 -> backend deploye et valide sur 192.168.1.176 avec fix 1ee0cd7
+- ootils-core#67 -> merge ingest-router + ghosts-tags sur main (213 tests)
+- ootils-core#83 -> SSH Claw setup (cle id_ed25519_infra autorisee sur VM 201 et VM 200) — ferme
+- ootils-core#84 -> fix VM 201 git remote + deploiement main 98e8084 — ferme
+- ootils-ui#3   -> deploiement VM 200 Dockerfile+compose, commit 3219df6 — ferme
 
 ## 10. Procedure de reconstruction complete apres crash
 
@@ -471,11 +507,9 @@ Get-Content C:\dev\OpenClaw\logs\openclaw-tunnel.log -Tail 100
 
 1. SSH root@192.168.1.124
 2. Reinstaller Docker et Docker Compose si necessaire
-3. Recreer /opt/openclaw
-4. Recreer /opt/ootils-ui
-5. Restaurer /root/.openclaw depuis sauvegarde
-6. Restaurer /opt/openclaw/.env
-7. Relancer OpenClaw:
+3. Restaurer /root/.openclaw depuis sauvegarde
+4. Restaurer /opt/openclaw/.env
+5. Relancer OpenClaw:
 
 ```bash
 cd /opt/openclaw
@@ -484,48 +518,80 @@ docker compose ps
 curl http://127.0.0.1:18789/healthz
 ```
 
-8. Redeployer UI:
+6. Copier la cle GitHub sur la VM (pour le clone ootils-ui):
 
 ```bash
-cd /opt/ootils-ui
-git fetch --all --tags
-git checkout af9d590d5ed72fbf583eb39b449d89a40d21a5cf
-docker compose up -d --build
-curl -I http://127.0.0.1:13000
+# Depuis Claw
+scp ~/.ssh/id_ed25519_github root@192.168.1.124:~/.ssh/id_ed25519_github
+ssh root@192.168.1.124 "chmod 600 ~/.ssh/id_ed25519_github && cat > ~/.ssh/config << 'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_github
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config"
+```
+
+7. Cloner et deployer ootils-ui:
+
+```bash
+ssh openclaw-vm200 "
+  git clone git@github.com:ngoineau/ootils-ui.git /home/ubuntu/ootils-ui
+  cd /home/ubuntu/ootils-ui
+  docker compose up -d --build
+"
+# Valider
+curl http://192.168.1.124:3000/
 ```
 
 ### Etape 4 - Restaurer le backend ootils-v1
 
 1. SSH debian@192.168.1.176
 2. Reinstaller Docker et Docker Compose si necessaire
-3. Cloner le repo:
+3. Copier la cle GitHub sur la VM:
 
 ```bash
-git clone https://github.com/ngoineau/ootils-core.git ~/ootils-core
-cd ~/ootils-core
-git checkout 1ee0cd77f54bd150cf5b1a98ec790fa9002f8cae
+# Depuis Claw
+scp ~/.ssh/id_ed25519_github debian@192.168.1.176:~/.ssh/id_ed25519_github
+ssh ootils-core-vm201 "chmod 600 ~/.ssh/id_ed25519_github && cat > ~/.ssh/config << 'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_github
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config"
 ```
 
-4. Restaurer ~/.env
-5. Lancer PostgreSQL et l'API:
+4. Cloner le repo (SSH, pas HTTPS):
 
 ```bash
-docker compose up -d --build
-docker compose ps
+ssh ootils-core-vm201 "
+  git clone git@github.com:ngoineau/ootils-core.git ~/ootils-core
+  cd ~/ootils-core
+  git checkout main
+"
 ```
 
-6. Si la migration 007 manque, l'appliquer manuellement
-7. Relancer le seed:
+5. Restaurer ~/ootils-core/.env
+6. Lancer PostgreSQL et l'API:
 
 ```bash
-docker compose exec -T api python scripts/seed_demo_data.py
+ssh ootils-core-vm201 "cd ~/ootils-core && docker compose up -d --build"
+```
+
+7. Relancer le seed si base vide:
+
+```bash
+ssh ootils-core-vm201 "cd ~/ootils-core && docker compose exec -T api python scripts/seed_demo_data.py"
 ```
 
 8. Valider:
 
 ```bash
-curl -H "Authorization: Bearer <OOTILS_API_TOKEN>" "http://192.168.1.176:8000/v1/issues?horizon_days=90"
-curl -H "Authorization: Bearer <OOTILS_API_TOKEN>" "http://192.168.1.176:8000/v1/graph?root_item_code=VALVE-02&root_location=DC-LAX&horizon_days=90"
+curl -H "Authorization: Bearer dev-token" "http://192.168.1.176:8000/v1/issues?horizon_days=90"
+curl http://192.168.1.176:8000/health
 ```
 
 ### Etape 5 - Restaurer les tunnels admin Windows
@@ -544,17 +610,19 @@ http://127.0.0.1:13000
 
 ### Priorite haute
 
-- %USERPROFILE%\.ssh\id_ed25519_ootils
+- %USERPROFILE%\.ssh\id_ed25519_ootils (poste admin Windows)
+- ~/.ssh/id_ed25519_github (Claw — acces GitHub depuis VMs)
+- ~/.ssh/id_ed25519_infra (Claw — acces SSH aux VMs)
 - contenu de /root/.openclaw
 - /opt/openclaw/.env
-- /opt/ootils-ui si des adaptations locales existent
-- ~/ootils-core/.env
-- dumps ou volume postgres_data du backend
+- ~/ootils-core/.env (VM 201)
+- dumps ou volume postgres_data du backend (VM 201)
 
 ### Priorite moyenne
 
 - C:\dev\OpenClaw\scripts
 - C:\dev\OpenClaw\logs
+- /home/ubuntu/ootils-ui — pas critique (reclonable depuis GitHub a tout moment)
 - documentation d'exploitation dans C:\dev\OpenClaw
 
 ## 12. Risques et points faibles restants
