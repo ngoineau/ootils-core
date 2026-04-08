@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.engine.dq.engine import run_dq
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/ingest", tags=["ingest"])
@@ -76,6 +77,46 @@ def _dry_run_response(items: list[Any], label: str = "external_id") -> IngestRes
 def _raise_422(errors: list[dict]) -> None:
     """Raise HTTP 422 with structured error list. Nothing is persisted."""
     raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=errors)
+
+
+def _create_ingest_batch(
+    db: psycopg.Connection,
+    entity_type: str,
+    rows_data: list[Any],
+    source_system: str = "ingest_api",
+) -> UUID:
+    """
+    Create an ingest_batch record and persist all rows as ingest_rows.
+    Returns the new batch_id.
+    """
+    import json as _json
+    batch_id = uuid4()
+    db.execute(
+        """
+        INSERT INTO ingest_batches
+            (batch_id, entity_type, source_system, status, total_rows, submitted_by)
+        VALUES (%s, %s, %s, 'processing', %s, 'ingest_api')
+        """,
+        (batch_id, entity_type, source_system, len(rows_data)),
+    )
+    for i, row in enumerate(rows_data):
+        raw = _json.dumps(row if isinstance(row, dict) else row.model_dump(), default=str)
+        db.execute(
+            """
+            INSERT INTO ingest_rows (row_id, batch_id, row_number, raw_content)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (uuid4(), batch_id, i + 1, raw),
+        )
+    return batch_id
+
+
+def _trigger_dq(db: psycopg.Connection, batch_id: UUID) -> None:
+    """Run DQ pipeline on a batch, logging errors but never failing the ingest call."""
+    try:
+        run_dq(db, batch_id)
+    except Exception as exc:
+        logger.warning("DQ run failed for batch %s: %s", batch_id, exc)
 
 
 def _batch_existing(
@@ -182,6 +223,8 @@ async def ingest_items(
             inserted += 1
 
     logger.info("ingest.items total=%d inserted=%d updated=%d", len(body.items), inserted, updated)
+    batch_id = _create_ingest_batch(db, "items", [it.model_dump() for it in body.items])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.items), results)
 
 
@@ -284,6 +327,8 @@ async def ingest_locations(
             inserted += 1
 
     logger.info("ingest.locations total=%d inserted=%d updated=%d", len(body.locations), inserted, updated)
+    batch_id = _create_ingest_batch(db, "locations", [loc.model_dump() for loc in body.locations])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.locations), results)
 
 
@@ -377,6 +422,8 @@ async def ingest_suppliers(
             inserted += 1
 
     logger.info("ingest.suppliers total=%d inserted=%d updated=%d", len(body.suppliers), inserted, updated)
+    batch_id = _create_ingest_batch(db, "suppliers", [sup.model_dump() for sup in body.suppliers])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.suppliers), results)
 
 
@@ -501,6 +548,8 @@ async def ingest_supplier_items(
         "ingest.supplier_items total=%d inserted=%d updated=%d",
         len(body.supplier_items), inserted, updated,
     )
+    batch_id = _create_ingest_batch(db, "supplier_items", [si.model_dump() for si in body.supplier_items])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.supplier_items), results)
 
 
@@ -625,6 +674,8 @@ async def ingest_on_hand(
         "ingest.on_hand total=%d inserted=%d updated=%d",
         len(body.on_hand), inserted, updated,
     )
+    batch_id = _create_ingest_batch(db, "on_hand", [r.model_dump() for r in body.on_hand])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.on_hand), results)
 
 
@@ -759,6 +810,8 @@ async def ingest_purchase_orders(
         "ingest.purchase_orders total=%d inserted=%d updated=%d",
         len(body.purchase_orders), inserted, updated,
     )
+    batch_id = _create_ingest_batch(db, "purchase_orders", [po.model_dump() for po in body.purchase_orders])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.purchase_orders), results)
 
 
@@ -907,4 +960,6 @@ async def ingest_forecast_demand(
         "ingest.forecast_demand total=%d inserted=%d updated=%d",
         len(body.forecasts), inserted, updated,
     )
+    batch_id = _create_ingest_batch(db, "forecast_demand", [fc.model_dump() for fc in body.forecasts])
+    _trigger_dq(db, batch_id)
     return _ok(inserted, updated, len(body.forecasts), results)
