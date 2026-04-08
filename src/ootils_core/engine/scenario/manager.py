@@ -90,8 +90,11 @@ class ScenarioManager:
             parent_scenario_id,
         )
 
+        # Deep-copy projection_series first (nodes reference them)
+        series_mapping = self._copy_projection_series(parent_scenario_id, scenario_id, db)
+
         # Deep-copy parent nodes into the new scenario
-        self._copy_nodes(parent_scenario_id, scenario_id, db)
+        self._copy_nodes(parent_scenario_id, scenario_id, db, series_mapping)
 
         return Scenario(
             scenario_id=scenario_id,
@@ -103,15 +106,59 @@ class ScenarioManager:
             updated_at=now,
         )
 
+    def _copy_projection_series(
+        self,
+        source_scenario_id: UUID,
+        target_scenario_id: UUID,
+        db: psycopg.Connection,
+    ) -> dict:
+        """
+        Copy projection_series from source to target scenario.
+        Returns a mapping old_series_id -> new_series_id.
+        """
+        rows = db.execute(
+            "SELECT * FROM projection_series WHERE scenario_id = %s",
+            (source_scenario_id,),
+        ).fetchall()
+
+        mapping: dict = {}
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            new_series_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO projection_series
+                    (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (item_id, location_id, scenario_id) DO NOTHING
+                """,
+                (
+                    new_series_id,
+                    row["item_id"],
+                    row["location_id"],
+                    target_scenario_id,
+                    row["horizon_start"],
+                    row["horizon_end"],
+                    now,
+                    now,
+                ),
+            )
+            mapping[str(row["series_id"])] = new_series_id
+        return mapping
+
     def _copy_nodes(
         self,
         source_scenario_id: UUID,
         target_scenario_id: UUID,
         db: psycopg.Connection,
+        series_mapping: dict | None = None,
     ) -> int:
         """
         Copy all active nodes from source_scenario_id to target_scenario_id,
         assigning fresh node_id UUIDs.
+
+        series_mapping: optional dict {str(old_series_id): new_series_id} to
+        remap projection_series_id references to the new scenario's series.
 
         Returns the number of nodes copied.
         """
@@ -163,7 +210,7 @@ class ScenarioManager:
                     row["time_ref"],
                     row["time_span_start"],
                     row["time_span_end"],
-                    row["projection_series_id"],
+                    series_mapping.get(str(row["projection_series_id"]), row["projection_series_id"]) if series_mapping and row["projection_series_id"] else row["projection_series_id"],
                     row["bucket_sequence"],
                     row["opening_stock"],
                     row["inflows"],
