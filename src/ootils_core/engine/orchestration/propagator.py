@@ -94,6 +94,7 @@ class PropagationEngine:
 
             if trigger_node_id is None:
                 logger.info("Event %s has no trigger node — skipping propagation", event_id)
+                db.execute("UPDATE events SET processed = TRUE WHERE event_id = %s", (event_id,))
                 self._finish_run(calc_run, scenario_id, db)
                 return calc_run
 
@@ -172,6 +173,13 @@ class PropagationEngine:
             )
 
         self._calc_run_mgr.complete_calc_run(calc_run, scenario, db)
+
+        # Mark all events in this calc run as processed
+        if calc_run.event_ids:
+            db.execute(
+                "UPDATE events SET processed = TRUE WHERE event_id = ANY(%s)",
+                (list(calc_run.event_ids),),
+            )
 
         # Resolve stale shortages: any shortage from a previous calc_run
         # that was NOT re-detected in this run should be marked resolved.
