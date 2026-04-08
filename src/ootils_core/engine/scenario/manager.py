@@ -219,9 +219,40 @@ class ScenarioManager:
 
         # 1. Fetch current node value — also validates that the node exists
         row = db.execute(
-            f"SELECT {field_name} FROM nodes WHERE node_id = %s AND scenario_id = %s",
+            f"SELECT node_id, {field_name} FROM nodes WHERE node_id = %s AND scenario_id = %s",
             (node_id, scenario_id),
         ).fetchone()
+
+        if row is None:
+            # Fallback: the node_id may be from the baseline scenario.
+            # Resolve to the corresponding node in the target scenario via
+            # semantic match (node_type, item_id, location_id, time_ref).
+            source_row = db.execute(
+                "SELECT node_type, item_id, location_id, time_ref FROM nodes WHERE node_id = %s",
+                (node_id,),
+            ).fetchone()
+            if source_row is not None:
+                resolved = db.execute(
+                    f"""
+                    SELECT node_id, {field_name} FROM nodes
+                    WHERE scenario_id = %s
+                      AND node_type = %s
+                      AND item_id IS NOT DISTINCT FROM %s
+                      AND location_id IS NOT DISTINCT FROM %s
+                      AND time_ref IS NOT DISTINCT FROM %s
+                    LIMIT 1
+                    """,
+                    (
+                        scenario_id,
+                        source_row["node_type"],
+                        source_row["item_id"],
+                        source_row["location_id"],
+                        source_row["time_ref"],
+                    ),
+                ).fetchone()
+                if resolved is not None:
+                    node_id = UUID(str(resolved["node_id"]))
+                    row = resolved
 
         if row is None:
             raise ValueError(
