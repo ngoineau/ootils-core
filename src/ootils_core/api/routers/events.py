@@ -200,7 +200,13 @@ async def list_events(
         f"SELECT COUNT(*) AS total FROM events {where_clause}",
         params,
     ).fetchone()
-    total = count_row[0] if count_row else 0
+    # Connection uses dict_row factory — access by column name
+    if count_row is None:
+        total = 0
+    elif isinstance(count_row, dict):
+        total = int(count_row.get("total", 0))
+    else:
+        total = int(count_row[0])
 
     # Fetch paginated rows
     rows = db.execute(
@@ -217,8 +223,26 @@ async def list_events(
         params + [limit, offset],
     ).fetchall()
 
-    events = [
-        EventRecord(
+    def _make_record(row) -> EventRecord:
+        if isinstance(row, dict):
+            created = row["created_at"]
+            return EventRecord(
+                event_id=row["event_id"],
+                event_type=row["event_type"],
+                scenario_id=row.get("scenario_id"),
+                trigger_node_id=row.get("trigger_node_id"),
+                field_changed=row.get("field_changed"),
+                old_date=row.get("old_date"),
+                new_date=row.get("new_date"),
+                old_quantity=row.get("old_quantity"),
+                new_quantity=row.get("new_quantity"),
+                processed=bool(row["processed"]),
+                source=row.get("source") or "api",
+                created_at=created.isoformat() if hasattr(created, "isoformat") else str(created),
+            )
+        # Tuple/sequence fallback
+        created = row[11]
+        return EventRecord(
             event_id=row[0],
             event_type=row[1],
             scenario_id=row[2],
@@ -230,10 +254,10 @@ async def list_events(
             new_quantity=row[8],
             processed=bool(row[9]),
             source=row[10] or "api",
-            created_at=row[11].isoformat() if row[11] else "",
+            created_at=created.isoformat() if hasattr(created, "isoformat") else str(created),
         )
-        for row in rows
-    ]
+
+    events = [_make_record(row) for row in rows]
 
     logger.debug("events.list total=%d limit=%d offset=%d", total, limit, offset)
 
