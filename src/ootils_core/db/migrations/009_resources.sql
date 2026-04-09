@@ -117,16 +117,20 @@ BEGIN
         ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_edge_type_check;
         ALTER TABLE edges ADD CONSTRAINT edges_edge_type_check CHECK (
             edge_type IN (
-                'replenishes', 'transfers', 'requires', 'substitutes',
-                'fulfills', 'consumes', 'produces', 'ghost_member',
+                'replenishes', 'feeds_forward', 'consumes', 'depends_on',
+                'transfers_to', 'pegged_to', 'governed_by',
+                'transfers', 'requires', 'substitutes',
+                'fulfills', 'produces', 'ghost_member',
                 'bom_component', 'consumes_resource'
             )
         );
     ELSIF v_constraint_def IS NULL THEN
         ALTER TABLE edges ADD CONSTRAINT edges_edge_type_check CHECK (
             edge_type IN (
-                'replenishes', 'transfers', 'requires', 'substitutes',
-                'fulfills', 'consumes', 'produces', 'ghost_member',
+                'replenishes', 'feeds_forward', 'consumes', 'depends_on',
+                'transfers_to', 'pegged_to', 'governed_by',
+                'transfers', 'requires', 'substitutes',
+                'fulfills', 'produces', 'ghost_member',
                 'bom_component', 'consumes_resource'
             )
         );

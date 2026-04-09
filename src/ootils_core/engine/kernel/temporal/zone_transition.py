@@ -391,6 +391,12 @@ class ZoneTransitionEngine:
         source_node.active = False
         store.upsert_node(source_node)
 
+        # Rewire: move inbound edges from old source node to the first new daily node,
+        # and outbound edges to the last new daily node.
+        # feeds_forward edges chain the new daily buckets together internally.
+        if new_nodes:
+            _rewire_edges(source_node, new_nodes, scenario_id, db, store)
+
         logger.debug(
             "_split_weekly_to_daily: archived node=%s, created %d daily nodes",
             source_node.node_id, len(new_nodes),
@@ -463,6 +469,10 @@ class ZoneTransitionEngine:
         # Archive the source monthly bucket
         source_node.active = False
         store.upsert_node(source_node)
+
+        # Rewire: move inbound edges to first new node, outbound to last new node.
+        if new_nodes:
+            _rewire_edges(source_node, new_nodes, scenario_id, db, store)
 
         logger.debug(
             "_split_monthly_to_weekly: archived node=%s, created %d weekly nodes",
@@ -581,3 +591,97 @@ class ZoneTransitionEngine:
             "SELECT pg_advisory_unlock(hashtext(%s))",
             (_ZONE_TRANSITION_LOCK_KEY,),
         )
+
+
+# ---------------------------------------------------------------------------
+# Edge rewiring helper (module-level, not a method)
+# ---------------------------------------------------------------------------
+
+
+def _rewire_edges(
+    source_node: "Node",
+    new_nodes: list["Node"],
+    scenario_id: UUID,
+    db: psycopg.Connection,
+    store: "GraphStore",
+) -> None:
+    """
+    After a source PI node is split into new_nodes, rewire all active edges:
+
+    - Inbound edges to source_node  → redirected to new_nodes[0]  (the first bucket)
+    - Outbound edges from source_node → redirected to new_nodes[-1] (the last bucket)
+    - feeds_forward edges are handled separately: they connect the new buckets in a
+      chain internally, and the terminal inbound/outbound ones are rewired above.
+
+    The old edges on source_node are deactivated (active = FALSE).
+    """
+    first_new = new_nodes[0]
+    last_new = new_nodes[-1]
+
+    # Deactivate + redirect inbound edges (to_node_id == source_node)
+    inbound = store.get_edges_to(source_node.node_id, scenario_id)
+    for edge in inbound:
+        # Deactivate old edge
+        db.execute(
+            "UPDATE edges SET active = FALSE WHERE edge_id = %s",
+            (edge.edge_id,),
+        )
+        # Create new edge pointing at first new bucket
+        db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio, effective_start, effective_end,
+                active, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, now())
+            """,
+            (
+                uuid4(),
+                edge.edge_type,
+                edge.from_node_id,
+                first_new.node_id,
+                scenario_id,
+                edge.priority,
+                edge.weight_ratio,
+                edge.effective_start,
+                edge.effective_end,
+            ),
+        )
+
+    # Deactivate + redirect outbound edges (from_node_id == source_node)
+    outbound = store.get_edges_from(source_node.node_id, scenario_id)
+    for edge in outbound:
+        # Deactivate old edge
+        db.execute(
+            "UPDATE edges SET active = FALSE WHERE edge_id = %s",
+            (edge.edge_id,),
+        )
+        # Create new edge originating from last new bucket
+        db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio, effective_start, effective_end,
+                active, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, now())
+            """,
+            (
+                uuid4(),
+                edge.edge_type,
+                last_new.node_id,
+                edge.to_node_id,
+                scenario_id,
+                edge.priority,
+                edge.weight_ratio,
+                edge.effective_start,
+                edge.effective_end,
+            ),
+        )
+
+    logger.debug(
+        "_rewire_edges: source=%s rewired %d inbound + %d outbound edges → %d new nodes",
+        source_node.node_id,
+        len(inbound),
+        len(outbound),
+        len(new_nodes),
+    )

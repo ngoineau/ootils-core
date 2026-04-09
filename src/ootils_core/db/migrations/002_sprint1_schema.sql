@@ -373,38 +373,11 @@ CREATE INDEX IF NOT EXISTS idx_projection_series_lookup
 CREATE INDEX IF NOT EXISTS idx_zone_transition_scenario_series
     ON zone_transition_runs (scenario_id, series_id, status);
 -- ============================================================
--- 9. SHORTAGES
--- Persisted shortage records produced by the propagation engine.
+-- NOTE: shortages table is intentionally NOT created here.
+-- It is created by migration 005_m4_shortages.sql with the canonical
+-- schema used by ShortageDetector (pi_node_id, severity_score, calc_run_id,
+-- status, explanation_id columns).  Creating it here with different columns
+-- would cause migration 005 to silently skip the CREATE (IF NOT EXISTS)
+-- and leave the shortages table with the wrong schema, crashing the engine.
 -- ============================================================
-
-CREATE TABLE IF NOT EXISTS shortages (
-    shortage_id       UUID        NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    scenario_id       UUID        NOT NULL REFERENCES scenarios(scenario_id),
-    item_id           UUID        NOT NULL REFERENCES items(item_id),
-    location_id       UUID        NOT NULL REFERENCES locations(location_id),
-    node_id           UUID        REFERENCES nodes(node_id),
-    time_span_start   DATE        NOT NULL,
-    time_span_end     DATE        NOT NULL,
-    time_grain        TEXT        NOT NULL
-                      CHECK (time_grain IN ('day', 'week', 'month', 'year')),
-    shortage_qty      NUMERIC     NOT NULL DEFAULT 0,
-    severity          NUMERIC     NOT NULL DEFAULT 0,
-    root_cause_class  TEXT
-                      CHECK (root_cause_class IN (
-                          'supply_delay', 'supply_gap', 'demand_spike',
-                          'allocation_conflict', 'capacity_bound'
-                      )),
-    has_explanation   BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_shortages_scenario
-    ON shortages (scenario_id);
-
-CREATE INDEX IF NOT EXISTS idx_shortages_item_loc
-    ON shortages (item_id, location_id);
-
-CREATE INDEX IF NOT EXISTS idx_shortages_severity
-    ON shortages (scenario_id, severity DESC);
 

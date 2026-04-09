@@ -59,10 +59,12 @@ def create_app() -> FastAPI:
 
     @application.exception_handler(Exception)
     async def generic_exception_handler(request, exc: Exception) -> JSONResponse:
+        # Log full exception internally but never return raw error strings to callers —
+        # they can leak stack traces, DB connection strings, or file paths.
         logger.exception("Unhandled exception: %s", exc)
         return JSONResponse(
             status_code=500,
-            content={"error": "internal_error", "message": str(exc), "status": 500},
+            content={"error": "internal_error", "message": "An internal error occurred.", "status": 500},
         )
 
     logger.info("Ootils Core API v%s initialized", API_VERSION)

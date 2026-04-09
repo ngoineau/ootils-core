@@ -154,8 +154,8 @@ class ScenarioManager:
         series_mapping: dict | None = None,
     ) -> int:
         """
-        Copy all active nodes from source_scenario_id to target_scenario_id,
-        assigning fresh node_id UUIDs.
+        Copy all active nodes (and their edges) from source_scenario_id to
+        target_scenario_id, assigning fresh UUIDs.
 
         series_mapping: optional dict {str(old_series_id): new_series_id} to
         remap projection_series_id references to the new scenario's series.
@@ -170,10 +170,16 @@ class ScenarioManager:
             (source_scenario_id,),
         ).fetchall()
 
+        # Build old_node_id → new_node_id mapping so edges can be remapped.
+        node_id_map: dict[UUID, UUID] = {}
+        now = datetime.now(timezone.utc)
         count = 0
+
         for row in source_nodes:
             new_node_id = uuid4()
-            now = datetime.now(timezone.utc)
+            old_node_id = UUID(str(row["node_id"]))
+            node_id_map[old_node_id] = new_node_id
+
             db.execute(
                 """
                 INSERT INTO nodes (
@@ -227,11 +233,64 @@ class ScenarioManager:
             )
             count += 1
 
+        # Copy edges, remapping node IDs to the new scenario's copies.
+        # Only copy edges where both endpoints exist in the node_id_map
+        # (i.e., both are active nodes from the source scenario).
+        source_edges = db.execute(
+            """
+            SELECT * FROM edges
+            WHERE scenario_id = %s AND active = TRUE
+            """,
+            (source_scenario_id,),
+        ).fetchall()
+
+        edge_count = 0
+        for edge_row in source_edges:
+            old_from = UUID(str(edge_row["from_node_id"]))
+            old_to = UUID(str(edge_row["to_node_id"]))
+            new_from = node_id_map.get(old_from)
+            new_to = node_id_map.get(old_to)
+            if new_from is None or new_to is None:
+                # Edge crosses scenario boundary — skip (shouldn't happen in well-formed data)
+                logger.warning(
+                    "scenario.copy_nodes: skipping edge %s — endpoint not in source scenario",
+                    edge_row["edge_id"],
+                )
+                continue
+
+            db.execute(
+                """
+                INSERT INTO edges (
+                    edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                    priority, weight_ratio, effective_start, effective_end,
+                    active, created_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    TRUE, %s
+                )
+                """,
+                (
+                    uuid4(),
+                    edge_row["edge_type"],
+                    new_from,
+                    new_to,
+                    target_scenario_id,
+                    edge_row["priority"],
+                    edge_row["weight_ratio"],
+                    edge_row["effective_start"],
+                    edge_row["effective_end"],
+                    now,
+                ),
+            )
+            edge_count += 1
+
         logger.info(
-            "scenario.copy_nodes src=%s dst=%s count=%d",
+            "scenario.copy_nodes src=%s dst=%s nodes=%d edges=%d",
             source_scenario_id,
             target_scenario_id,
             count,
+            edge_count,
         )
         return count
 
