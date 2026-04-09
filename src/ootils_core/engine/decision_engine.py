@@ -1,6 +1,12 @@
 """
 Core supply chain decision engine.
 
+.. deprecated::
+    This module is **legacy** and no longer the primary engine.
+    The current planning engine uses a graph-based kernel located under
+    ``ootils_core.engine.kernel``. This file is retained for backward
+    compatibility only and should not be used in new code.
+
 The :class:`SupplyChainDecisionEngine` is the main entry-point. It combines
 inventory policy calculations (EOQ, reorder point, safety stock) with supplier
 selection logic to produce :class:`~ootils_core.models.OrderRecommendation`

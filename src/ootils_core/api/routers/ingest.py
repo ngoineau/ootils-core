@@ -1304,3 +1304,430 @@ async def ingest_resources(
         len(body.resources), inserted, updated,
     )
     return _ok(inserted, updated, len(body.resources), results)
+
+
+# ─────────────────────────────────────────────────────────────
+# 9. POST /v1/ingest/work-orders
+# ─────────────────────────────────────────────────────────────
+
+VALID_WORK_ORDER_STATUSES = {"planned", "in_progress", "completed", "cancelled"}
+
+
+class WorkOrderRow(BaseModel):
+    external_id: str = Field(..., description="ERP work order number. Upsert key.")
+    item_external_id: str = Field(..., description="Produced item.")
+    location_external_id: str = Field(..., description="Producing plant/site.")
+    quantity: float = Field(..., gt=0, description="Planned output quantity (> 0).")
+    scheduled_completion_date: date = Field(..., description="Expected completion date (YYYY-MM-DD).")
+    status: str = "planned"
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in VALID_WORK_ORDER_STATUSES:
+            raise ValueError(f"status must be one of {VALID_WORK_ORDER_STATUSES}")
+        return v
+
+
+class IngestWorkOrdersRequest(BaseModel):
+    work_orders: list[WorkOrderRow]
+    dry_run: bool = False
+
+
+@router.post(
+    "/work-orders",
+    response_model=IngestResponse,
+    summary="Import work orders",
+    description="Upsert work orders (WorkOrderSupply) with ERP external_id tracking.",
+)
+async def ingest_work_orders(
+    body: IngestWorkOrdersRequest,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """Upsert WorkOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
+    item_ext_ids = list({wo.item_external_id for wo in body.work_orders})
+    loc_ext_ids = list({wo.location_external_id for wo in body.work_orders})
+
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", loc_ext_ids)
+
+    errors: list[dict] = []
+    for i, wo in enumerate(body.work_orders):
+        row_errs = []
+        if wo.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{wo.item_external_id}' not found in DB")
+        if wo.location_external_id not in loc_map:
+            row_errs.append(f"location_external_id '{wo.location_external_id}' not found in DB")
+        if row_errs:
+            errors.append({"external_id": wo.external_id, "row": i, "errors": row_errs})
+
+    if errors:
+        _raise_422(errors)
+
+    if body.dry_run:
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.work_orders), inserted=0, updated=0, errors=0),
+            results=[{"external_id": wo.external_id, "action": "dry_run"} for wo in body.work_orders],
+        )
+
+    wo_ext_ids = [wo.external_id for wo in body.work_orders]
+    existing_refs_rows = db.execute(
+        """
+        SELECT external_id, internal_id FROM external_references
+        WHERE entity_type = 'work_order' AND external_id = ANY(%s)
+        """,
+        (wo_ext_ids,),
+    ).fetchall()
+    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+
+    results: list[dict] = []
+    inserted = updated = 0
+
+    for wo in body.work_orders:
+        item_id = item_map[wo.item_external_id]
+        location_id = loc_map[wo.location_external_id]
+        active = wo.status not in ("completed", "cancelled")
+
+        _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
+
+        if wo.external_id in existing_refs:
+            node_id = existing_refs[wo.external_id]
+            db.execute(
+                """
+                UPDATE nodes
+                SET quantity = %s, time_ref = %s,
+                    active = %s, is_dirty = TRUE, updated_at = now()
+                WHERE node_id = %s
+                """,
+                (wo.quantity, wo.scheduled_completion_date, active, node_id),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "WorkOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, wo.scheduled_completion_date)
+            results.append({"external_id": wo.external_id, "node_id": str(node_id), "action": "updated"})
+            updated += 1
+        else:
+            node_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO nodes
+                    (node_id, node_type, scenario_id, item_id, location_id,
+                     quantity, time_grain, time_ref, is_dirty, active)
+                VALUES (%s, 'WorkOrderSupply', %s, %s, %s, %s, 'exact_date', %s, TRUE, %s)
+                """,
+                (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
+                 wo.quantity, wo.scheduled_completion_date, active),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "WorkOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, wo.scheduled_completion_date)
+            db.execute(
+                """
+                INSERT INTO external_references
+                    (entity_type, external_id, source_system, internal_id)
+                VALUES ('work_order', %s, 'ingest_api', %s)
+                ON CONFLICT (entity_type, external_id, source_system) DO UPDATE
+                    SET internal_id = EXCLUDED.internal_id, updated_at = now()
+                """,
+                (wo.external_id, node_id),
+            )
+            results.append({"external_id": wo.external_id, "node_id": str(node_id), "action": "inserted"})
+            inserted += 1
+
+    logger.info(
+        "ingest.work_orders total=%d inserted=%d updated=%d",
+        len(body.work_orders), inserted, updated,
+    )
+    batch_id = _create_ingest_batch(db, "work_orders", [wo.model_dump() for wo in body.work_orders])
+    dq_status = _trigger_dq(db, batch_id)
+    return _ok(inserted, updated, len(body.work_orders), results, batch_id=batch_id, dq_status=dq_status)
+
+
+# ─────────────────────────────────────────────────────────────
+# 10. POST /v1/ingest/customer-orders
+# ─────────────────────────────────────────────────────────────
+
+VALID_CUSTOMER_ORDER_STATUSES = {"open", "confirmed", "shipped", "delivered", "cancelled"}
+
+
+class CustomerOrderRow(BaseModel):
+    external_id: str = Field(..., description="ERP sales order number. Upsert key.")
+    item_external_id: str = Field(..., description="Ordered item.")
+    location_external_id: str = Field(..., description="Shipping/consuming location.")
+    quantity: float = Field(..., gt=0, description="Ordered quantity (> 0).")
+    requested_delivery_date: date = Field(..., description="Customer requested delivery date (YYYY-MM-DD).")
+    status: str = "open"
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in VALID_CUSTOMER_ORDER_STATUSES:
+            raise ValueError(f"status must be one of {VALID_CUSTOMER_ORDER_STATUSES}")
+        return v
+
+
+class IngestCustomerOrdersRequest(BaseModel):
+    customer_orders: list[CustomerOrderRow]
+    dry_run: bool = False
+
+
+@router.post(
+    "/customer-orders",
+    response_model=IngestResponse,
+    summary="Import customer orders",
+    description="Upsert customer orders (CustomerOrderDemand) with ERP external_id tracking.",
+)
+async def ingest_customer_orders(
+    body: IngestCustomerOrdersRequest,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """Upsert CustomerOrderDemand nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
+    item_ext_ids = list({co.item_external_id for co in body.customer_orders})
+    loc_ext_ids = list({co.location_external_id for co in body.customer_orders})
+
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", loc_ext_ids)
+
+    errors: list[dict] = []
+    for i, co in enumerate(body.customer_orders):
+        row_errs = []
+        if co.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{co.item_external_id}' not found in DB")
+        if co.location_external_id not in loc_map:
+            row_errs.append(f"location_external_id '{co.location_external_id}' not found in DB")
+        if row_errs:
+            errors.append({"external_id": co.external_id, "row": i, "errors": row_errs})
+
+    if errors:
+        _raise_422(errors)
+
+    if body.dry_run:
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.customer_orders), inserted=0, updated=0, errors=0),
+            results=[{"external_id": co.external_id, "action": "dry_run"} for co in body.customer_orders],
+        )
+
+    co_ext_ids = [co.external_id for co in body.customer_orders]
+    existing_refs_rows = db.execute(
+        """
+        SELECT external_id, internal_id FROM external_references
+        WHERE entity_type = 'customer_order' AND external_id = ANY(%s)
+        """,
+        (co_ext_ids,),
+    ).fetchall()
+    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+
+    results: list[dict] = []
+    inserted = updated = 0
+
+    for co in body.customer_orders:
+        item_id = item_map[co.item_external_id]
+        location_id = loc_map[co.location_external_id]
+        active = co.status not in ("delivered", "cancelled")
+
+        _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
+
+        if co.external_id in existing_refs:
+            node_id = existing_refs[co.external_id]
+            db.execute(
+                """
+                UPDATE nodes
+                SET quantity = %s, time_ref = %s,
+                    active = %s, is_dirty = TRUE, updated_at = now()
+                WHERE node_id = %s
+                """,
+                (co.quantity, co.requested_delivery_date, active, node_id),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "CustomerOrderDemand", item_id, location_id, BASELINE_SCENARIO_ID, co.requested_delivery_date)
+            results.append({"external_id": co.external_id, "node_id": str(node_id), "action": "updated"})
+            updated += 1
+        else:
+            node_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO nodes
+                    (node_id, node_type, scenario_id, item_id, location_id,
+                     quantity, time_grain, time_ref, is_dirty, active)
+                VALUES (%s, 'CustomerOrderDemand', %s, %s, %s, %s, 'exact_date', %s, TRUE, %s)
+                """,
+                (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
+                 co.quantity, co.requested_delivery_date, active),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "CustomerOrderDemand", item_id, location_id, BASELINE_SCENARIO_ID, co.requested_delivery_date)
+            db.execute(
+                """
+                INSERT INTO external_references
+                    (entity_type, external_id, source_system, internal_id)
+                VALUES ('customer_order', %s, 'ingest_api', %s)
+                ON CONFLICT (entity_type, external_id, source_system) DO UPDATE
+                    SET internal_id = EXCLUDED.internal_id, updated_at = now()
+                """,
+                (co.external_id, node_id),
+            )
+            results.append({"external_id": co.external_id, "node_id": str(node_id), "action": "inserted"})
+            inserted += 1
+
+    logger.info(
+        "ingest.customer_orders total=%d inserted=%d updated=%d",
+        len(body.customer_orders), inserted, updated,
+    )
+    batch_id = _create_ingest_batch(db, "customer_orders", [co.model_dump() for co in body.customer_orders])
+    dq_status = _trigger_dq(db, batch_id)
+    return _ok(inserted, updated, len(body.customer_orders), results, batch_id=batch_id, dq_status=dq_status)
+
+
+# ─────────────────────────────────────────────────────────────
+# 11. POST /v1/ingest/transfers
+# ─────────────────────────────────────────────────────────────
+
+VALID_TRANSFER_STATUSES = {"planned", "in_transit", "delivered", "cancelled"}
+
+
+class TransferRow(BaseModel):
+    external_id: str = Field(..., description="ERP transfer/STO number. Upsert key.")
+    item_external_id: str = Field(..., description="Transferred item.")
+    from_location_external_id: str = Field(..., description="Shipping location.")
+    to_location_external_id: str = Field(..., description="Receiving location.")
+    quantity: float = Field(..., gt=0, description="Transfer quantity (> 0).")
+    expected_delivery_date: date = Field(..., description="Expected arrival date at destination (YYYY-MM-DD).")
+    status: str = "planned"
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in VALID_TRANSFER_STATUSES:
+            raise ValueError(f"status must be one of {VALID_TRANSFER_STATUSES}")
+        return v
+
+
+class IngestTransfersRequest(BaseModel):
+    transfers: list[TransferRow]
+    dry_run: bool = False
+
+
+@router.post(
+    "/transfers",
+    response_model=IngestResponse,
+    summary="Import transfers",
+    description=(
+        "Upsert stock transfers (TransferSupply) between two locations. "
+        "The node is wired to the PI of the **destination** (to_location)."
+    ),
+)
+async def ingest_transfers(
+    body: IngestTransfersRequest,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """Upsert TransferSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
+    item_ext_ids = list({t.item_external_id for t in body.transfers})
+    from_loc_ext_ids = list({t.from_location_external_id for t in body.transfers})
+    to_loc_ext_ids = list({t.to_location_external_id for t in body.transfers})
+    all_loc_ext_ids = list(set(from_loc_ext_ids) | set(to_loc_ext_ids))
+
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", all_loc_ext_ids)
+
+    errors: list[dict] = []
+    for i, t in enumerate(body.transfers):
+        row_errs = []
+        if t.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{t.item_external_id}' not found in DB")
+        if t.from_location_external_id not in loc_map:
+            row_errs.append(f"from_location_external_id '{t.from_location_external_id}' not found in DB")
+        if t.to_location_external_id not in loc_map:
+            row_errs.append(f"to_location_external_id '{t.to_location_external_id}' not found in DB")
+        if row_errs:
+            errors.append({"external_id": t.external_id, "row": i, "errors": row_errs})
+
+    if errors:
+        _raise_422(errors)
+
+    if body.dry_run:
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.transfers), inserted=0, updated=0, errors=0),
+            results=[{"external_id": t.external_id, "action": "dry_run"} for t in body.transfers],
+        )
+
+    tr_ext_ids = [t.external_id for t in body.transfers]
+    existing_refs_rows = db.execute(
+        """
+        SELECT external_id, internal_id FROM external_references
+        WHERE entity_type = 'transfer' AND external_id = ANY(%s)
+        """,
+        (tr_ext_ids,),
+    ).fetchall()
+    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+
+    results: list[dict] = []
+    inserted = updated = 0
+
+    for t in body.transfers:
+        item_id = item_map[t.item_external_id]
+        from_location_id = loc_map[t.from_location_external_id]
+        to_location_id = loc_map[t.to_location_external_id]
+        active = t.status not in ("delivered", "cancelled")
+
+        # Wire to destination PI (to_location is the receiving side)
+        _ensure_projection_series(db, item_id, to_location_id, BASELINE_SCENARIO_ID)
+
+        if t.external_id in existing_refs:
+            node_id = existing_refs[t.external_id]
+            db.execute(
+                """
+                UPDATE nodes
+                SET quantity = %s, time_ref = %s,
+                    active = %s, is_dirty = TRUE, updated_at = now()
+                WHERE node_id = %s
+                """,
+                (t.quantity, t.expected_delivery_date, active, node_id),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "TransferSupply", item_id, to_location_id, BASELINE_SCENARIO_ID, t.expected_delivery_date)
+            results.append({"external_id": t.external_id, "node_id": str(node_id), "action": "updated"})
+            updated += 1
+        else:
+            node_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO nodes
+                    (node_id, node_type, scenario_id, item_id, location_id,
+                     quantity, time_grain, time_ref, is_dirty, active)
+                VALUES (%s, 'TransferSupply', %s, %s, %s, %s, 'exact_date', %s, TRUE, %s)
+                """,
+                (node_id, BASELINE_SCENARIO_ID, item_id, to_location_id,
+                 t.quantity, t.expected_delivery_date, active),
+            )
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "TransferSupply", item_id, to_location_id, BASELINE_SCENARIO_ID, t.expected_delivery_date)
+            db.execute(
+                """
+                INSERT INTO external_references
+                    (entity_type, external_id, source_system, internal_id)
+                VALUES ('transfer', %s, 'ingest_api', %s)
+                ON CONFLICT (entity_type, external_id, source_system) DO UPDATE
+                    SET internal_id = EXCLUDED.internal_id, updated_at = now()
+                """,
+                (t.external_id, node_id),
+            )
+            results.append({
+                "external_id": t.external_id,
+                "node_id": str(node_id),
+                "from_location": t.from_location_external_id,
+                "to_location": t.to_location_external_id,
+                "action": "inserted",
+            })
+            inserted += 1
+
+    logger.info(
+        "ingest.transfers total=%d inserted=%d updated=%d",
+        len(body.transfers), inserted, updated,
+    )
+    batch_id = _create_ingest_batch(db, "transfers", [t.model_dump() for t in body.transfers])
+    dq_status = _trigger_dq(db, batch_id)
+    return _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status)
