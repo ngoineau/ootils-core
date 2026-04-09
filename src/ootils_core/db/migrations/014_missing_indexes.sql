@@ -110,3 +110,21 @@ DROP INDEX IF EXISTS idx_ghost_nodes_type;
 
 -- 4 distinct values — not selective enough to be useful
 DROP INDEX IF EXISTS idx_resources_type;
+
+-- ============================================================
+-- LOW: Active BOM header lookup
+-- Used by: bom.py _get_active_bom()
+-- ============================================================
+CREATE INDEX IF NOT EXISTS idx_bom_headers_parent_active
+    ON bom_headers (parent_item_id, effective_from DESC)
+    WHERE status = 'active';
+
+-- ============================================================
+-- LOW: Items/locations name lookup for API resolution
+-- Used by: graph.py, projection.py — resolve by name
+-- ============================================================
+CREATE INDEX IF NOT EXISTS idx_items_name
+    ON items (name);
+
+CREATE INDEX IF NOT EXISTS idx_locations_name
+    ON locations (name);
