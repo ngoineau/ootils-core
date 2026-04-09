@@ -357,7 +357,7 @@ class ZoneTransitionEngine:
         current = span_start
         while current < span_end:
             day_end = current + timedelta(days=1)
-            if day_end > span_end:
+            if day_end > span_end:  # pragma: no cover - defensive: unreachable for whole-day spans
                 day_end = span_end
             day_spans.append((current, day_end))
             current = day_end

@@ -280,7 +280,7 @@ def _recalculate_llc(db: psycopg.Connection, affected_item_ids: list[UUID]) -> i
     while queue:
         item_id, depth = queue.popleft()
         # Update max depth for this item
-        if max_depth[item_id] < depth:
+        if max_depth[item_id] < depth:  # pragma: no cover - defensive: max_depth is set when queueing
             max_depth[item_id] = depth
         for child_id, line_id in children_map.get(item_id, []):
             child_depth = depth + 1
@@ -299,7 +299,7 @@ def _recalculate_llc(db: psycopg.Connection, affected_item_ids: list[UUID]) -> i
         llc_val = max_depth.get(c, 0)
         line_to_llc.append((llc_val, lid))
 
-    if not line_to_llc:
+    if not line_to_llc:  # pragma: no cover - defensive: unreachable if all_edges is non-empty
         return 0
 
     # Batch update
