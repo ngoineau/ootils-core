@@ -376,7 +376,7 @@ class TestPropagatorIntegration:
 
         shortage_detector = MagicMock()
         mock_shortage = MagicMock(spec=ShortageRecord)
-        shortage_detector.detect.return_value = mock_shortage
+        shortage_detector.detect_with_params.return_value = mock_shortage
 
         engine, store, kernel = self._make_propagator(shortage_detector=shortage_detector)
 
@@ -412,16 +412,16 @@ class TestPropagatorIntegration:
             db=db,
         )
 
-        # detect() should have been called
-        shortage_detector.detect.assert_called_once()
-        detect_call = shortage_detector.detect.call_args
-        # detect() is called with keyword args: pi_node=, calc_run_id=, scenario_id=, db=
-        pi_node_arg = detect_call.kwargs.get("pi_node") or detect_call[1].get("pi_node")
+        # detect_with_params() should have been called (propagator uses enhanced detection)
+        shortage_detector.detect_with_params.assert_called_once()
+        detect_call = shortage_detector.detect_with_params.call_args
+        # detect_with_params() is called with keyword args: pi_node=, calc_run_id=, scenario_id=, db=
+        pi_node_arg = detect_call.kwargs.get("pi_node") or (detect_call[0][0] if detect_call[0] else None)
         assert pi_node_arg is not None
         assert pi_node_arg.node_id == node_id
 
         # persist() should have been called with the mock shortage
-        shortage_detector.persist.assert_called_once_with(mock_shortage, db)
+        shortage_detector.persist.assert_called_once_with(shortage_detector.detect_with_params.return_value, db)
 
     def test_shortage_detector_not_called_when_none(self):
         """No crash and no call when shortage_detector is None (backward-compat)."""
@@ -464,7 +464,7 @@ class TestPropagatorIntegration:
         calc_run_id = uuid4()
 
         shortage_detector = MagicMock()
-        shortage_detector.detect.return_value = None  # No shortage
+        shortage_detector.detect_with_params.return_value = None  # No shortage
 
         engine, store, kernel = self._make_propagator(shortage_detector=shortage_detector)
 
@@ -496,7 +496,7 @@ class TestPropagatorIntegration:
             db=db,
         )
 
-        shortage_detector.detect.assert_called_once()
+        shortage_detector.detect_with_params.assert_called_once()
         shortage_detector.persist.assert_not_called()
 
     def test_propagator_backward_compatible_without_shortage_detector(self):

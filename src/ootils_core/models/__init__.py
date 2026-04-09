@@ -289,6 +289,7 @@ class ShortageRecord:
     explanation_id: Optional[UUID]  # FK to explanations (M3)
     calc_run_id: UUID
     status: str = "active"  # active | resolved
+    severity_class: Optional[str] = None  # 'stockout' | 'below_safety_stock'
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

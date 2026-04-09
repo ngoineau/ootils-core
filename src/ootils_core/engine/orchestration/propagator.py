@@ -431,11 +431,13 @@ class PropagationEngine:
                 # Reload node to get freshly persisted state
                 fresh_node = self._store.get_node(node_id, scenario_id)
                 if fresh_node is not None:
-                    shortage = self._shortage_detector.detect(
+                    safety_stock = self._get_safety_stock(fresh_node, db)
+                    shortage = self._shortage_detector.detect_with_params(
                         pi_node=fresh_node,
                         calc_run_id=calc_run_id,
                         scenario_id=scenario_id,
                         db=db,
+                        safety_stock_qty=safety_stock,
                     )
                     if shortage is not None:
                         self._shortage_detector.persist(shortage, db)
@@ -448,3 +450,30 @@ class PropagationEngine:
                 )
 
         return changed
+
+    def _get_safety_stock(self, node: Node, db) -> Optional[Decimal]:
+        """Fetch safety_stock_qty from item_planning_params for this node's item/location."""
+        if node.item_id is None:
+            return None
+        try:
+            row = db.execute(
+                """
+                SELECT safety_stock_qty FROM item_planning_params
+                WHERE item_id = %s
+                  AND (location_id = %s OR location_id IS NULL)
+                  AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
+                ORDER BY location_id NULLS LAST
+                LIMIT 1
+                """,
+                (node.item_id, node.location_id),
+            ).fetchone()
+            if row and row["safety_stock_qty"] is not None:
+                return Decimal(str(row["safety_stock_qty"]))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_get_safety_stock: failed for node %s item=%s: %s",
+                node.node_id,
+                node.item_id,
+                exc,
+            )
+        return None

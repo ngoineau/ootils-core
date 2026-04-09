@@ -45,15 +45,53 @@ class ShortageDetector:
         Inspect a PI node and return a ShortageRecord if closing_stock < 0.
 
         Returns None if no shortage exists.
+        Delegates to detect_with_params with no safety stock.
+        """
+        return self.detect_with_params(
+            pi_node=pi_node,
+            calc_run_id=calc_run_id,
+            scenario_id=scenario_id,
+            db=db,
+        )
 
-        severity_score = shortage_qty × days_in_bucket × unit_cost_proxy
-        days_in_bucket = (time_span_end - time_span_start).days if available, else 1
+    def detect_with_params(
+        self,
+        pi_node: Node,
+        calc_run_id: UUID,
+        scenario_id: UUID,
+        db,
+        safety_stock_qty: Optional[Decimal] = None,
+        unit_cost: Optional[Decimal] = None,
+    ) -> Optional[ShortageRecord]:
+        """
+        Enhanced detection: detects both stockouts (closing_stock < 0) and
+        below-safety-stock warnings (closing_stock < safety_stock_qty).
+
+        Returns ShortageRecord with severity_class:
+        - 'stockout': closing_stock < 0
+        - 'below_safety_stock': 0 <= closing_stock < safety_stock_qty
+        - None: no shortage
+
+        severity_score = shortage_qty × days_in_bucket × unit_cost (or proxy)
         """
         closing = pi_node.closing_stock
-        if closing is None or closing >= Decimal("0"):
+        if closing is None:
             return None
 
-        shortage_qty = abs(closing)
+        effective_unit_cost = unit_cost if unit_cost is not None else _UNIT_COST_PROXY
+
+        # Determine severity_class and shortage_qty
+        if closing < Decimal("0"):
+            severity_class = "stockout"
+            shortage_qty = abs(closing)
+        elif (
+            safety_stock_qty is not None
+            and Decimal("0") <= closing < safety_stock_qty
+        ):
+            severity_class = "below_safety_stock"
+            shortage_qty = safety_stock_qty - closing
+        else:
+            return None
 
         # Bucket duration
         if pi_node.time_span_start is not None and pi_node.time_span_end is not None:
@@ -63,7 +101,7 @@ class ShortageDetector:
         else:
             days_in_bucket = 1
 
-        severity_score = shortage_qty * Decimal(str(days_in_bucket)) * _UNIT_COST_PROXY
+        severity_score = shortage_qty * Decimal(str(days_in_bucket)) * effective_unit_cost
 
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
@@ -79,13 +117,15 @@ class ShortageDetector:
             explanation_id=None,  # linked post-build by ExplanationBuilder if needed
             calc_run_id=calc_run_id,
             status="active",
+            severity_class=severity_class,
         )
 
         logger.debug(
-            "Shortage detected on node %s — qty=%s severity=%s",
+            "Shortage detected on node %s — qty=%s severity=%s class=%s",
             pi_node.node_id,
             shortage_qty,
             severity_score,
+            severity_class,
         )
         return record
 
@@ -113,12 +153,13 @@ class ShortageDetector:
                 explanation_id,
                 calc_run_id,
                 status,
+                severity_class,
                 created_at,
                 updated_at
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s, %s
             )
             ON CONFLICT (pi_node_id, calc_run_id) DO UPDATE SET
                 shortage_qty    = EXCLUDED.shortage_qty,
@@ -126,6 +167,7 @@ class ShortageDetector:
                 shortage_date   = EXCLUDED.shortage_date,
                 explanation_id  = EXCLUDED.explanation_id,
                 status          = EXCLUDED.status,
+                severity_class  = EXCLUDED.severity_class,
                 updated_at      = EXCLUDED.updated_at
             """,
             (
@@ -140,6 +182,7 @@ class ShortageDetector:
                 shortage.explanation_id,
                 shortage.calc_run_id,
                 shortage.status,
+                shortage.severity_class,
                 shortage.created_at,
                 now,
             ),
@@ -210,6 +253,7 @@ class ShortageDetector:
                 explanation_id,
                 calc_run_id,
                 status,
+                severity_class,
                 created_at,
                 updated_at
             FROM shortages
@@ -242,6 +286,7 @@ def _row_to_shortage(row) -> ShortageRecord:
         explanation_id=UUID(str(row["explanation_id"])) if row.get("explanation_id") else None,
         calc_run_id=UUID(str(row["calc_run_id"])),
         status=row["status"],
+        severity_class=row.get("severity_class"),
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
