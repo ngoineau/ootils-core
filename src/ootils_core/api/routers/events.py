@@ -19,6 +19,34 @@ from ootils_core.api.dependencies import get_db, resolve_scenario_id
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/events", tags=["events"])
 
+
+def _build_propagation_engine(db) -> "PropagationEngine":
+    """Build a PropagationEngine instance wired to the given DB connection."""
+    from ootils_core.engine.kernel.graph.store import GraphStore
+    from ootils_core.engine.kernel.graph.traversal import GraphTraversal
+    from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+    from ootils_core.engine.orchestration.calc_run import CalcRunManager
+    from ootils_core.engine.kernel.calc.projection import ProjectionKernel
+    from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+    from ootils_core.engine.orchestration.propagator import PropagationEngine
+
+    store = GraphStore(db)
+    traversal = GraphTraversal(store)
+    dirty = DirtyFlagManager()
+    calc_run_mgr = CalcRunManager()
+    kernel = ProjectionKernel()
+    shortage_detector = ShortageDetector()
+
+    return PropagationEngine(
+        store=store,
+        traversal=traversal,
+        dirty=dirty,
+        calc_run_mgr=calc_run_mgr,
+        kernel=kernel,
+        shortage_detector=shortage_detector,
+    )
+
+
 # Must stay in sync with events.event_type CHECK constraint in migrations 002 + 006.
 # Any new event type requires both a DB migration (ALTER TABLE ... ADD CONSTRAINT)
 # and an addition here.
@@ -139,11 +167,27 @@ async def create_event(
         effective_scenario_id,
     )
 
+    # Synchronous propagation
+    affected_nodes = 0
+    if body.trigger_node_id is not None:
+        try:
+            engine = _build_propagation_engine(db)
+            calc_run = engine.process_event(
+                event_id=event_id,
+                scenario_id=effective_scenario_id,
+                db=db,
+            )
+            if calc_run is not None:
+                affected_nodes = calc_run.nodes_recalculated or 0
+        except Exception as exc:
+            logger.warning("propagation failed for event %s: %s", event_id, exc)
+            # Don't fail the request — event is recorded, propagation is best-effort
+
     return EventResponse(
         event_id=event_id,
-        status="queued",
+        status="processed" if affected_nodes > 0 else "queued",
         scenario_id=effective_scenario_id,
-        affected_nodes_estimate=0,
+        affected_nodes_estimate=affected_nodes,
     )
 
 
