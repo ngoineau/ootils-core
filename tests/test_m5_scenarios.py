@@ -140,8 +140,12 @@ class TestCreateScenario:
             scenario_id=parent_id,
             closing_stock="100",
         )
-        # First fetchall → nodes; second fetchall → edges (empty — no edges in this test)
+        # fetchall call order:
+        #   1. SELECT * FROM projection_series  → [] (none to copy)
+        #   2. SELECT * FROM nodes              → [parent_node]
+        #   3. SELECT * FROM edges              → [] (no edges in this test)
         db.execute.return_value.fetchall.side_effect = [
+            [],             # SELECT * FROM projection_series
             [parent_node],  # SELECT * FROM nodes
             [],             # SELECT * FROM edges
         ]
