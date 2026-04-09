@@ -19,14 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.engine.ghost.ghost_engine import run_ghost
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ghosts"])
-
-BASELINE_SCENARIO_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 # ─────────────────────────────────────────────────────────────
 # Pydantic models

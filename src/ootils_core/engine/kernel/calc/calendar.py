@@ -75,6 +75,9 @@ async def add_working_days(
         if current not in non_working:
             days_counted += 1
 
+    if days_counted < n:
+        raise ValueError("max_iter exhausted: all days in window are non-working")
+
     return current
 
 
@@ -137,5 +140,8 @@ def add_working_days_sync(
         iterations += 1
         if current not in non_working:
             days_counted += 1
+
+    if days_counted < n:
+        raise ValueError("max_iter exhausted: all days in window are non-working")
 
     return current

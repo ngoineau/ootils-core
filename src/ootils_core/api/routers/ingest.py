@@ -29,13 +29,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.engine.dq.engine import run_dq
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/ingest", tags=["ingest"])
-
-BASELINE_SCENARIO_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 # ─────────────────────────────────────────────────────────────
 # Shared response models
@@ -238,7 +236,7 @@ VALID_LOCATION_TYPES = {"plant", "dc", "warehouse", "supplier_virtual", "custome
 class LocationRow(BaseModel):
     external_id: str = Field(..., description="Site/DC identifier (e.g. DC-ATL). Upsert key.")
     name: str = Field(..., description="Site label / description.")
-    location_type: str = Field("dc", description="Location type. Values: warehouse | factory | supplier | customer.")
+    location_type: str = Field("dc", description="Location type. Values: plant | dc | warehouse | supplier_virtual | customer_virtual.")
     country: Optional[str] = None
     timezone: Optional[str] = None
     parent_external_id: Optional[str] = Field(None, description="External_id of the parent site (optional, for hierarchies).")
@@ -560,7 +558,7 @@ async def ingest_supplier_items(
 class OnHandRow(BaseModel):
     item_external_id: str
     location_external_id: str
-    quantity: float
+    quantity: float = Field(..., ge=0, description="Available stock quantity (>= 0).")
     uom: str = "EA"
     as_of_date: date
 
@@ -691,7 +689,7 @@ class PurchaseOrderRow(BaseModel):
     item_external_id: str = Field(..., description="Ordered item.")
     location_external_id: str = Field(..., description="Receiving site.")
     supplier_external_id: str = Field(..., description="Supplier. Optional.")
-    quantity: float = Field(..., description="Ordered quantity (> 0).")
+    quantity: float = Field(..., gt=0, description="Ordered quantity (> 0).")
     uom: str = "EA"
     expected_delivery_date: date = Field(..., description="Expected receipt date (YYYY-MM-DD).")
     status: str = "confirmed"
@@ -830,6 +828,15 @@ class ForecastRow(BaseModel):
     bucket_date: date = Field(..., description="Bucket start date (YYYY-MM-DD).")
     time_grain: str = Field("week", description="Time grain. Values: day | week | month.")
     source: str = "statistical"
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        if v not in VALID_FORECAST_SOURCES:
+            raise ValueError(
+                f"source '{v}' is invalid; valid values: {sorted(VALID_FORECAST_SOURCES)}"
+            )
+        return v
 
 
 class IngestForecastRequest(BaseModel):

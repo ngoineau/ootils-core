@@ -6,6 +6,7 @@ Node IDs are used as tiebreakers for deterministic sort order.
 """
 from __future__ import annotations
 
+import collections
 import graphlib
 from datetime import date
 from uuid import UUID
@@ -42,15 +43,13 @@ class GraphTraversal:
 
         Raises graphlib.CycleError if a cycle is detected in the subgraph.
         """
-        # Build adjacency map for the induced subgraph
-        # predecessors[n] = set of n's predecessors within node_ids
+        # Build adjacency map for the induced subgraph via a single batch fetch
+        # instead of N per-node queries (fixes N+1 performance issue).
+        all_edges = self._store.get_all_edges(scenario_id)
         predecessors: dict[UUID, set[UUID]] = {n: set() for n in node_ids}
-
-        for node_id in node_ids:
-            edges = self._store.get_edges_to(node_id, scenario_id)
-            for edge in edges:
-                if edge.from_node_id in node_ids:
-                    predecessors[node_id].add(edge.from_node_id)
+        for edge in all_edges:
+            if edge.to_node_id in node_ids and edge.from_node_id in node_ids:
+                predecessors[edge.to_node_id].add(edge.from_node_id)
 
         # Use graphlib.TopologicalSorter
         # TopologicalSorter takes {node: predecessors} mapping
@@ -86,11 +85,11 @@ class GraphTraversal:
         Returns the full set of affected node IDs (including trigger_node_id).
         """
         affected: set[UUID] = set()
-        queue: list[UUID] = [trigger_node_id]
+        queue: collections.deque[UUID] = collections.deque([trigger_node_id])
         window_start, window_end = time_window
 
         while queue:
-            current_id = queue.pop(0)
+            current_id = queue.popleft()
             if current_id in affected:
                 continue
 

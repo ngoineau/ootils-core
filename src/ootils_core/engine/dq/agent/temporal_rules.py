@@ -276,20 +276,22 @@ def _check_mass_change(
     for r in current_rows + prev_rows:
         all_fields.update(r.keys())
 
-    for field_name in all_fields:
-        current_vals = [str(r.get(field_name, "")) for r in current_rows]
-        prev_vals = [str(r.get(field_name, "")) for r in prev_rows]
+    def _rows_to_keyed(rows: list[dict], field: str) -> dict[str, str]:
+        result = {}
+        for idx, r in enumerate(rows):
+            key = str(r.get("external_id") or r.get("item_external_id") or idx)
+            result[key] = str(r.get(field, ""))
+        return result
 
-        # Compare values using a simple symmetric diff on sets
-        common_count = min(len(current_vals), len(prev_vals))
-        if common_count == 0:
+    for field_name in all_fields:
+        current_map = _rows_to_keyed(current_rows, field_name)
+        prev_map = _rows_to_keyed(prev_rows, field_name)
+        common_keys = set(current_map) & set(prev_map)
+        if not common_keys:
             continue
 
-        changes = sum(
-            1 for a, b in zip(current_vals[:common_count], prev_vals[:common_count])
-            if a != b
-        )
-        change_ratio = changes / common_count
+        changes = sum(1 for k in common_keys if current_map[k] != prev_map[k])
+        change_ratio = changes / len(common_keys)
 
         if change_ratio > 0.30:
             issues.append(AgentIssue(

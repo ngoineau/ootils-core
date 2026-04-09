@@ -53,7 +53,7 @@ async def get_explanation(
         )
 
     builder = ExplanationBuilder()
-    explanation = builder.get_explanation(node_uuid, db)
+    explanation = builder.get_explanation(node_uuid, db, scenario_id=scenario_id)
 
     if explanation is None:
         raise HTTPException(
