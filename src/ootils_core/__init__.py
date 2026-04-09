@@ -1,22 +1,18 @@
 """
-ootils-core: The first supply chain decision engine designed for the age of AI agents.
+ootils-core: AI-native supply chain planning engine.
 
-This package provides a comprehensive set of tools for making intelligent supply chain
-decisions. It is designed to be used both directly by developers and as a tool-calling
-interface for AI agents.
+This package provides a graph-based kernel for supply chain planning,
+designed to be driven by AI agents and human planners alike.
 
-Quick start::
+Quick start (agent tools)::
 
-    from ootils_core import SupplyChainDecisionEngine
-    from ootils_core.models import Product, Supplier, InventoryState
+    from ootils_core.tools import get_active_issues, simulate_override, trigger_recalculation
 
-    engine = SupplyChainDecisionEngine()
-    product = Product(sku="SKU-001", name="Widget A", unit_cost=10.0, holding_cost_rate=0.25)
-    supplier = Supplier(name="Supplier Co", lead_time_days=14, reliability_score=0.95)
+    # Get active shortages for the baseline scenario
+    issues = get_active_issues(db)
 
-    state = InventoryState(product=product, current_stock=50, daily_demand=5.0)
-    decision = engine.decide(state, suppliers=[supplier])
-    print(decision)
+    # Simulate an override
+    result = simulate_override(db, node_id="...", field="qty", value=100)
 """
 
 __version__ = "0.1.0"
