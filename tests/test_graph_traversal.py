@@ -34,14 +34,14 @@ def make_node(node_id, node_type="ProjectedInventory", scenario_id=None, time_sp
 class TestTopologicalSort:
     def test_empty_set_returns_empty(self):
         store = MagicMock()
-        store.get_edges_to.return_value = []
+        store.get_all_edges.return_value = []
         traversal = GraphTraversal(store)
         result = traversal.topological_sort(set(), uuid4())
         assert result == []
 
     def test_single_node_no_edges(self):
         store = MagicMock()
-        store.get_edges_to.return_value = []
+        store.get_all_edges.return_value = []
         traversal = GraphTraversal(store)
         n = uuid4()
         scenario = uuid4()
@@ -53,39 +53,28 @@ class TestTopologicalSort:
         store = MagicMock()
         scenario = uuid4()
         a, b, c = uuid4(), uuid4(), uuid4()
-
-        # get_edges_to(node, scenario) returns edges pointing TO that node
-        def get_edges_to(node_id, sid):
-            if node_id == b:
-                return [make_edge(a, b, scenario)]
-            if node_id == c:
-                return [make_edge(b, c, scenario)]
-            return []
-
-        store.get_edges_to.side_effect = get_edges_to
+        store.get_all_edges.return_value = [
+            make_edge(a, b, scenario),
+            make_edge(b, c, scenario),
+        ]
         traversal = GraphTraversal(store)
         result = traversal.topological_sort({a, b, c}, scenario)
         assert result.index(a) < result.index(b)
         assert result.index(b) < result.index(c)
 
     def test_edges_outside_node_set_ignored(self):
-        """Edges from nodes not in node_ids should be ignored."""
+        """Edges from nodes outside node_ids should be filtered out."""
         store = MagicMock()
         scenario = uuid4()
         a, b, outside = uuid4(), uuid4(), uuid4()
-
-        def get_edges_to(node_id, sid):
-            if node_id == a:
-                # outside → a: should be ignored (outside not in node_ids)
-                return [make_edge(outside, a, scenario)]
-            if node_id == b:
-                return [make_edge(a, b, scenario)]
-            return []
-
-        store.get_edges_to.side_effect = get_edges_to
+        # outside → a is provided but outside is not in {a, b}: should be ignored
+        store.get_all_edges.return_value = [
+            make_edge(outside, a, scenario),
+            make_edge(a, b, scenario),
+        ]
         traversal = GraphTraversal(store)
         result = traversal.topological_sort({a, b}, scenario)
-        # a has no predecessors within {a, b}, so it comes first
+        # outside edge is ignored → a has no in-set predecessor → a comes before b
         assert result.index(a) < result.index(b)
         assert outside not in result
 
@@ -94,33 +83,27 @@ class TestTopologicalSort:
         store = MagicMock()
         scenario = uuid4()
         a, b = uuid4(), uuid4()
-
-        def get_edges_to(node_id, sid):
-            if node_id == b:
-                return [make_edge(a, b, scenario)]
-            if node_id == a:
-                return [make_edge(b, a, scenario)]
-            return []
-
-        store.get_edges_to.side_effect = get_edges_to
+        store.get_all_edges.return_value = [
+            make_edge(a, b, scenario),
+            make_edge(b, a, scenario),
+        ]
         traversal = GraphTraversal(store)
         with pytest.raises(graphlib.CycleError):
             traversal.topological_sort({a, b}, scenario)
 
-    def test_uses_per_node_query(self):
-        """topological_sort should call get_edges_to once per node."""
+    def test_uses_single_batch_query(self):
+        """topological_sort should call get_all_edges exactly once (not N+1)."""
         store = MagicMock()
-        store.get_edges_to.return_value = []
+        store.get_all_edges.return_value = []
         traversal = GraphTraversal(store)
         nodes = {uuid4(), uuid4(), uuid4()}
         traversal.topological_sort(nodes, uuid4())
-        # Called once per node in node_ids
-        assert store.get_edges_to.call_count == len(nodes)
+        store.get_all_edges.assert_called_once()
 
     def test_parallel_nodes_both_present(self):
         """Two independent nodes should both appear in the result."""
         store = MagicMock()
-        store.get_edges_to.return_value = []
+        store.get_all_edges.return_value = []
         traversal = GraphTraversal(store)
         a, b = uuid4(), uuid4()
         result = traversal.topological_sort({a, b}, uuid4())
