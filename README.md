@@ -1,164 +1,205 @@
 # ootils-core
 
-**The first supply chain decision engine designed for the age of AI agents.**
+**Graph-based supply chain planning engine — PostgreSQL + FastAPI + Python.**
 
-`ootils-core` gives AI agents — and the developers who build them — a principled, batteries-included library for making intelligent supply chain decisions. It implements the classical inventory-management algorithms (EOQ, safety stock, reorder point) in a clean, dependency-free Python package and wraps them in an **agent-first tool interface** that integrates directly with OpenAI function calling, Anthropic tool use, and any other LLM framework that supports structured tool schemas.
-
-This library is the first executable slice of the broader Ootils vision: AI-native supply chain operations built on deterministic, explainable decision primitives that agents can actually use.
-
----
-
-## Features
-
-| Capability | Description |
-|---|---|
-| 📦 **Inventory policies** | Economic Order Quantity, safety stock (combined variance model), reorder point |
-| 🏭 **Supplier selection** | Composite scoring (cost × lead time × reliability); full ranking |
-| 🚦 **Risk assessment** | Urgency classification (`critical / high / medium / low`) with plain-English explanations |
-| 🤖 **Agent tool interface** | One class, five callable tools, OpenAI-compatible JSON schemas ready to paste into any LLM runtime |
-| 📋 **Portfolio evaluation** | Evaluate an entire product catalog at once, sorted by urgency |
-| ✅ **Zero dependencies** | Pure Python ≥ 3.10 — no numpy, no pandas, no heavy ML frameworks |
-
----
-
-## Quick start
-
-```python
-from ootils_core import SupplyChainDecisionEngine
-from ootils_core.models import Product, Supplier, InventoryState
-
-engine = SupplyChainDecisionEngine()
-
-product = Product(
-    sku="WIDGET-001",
-    name="Widget A",
-    unit_cost=10.0,          # $ per unit
-    ordering_cost=50.0,      # $ per purchase order
-    holding_cost_rate=0.25,  # 25 % of unit cost per year
-    service_level=0.95,      # 95 % in-stock target
-    lead_time_days=14,
-    lead_time_std_days=2,
-)
-
-supplier = Supplier(
-    name="FastCo",
-    lead_time_days=14,
-    reliability_score=0.97,
-)
-
-state = InventoryState(
-    product=product,
-    current_stock=50,
-    daily_demand=5.0,
-    demand_std_daily=1.5,
-    open_order_quantity=0,
-)
-
-recommendation = engine.decide(state, suppliers=[supplier])
-
-if recommendation:
-    print(f"Order {recommendation.order_quantity} units from {recommendation.supplier.name}")
-    print(f"Urgency: {recommendation.urgency}")
-    print(recommendation.rationale)
-else:
-    print("Stock levels are adequate — no action needed.")
-```
-
----
-
-## AI agent usage
-
-```python
-from ootils_core.tools import SupplyChainTools
-
-tools = SupplyChainTools()
-
-# --- Use as a plain callable tool ---
-result = tools.recommend_order({
-    "sku": "WIDGET-001",
-    "name": "Widget A",
-    "unit_cost": 10.0,
-    "current_stock": 50,
-    "daily_demand": 5.0,
-    "demand_std_daily": 1.5,
-    "lead_time_days": 14,
-    "suppliers": [
-        {"name": "FastCo", "lead_time_days": 14, "reliability_score": 0.97},
-        {"name": "CheapCo", "lead_time_days": 21, "unit_price_multiplier": 0.85},
-    ],
-})
-print(result)
-# {"status": "ok", "result": {"sku": ..., "supplier": "FastCo", "order_quantity": 141, ...}}
-
-# --- Pass schemas directly to an LLM ---
-schemas = tools.tool_schemas()  # OpenAI-compatible function definitions
-# openai_client.chat.completions.create(model="gpt-4o", tools=schemas, ...)
-```
-
-### Available tools
-
-| Tool method | What it does |
-|---|---|
-| `calculate_reorder_point` | Compute ROP and safety stock for a given demand and lead time |
-| `calculate_eoq` | Compute the Economic Order Quantity |
-| `recommend_order` | Full end-to-end decision: ROP → EOQ → supplier selection → rationale |
-| `rank_suppliers` | Score and rank a list of suppliers for a product |
-| `assess_risk` | Evaluate urgency without committing to an order recommendation |
-
-All tool methods accept a plain `dict` and return a plain `dict` with `"status"` (`"ok"` / `"no_action"` / `"error"`), making them trivially serialisable to JSON.
-
----
-
-## Installation
-
-```bash
-pip install ootils-core
-```
-
-Or for development:
-
-```bash
-git clone https://github.com/ngoineau/ootils-core.git
-cd ootils-core
-pip install -e ".[dev]"
-pytest
-```
+`ootils-core` is a supply chain decision engine that models a network of nodes and edges (items, locations, PI nodes, suppliers, resources) and runs incremental propagation, shortage detection, MRP explosion, and scenario analysis on that graph. It exposes a REST API for integration with AI agents, dashboards, and planning tools.
 
 ---
 
 ## Architecture
 
 ```
-src/ootils_core/
-├── models/          # Pure data classes: Product, Supplier, InventoryState, OrderRecommendation
-├── engine/
-│   ├── policies.py          # EOQ, safety stock, ROP, urgency classification
-│   ├── supplier_selection.py  # Composite scoring & ranking
-│   └── decision_engine.py   # SupplyChainDecisionEngine (single product + portfolio)
-└── tools/
-    └── agent_tools.py       # SupplyChainTools — the agent-facing interface
+┌─────────────────────────────────────────────┐
+│  FastAPI REST API (Bearer token auth)        │
+│  /v1/graph  /v1/projection  /v1/scenarios    │
+│  /v1/ingest  /v1/dq  /v1/bom  /v1/rccp      │
+│  /v1/ghosts  /v1/explain  /v1/simulate  ...  │
+└──────────────────────┬──────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────┐
+│  Python kernel                               │
+│  ├── Graph traversal + incremental           │
+│  │   propagation (dirty-flag pattern)        │
+│  ├── Shortage detection + severity scoring   │
+│  ├── MRP explosion (BOM + lead times)        │
+│  ├── Scenario branching (copy-on-write)      │
+│  ├── RCCP (rough-cut capacity planning)      │
+│  ├── Ghost engine (virtual supply nodes)     │
+│  └── DQ agent (data quality pipeline)       │
+└──────────────────────┬──────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────┐
+│  PostgreSQL 16                               │
+│  Typed schema — 16 migrations               │
+│  UUID PKs, TIMESTAMPTZ UTC, no JSONB         │
+└─────────────────────────────────────────────┘
 ```
 
-### Decision logic
+---
 
-1. **Safety stock** is computed with the combined-variance formula:
-   `SS = z × √(L·σ_d² + d²·σ_L²)`
-   where `z` is the service-level z-score, `L` is lead time, `d` is daily demand, `σ_d` is demand std-dev, and `σ_L` is lead time std-dev.
+## Requirements
 
-2. **Reorder point** = average demand during lead time + safety stock.
+| Dependency | Version |
+|-----------|---------|
+| Python | 3.12+ |
+| PostgreSQL | 16 |
+| Docker + Docker Compose | Latest |
 
-3. **Economic Order Quantity** (Wilson/Harris formula):
-   `EOQ = √(2DS / H)`
-   where `D` is annual demand, `S` is ordering cost, and `H` is annual holding cost per unit.
+---
 
-4. **Supplier selection** scores each active supplier as:
-   `score = reliability × (0.5 × cost_score + 0.5 × lead_time_score)`
-   The highest-scoring supplier is selected and its min/max order constraints are applied to the EOQ.
+## Quick start
 
-5. **Urgency** is classified by days-of-supply relative to safety stock and reorder point thresholds.
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/ngoineau/ootils-core.git
+cd ootils-core
+cp .env.example .env
+# Edit .env — set POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, OOTILS_API_TOKEN
+```
+
+### 2. Start services
+
+```bash
+docker-compose up -d
+```
+
+This starts PostgreSQL 16 and the FastAPI server on port 8000. Migrations run automatically on first boot.
+
+### 3. Verify
+
+```bash
+curl http://localhost:8000/health
+# {"status": "ok"}
+
+curl http://localhost:8000/docs
+# Opens Swagger UI
+```
+
+### 4. Load demo data (optional)
+
+```bash
+docker-compose exec api python scripts/seed_demo_data.py
+```
+
+### 5. First API call
+
+```bash
+# List all graph nodes
+curl -H "Authorization: Bearer <your-token>" http://localhost:8000/v1/graph/nodes
+
+# Run a propagation
+curl -X POST -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"scenario_id": "<uuid>"}' \
+  http://localhost:8000/v1/graph/propagate
+```
+
+---
+
+## Key capabilities
+
+| Capability | Endpoints | Description |
+|-----------|-----------|-------------|
+| **Graph model** | `/v1/graph/*`, `/v1/nodes/*` | Nodes (PI, supply, demand, resource), edges (replenishes, consumes, feeds_forward, etc.) |
+| **Projection engine** | `/v1/projection/*` | Time-series projections with elastic time (daily → weekly → monthly) |
+| **Shortage detection** | `/v1/issues/*` | Post-propagation shortage scoring and explanation |
+| **Explainability** | `/v1/explain/*` | Causal step traces for shortage root causes |
+| **Scenario management** | `/v1/scenarios/*` | Branch, fork, archive scenarios; baseline tracking |
+| **Simulation** | `/v1/simulate` | What-if simulation with scenario overrides |
+| **MRP** | `/v1/bom/*` | BOM management + MRP explosion |
+| **Ingest pipeline** | `/v1/ingest/*` | Batch import of static and dynamic master data |
+| **Data quality** | `/v1/dq/*` | L1/L2 DQ checks, issue tracking, agent-driven remediation |
+| **RCCP** | `/v1/rccp/*` | Rough-cut capacity planning against resource constraints |
+| **Ghost engine** | `/v1/ghosts/*` | Virtual supply nodes for unconstrained planning |
+| **Calendars** | `/v1/calendars/*` | Planning calendars for zone transitions |
+| **Calc runs** | `/v1/calc/*` | Propagation job tracking and status |
+| **Planning params** | `/v1/items/planning-params` | Item-level planning parameters (SS, ROP, EOQ) |
+| **Events** | `/v1/events/*` | Supply chain event queue |
+
+---
+
+## API documentation
+
+Interactive Swagger UI: **http://localhost:8000/docs**
+
+ReDoc: **http://localhost:8000/redoc**
+
+Static OpenAPI spec: `docs/openapi.json`
+
+Authentication: `Authorization: Bearer <OOTILS_API_TOKEN>`
+
+---
+
+## Development
+
+### Install
+
+```bash
+pip install -e ".[dev]"
+```
+
+### Run tests
+
+```bash
+python3 -m pytest tests/ -q
+```
+
+Tests use an in-memory PostgreSQL test database (via `DATABASE_URL` env var). No mocks — tests run against a real PostgreSQL instance.
+
+### Run locally (without Docker)
+
+```bash
+export DATABASE_URL=postgresql:///ootils_dev
+export OOTILS_API_TOKEN=dev-token
+uvicorn ootils_core.api.app:app --reload
+```
+
+Migrations apply automatically on startup.
+
+### Project structure
+
+```
+src/ootils_core/
+├── api/
+│   ├── app.py              # FastAPI application factory
+│   └── routers/            # One router per capability domain
+├── db/
+│   ├── connection.py       # PostgreSQL connection + migration runner
+│   └── migrations/         # 016 sequential SQL migrations
+├── engine/
+│   ├── propagator.py       # Incremental graph propagation
+│   ├── shortage/           # Shortage detection + severity scoring
+│   ├── scenario/           # Scenario branching + copy-on-write
+│   ├── dq/                 # Data quality pipeline + DQ agent
+│   └── ghosts/             # Ghost node engine
+└── models/                 # Pydantic request/response schemas
+```
+
+---
+
+## Scalability
+
+Current system is validated at demo scale (2–50 items). For production deployment:
+
+- **500 items (SMB):** Batch propagation queries required. See `docs/SCALABILITY.md`.
+- **5,000+ items:** Architectural investment in in-memory propagation + table partitioning. See `docs/SCALABILITY.md`.
+
+---
+
+## Documentation
+
+| Doc | Purpose |
+|-----|---------|
+| `docs/SCALABILITY.md` | Volume projections, breaking points, fix roadmap |
+| `docs/INFRA-RUNBOOK.md` | Deployment, backup, scenario cleanup procedures |
+| `docs/ADR-*.md` | Architecture decision records |
+| `docs/SPEC-*.md` | Feature specifications |
+| `ROADMAP.md` | Product roadmap |
+| `CONTRIBUTING.md` | Contribution guidelines |
 
 ---
 
 ## License
 
-MIT
+See `LICENSE`.
