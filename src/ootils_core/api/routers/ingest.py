@@ -123,6 +123,150 @@ def _trigger_dq(db: psycopg.Connection, batch_id: UUID) -> str:
         return "unknown"
 
 
+def _ensure_projection_series(
+    db: psycopg.Connection,
+    item_id: UUID,
+    location_id: UUID,
+    scenario_id: UUID,
+) -> bool:
+    """
+    Ensure a ProjectionSeries + PI bucket nodes exist for (item, location, scenario).
+    Creates them if missing. Returns True if created, False if already existed.
+    """
+    from datetime import date, timedelta
+
+    existing = db.execute(
+        """
+        SELECT series_id FROM projection_series
+        WHERE item_id = %s AND location_id = %s AND scenario_id = %s
+        """,
+        (item_id, location_id, scenario_id),
+    ).fetchone()
+
+    if existing:
+        return False
+
+    series_id = uuid4()
+    today = date.today()
+    horizon_start = today
+    horizon_end = today + timedelta(days=90)
+
+    db.execute(
+        """
+        INSERT INTO projection_series (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, now(), now())
+        ON CONFLICT (item_id, location_id, scenario_id) DO NOTHING
+        """,
+        (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end),
+    )
+
+    row = db.execute(
+        "SELECT series_id FROM projection_series WHERE item_id = %s AND location_id = %s AND scenario_id = %s",
+        (item_id, location_id, scenario_id),
+    ).fetchone()
+    actual_series_id = UUID(str(row["series_id"])) if row else series_id
+
+    for i in range(90):
+        day_start = today + timedelta(days=i)
+        day_end = day_start + timedelta(days=1)
+        db.execute(
+            """
+            INSERT INTO nodes (
+                node_id, node_type, scenario_id, item_id, location_id,
+                time_grain, time_span_start, time_span_end, time_ref,
+                projection_series_id, bucket_sequence,
+                opening_stock, inflows, outflows, closing_stock,
+                has_shortage, shortage_qty, is_dirty, active,
+                created_at, updated_at
+            ) VALUES (
+                %s, 'ProjectedInventory', %s, %s, %s,
+                'day', %s, %s, %s,
+                %s, %s,
+                0, 0, 0, 0,
+                FALSE, 0, TRUE, TRUE,
+                now(), now()
+            )
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                uuid4(), scenario_id, item_id, location_id,
+                day_start, day_end, day_start,
+                actual_series_id, i,
+            ),
+        )
+
+    logger.info(
+        "_ensure_projection_series: created series + 90 PI buckets for item=%s loc=%s",
+        item_id, location_id,
+    )
+    return True
+
+
+def _wire_node_to_pi(
+    db: psycopg.Connection,
+    node_id: UUID,
+    node_type: str,
+    item_id: UUID,
+    location_id: UUID,
+    scenario_id: UUID,
+    time_ref: date,
+) -> int:
+    """
+    Connect a supply/demand node to the matching PI bucket via an edge.
+    Returns number of edges created.
+    """
+    if node_type in ("PurchaseOrderSupply", "WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply"):
+        edge_type = "replenishes"
+        direction = "supply"
+    elif node_type in ("ForecastDemand", "CustomerOrderDemand"):
+        edge_type = "consumes"
+        direction = "demand"
+    else:
+        return 0
+
+    pi_row = db.execute(
+        """
+        SELECT node_id FROM nodes
+        WHERE node_type = 'ProjectedInventory'
+          AND item_id = %s
+          AND location_id = %s
+          AND scenario_id = %s
+          AND active = TRUE
+          AND time_span_start <= %s
+          AND time_span_end > %s
+        ORDER BY time_span_start ASC
+        LIMIT 1
+        """,
+        (item_id, location_id, scenario_id, time_ref, time_ref),
+    ).fetchone()
+
+    if pi_row is None:
+        logger.debug(
+            "_wire_node_to_pi: no PI bucket found for item=%s loc=%s date=%s",
+            item_id, location_id, time_ref,
+        )
+        return 0
+
+    pi_node_id = pi_row["node_id"]
+    edge_id = uuid4()
+    from_id, to_id = node_id, pi_node_id
+
+    db.execute(
+        """
+        INSERT INTO edges (edge_id, edge_type, from_node_id, to_node_id, scenario_id, active, created_at)
+        VALUES (%s, %s, %s, %s, %s, TRUE, now())
+        ON CONFLICT DO NOTHING
+        """,
+        (edge_id, edge_type, from_id, to_id, scenario_id),
+    )
+
+    logger.debug(
+        "_wire_node_to_pi: wired node=%s (%s) → PI=%s via %s",
+        node_id, node_type, pi_node_id, edge_type,
+    )
+    return 1
+
+
 def _emit_ingestion_event(db: psycopg.Connection, scenario_id: UUID, node_id: UUID) -> None:
     """Create an unprocessed ingestion_complete event to trigger recalculation."""
     from datetime import datetime, timezone
@@ -633,6 +777,9 @@ async def ingest_on_hand(
         item_id = item_map[row.item_external_id]
         location_id = loc_map[row.location_external_id]
 
+        # Ensure PI series exists for this (item, location)
+        _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
+
         # Upsert: one OnHandSupply node per (item, location, scenario)
         existing = db.execute(
             """
@@ -657,6 +804,7 @@ async def ingest_on_hand(
                 (row.quantity, row.uom, row.as_of_date, node_id),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "OnHandSupply", item_id, location_id, BASELINE_SCENARIO_ID, row.as_of_date)
             results.append({
                 "item_external_id": row.item_external_id,
                 "location_external_id": row.location_external_id,
@@ -677,6 +825,7 @@ async def ingest_on_hand(
                  row.quantity, row.uom, row.as_of_date),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "OnHandSupply", item_id, location_id, BASELINE_SCENARIO_ID, row.as_of_date)
             results.append({
                 "item_external_id": row.item_external_id,
                 "location_external_id": row.location_external_id,
@@ -782,6 +931,9 @@ async def ingest_purchase_orders(
         location_id = loc_map[po.location_external_id]
         active = po.status != "cancelled"
 
+        # Ensure PI series exists for this (item, location)
+        _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
+
         if po.external_id in existing_refs:
             node_id = existing_refs[po.external_id]
             db.execute(
@@ -794,6 +946,7 @@ async def ingest_purchase_orders(
                 (po.quantity, po.uom, po.expected_delivery_date, active, node_id),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "PurchaseOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, po.expected_delivery_date)
             results.append({"external_id": po.external_id, "node_id": str(node_id), "action": "updated"})
             updated += 1
         else:
@@ -809,6 +962,7 @@ async def ingest_purchase_orders(
                  po.quantity, po.uom, po.expected_delivery_date, active),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "PurchaseOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, po.expected_delivery_date)
             # Register external reference
             db.execute(
                 """
@@ -933,6 +1087,9 @@ async def ingest_forecast_demand(
         item_id = item_map[fc.item_external_id]
         location_id = loc_map[fc.location_external_id]
 
+        # Ensure PI series exists for this (item, location)
+        _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
+
         existing = db.execute(
             """
             SELECT node_id FROM nodes
@@ -957,6 +1114,7 @@ async def ingest_forecast_demand(
                 (fc.quantity, fc_node_id),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, fc_node_id)
+            _wire_node_to_pi(db, fc_node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID, fc.bucket_date)
             results.append({
                 "item_external_id": fc.item_external_id,
                 "bucket_date": str(fc.bucket_date),
@@ -977,6 +1135,7 @@ async def ingest_forecast_demand(
                  fc.quantity, fc.time_grain, fc.bucket_date),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _wire_node_to_pi(db, node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID, fc.bucket_date)
             results.append({
                 "item_external_id": fc.item_external_id,
                 "bucket_date": str(fc.bucket_date),
