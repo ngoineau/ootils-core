@@ -25,6 +25,7 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
@@ -135,6 +136,13 @@ def _emit_ingestion_event(db: psycopg.Connection, scenario_id: UUID, node_id: UU
     )
 
 
+_ALLOWED_TABLES = {"items", "locations", "suppliers", "supplier_items", "resources"}
+_ALLOWED_COLUMNS = {
+    "external_id", "item_id", "location_id", "supplier_id",
+    "supplier_item_id", "resource_id",
+}
+
+
 def _batch_existing(
     db: psycopg.Connection,
     table: str,
@@ -142,13 +150,23 @@ def _batch_existing(
     pk_col: str,
     external_ids: list[str],
 ) -> dict[str, UUID]:
-    """Return {external_id: pk} for all rows matching the given external_ids."""
+    """Return {external_id: pk} for all rows matching the given external_ids.
+
+    Uses psycopg.sql.Identifier for table/column names to prevent SQL injection.
+    Table and column names are also validated against allowlists.
+    """
     if not external_ids:
         return {}
-    rows = db.execute(
-        f"SELECT {id_col}, {pk_col} FROM {table} WHERE {id_col} = ANY(%s)",
-        (external_ids,),
-    ).fetchall()
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"Table '{table}' not in allowlist")
+    if id_col not in _ALLOWED_COLUMNS or pk_col not in _ALLOWED_COLUMNS:
+        raise ValueError(f"Column '{id_col}' or '{pk_col}' not in allowlist")
+    query = sql.SQL("SELECT {id_col}, {pk_col} FROM {table} WHERE {id_col} = ANY(%s)").format(
+        id_col=sql.Identifier(id_col),
+        pk_col=sql.Identifier(pk_col),
+        table=sql.Identifier(table),
+    )
+    rows = db.execute(query, (external_ids,)).fetchall()
     return {r[id_col]: r[pk_col] for r in rows}
 
 
@@ -359,8 +377,6 @@ class SupplierRow(BaseModel):
     # W-06: lead_time_days must be > 0 when provided
     lead_time_days: Optional[int] = Field(None, gt=0, description="Standard lead time in calendar days.")
     reliability_score: Optional[float] = Field(None, description="Reliability score [0.0–1.0]. 1.0 = perfect.")
-    moq: Optional[float] = None          # not a suppliers column, accepted but not persisted
-    currency: Optional[str] = None       # not a suppliers column, accepted but not persisted
     country: Optional[str] = None
     status: str = "active"
 

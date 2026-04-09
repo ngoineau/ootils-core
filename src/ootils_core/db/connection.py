@@ -65,39 +65,83 @@ class OotilsDB:
                 raise
 
     def _apply_migrations(self) -> None:
-        """Apply all .sql migration files in order. Idempotent (IF NOT EXISTS throughout)."""
+        """Apply pending .sql migration files in order.
+
+        Uses a schema_migrations tracking table so each migration runs
+        exactly once.  An advisory lock prevents concurrent migration
+        attempts from racing.
+        """
         import sys
 
         migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
         if not migration_files:
             return
 
+        # Use advisory lock (key = hash of 'ootils_migrations') to prevent
+        # concurrent migration attempts from multiple app instances.
+        _LOCK_KEY = 8_037_421_901  # arbitrary fixed int64
+
         with psycopg.connect(self.database_url, autocommit=True) as conn:
-            for migration_path in migration_files:
-                sql = migration_path.read_text(encoding="utf-8")
-                try:
-                    # Use cursor.execute() to handle multi-statement SQL files,
-                    # including files with DO $$ ... $$ PL/pgSQL blocks.
-                    # autocommit=True ensures each statement commits independently.
-                    with conn.cursor() as cur:
-                        cur.execute(sql)
-                except Exception as e:
-                    err_msg = str(e).lower()
-                    # Ignore "already exists" errors — idempotent migrations
-                    if any(phrase in err_msg for phrase in [
-                        "already exists",
-                        "duplicate key",
-                        "relation already exists",
-                        "column already exists",
-                        "constraint already exists",
-                    ]):
-                        continue
-                    # Log real errors instead of silently ignoring them
-                    print(
-                        f"[MIGRATION ERROR] {migration_path.name}: {e}",
-                        file=sys.stderr,
+            # Acquire advisory lock (blocks until available)
+            conn.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
+            try:
+                # Ensure tracking table exists
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version  TEXT PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     )
-                    raise
+                """)
+
+                # Load already-applied migrations
+                applied = {
+                    row["version"]
+                    for row in conn.execute(
+                        "SELECT version FROM schema_migrations"
+                    ).fetchall()
+                }
+
+                for migration_path in migration_files:
+                    version = migration_path.name
+                    if version in applied:
+                        continue
+
+                    migration_sql = migration_path.read_text(encoding="utf-8")
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(migration_sql)
+                        # Record successful migration
+                        conn.execute(
+                            "INSERT INTO schema_migrations (version) VALUES (%s)",
+                            (version,),
+                        )
+                    except Exception as e:
+                        err_msg = str(e).lower()
+                        # Tolerate "already exists" only for initial bootstrap
+                        # where the tracking table didn't exist yet.
+                        if any(phrase in err_msg for phrase in [
+                            "already exists",
+                            "duplicate key",
+                            "relation already exists",
+                            "column already exists",
+                            "constraint already exists",
+                        ]):
+                            # Still record it so we don't retry
+                            try:
+                                conn.execute(
+                                    "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
+                                    (version,),
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        print(
+                            f"[MIGRATION ERROR] {migration_path.name}: {e}",
+                            file=sys.stderr,
+                        )
+                        raise
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (_LOCK_KEY,))
 
     def health_check(self) -> dict:
         """
