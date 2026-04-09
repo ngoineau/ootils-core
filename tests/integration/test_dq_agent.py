@@ -139,7 +139,7 @@ def _insert_supplier(db, external_id: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# Test 1: STAT_LEAD_TIME_SPIKE détecté
+# Test 1: STAT_LEAD_TIME_SPIKE detected
 # ─────────────────────────────────────────────────────────────
 
 @requires_db
@@ -173,7 +173,7 @@ def test_stat_lead_time_spike_detected(agent_db_conn, migrated_db):
 
 
 # ─────────────────────────────────────────────────────────────
-# Test 2: STAT_NEGATIVE_ONHAND détecté
+# Test 2: STAT_NEGATIVE_ONHAND detected
 # ─────────────────────────────────────────────────────────────
 
 @requires_db
@@ -205,7 +205,7 @@ def test_stat_negative_onhand_detected(agent_db_conn, migrated_db):
 
 
 # ─────────────────────────────────────────────────────────────
-# Test 3: TEMP_PO_DATE_PAST détecté
+# Test 3: TEMP_PO_DATE_PAST detected
 # ─────────────────────────────────────────────────────────────
 
 @requires_db
@@ -239,7 +239,7 @@ def test_temp_po_date_past_detected(agent_db_conn, migrated_db):
 
 
 # ─────────────────────────────────────────────────────────────
-# Test 4: TEMP_DUPLICATE_BATCH détecté
+# Test 4: TEMP_DUPLICATE_BATCH detected
 # ─────────────────────────────────────────────────────────────
 
 @requires_db
@@ -468,7 +468,7 @@ def test_llm_fallback_when_api_unavailable(agent_db_conn, migrated_db):
 
 
 # ─────────────────────────────────────────────────────────────
-# Test 10: dq_agent_runs créé en DB
+# Test 10: dq_agent_runs created in DB
 # ─────────────────────────────────────────────────────────────
 
 @requires_db

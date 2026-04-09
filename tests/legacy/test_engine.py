@@ -91,7 +91,11 @@ class TestDecide:
         rec_without = engine.decide(state_without, suppliers=[supplier])
         rec_with = engine.decide(state_with, suppliers=[supplier])
         # Having open orders should reduce or eliminate the need for new orders
-        assert rec_with is None or rec_with is not None  # flexible assertion
+        # Test that decide() doesn't raise when open_order_quantity is set
+        try:
+            rec_with = engine.decide(state_with, suppliers=[supplier])
+        except Exception as e:
+            pytest.fail(f"decide() raised unexpectedly with open orders: {e}")
         # If both produce a recommendation, the effective stock with open orders should be higher
         if rec_without and rec_with:
             assert state_with.effective_stock > state_without.effective_stock

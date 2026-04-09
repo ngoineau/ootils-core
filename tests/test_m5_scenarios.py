@@ -544,3 +544,52 @@ class TestPromote:
             if "archived" in str(c)
         ]
         assert len(archive_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Test: edge cases (#115)
+# ---------------------------------------------------------------------------
+
+
+class TestScenarioEdgeCases:
+    def test_promote_no_overrides_does_not_raise(self):
+        """Promoting a scenario with no overrides should not raise."""
+        db = make_mock_db()
+        db.execute.return_value.fetchall.return_value = []
+        manager = ScenarioManager()
+        # Should not raise even though there are no overrides
+        try:
+            manager.promote(BASELINE_ID, db)
+        except Exception as e:
+            pytest.fail(f"promote() raised unexpectedly with no overrides: {e}")
+
+    def test_diff_no_calc_run_raises(self):
+        """diff() with no completed calc_run should raise ValueError."""
+        db = make_mock_db()
+        # fetchone returns None → _latest_calc_run raises ValueError
+        db.execute.return_value.fetchone.return_value = None
+        manager = ScenarioManager()
+        with pytest.raises(ValueError, match="No completed calc_run"):
+            manager.diff(BASELINE_ID, BASELINE_ID, db)
+
+    def test_create_scenario_name_preserved(self):
+        """The scenario name passed to create_scenario is stored on the returned object."""
+        db = make_mock_db()
+        db.execute.return_value.fetchall.return_value = []
+        manager = ScenarioManager()
+        scenario = manager.create_scenario("Edge Case Scenario", BASELINE_ID, db)
+        assert scenario.name == "Edge Case Scenario"
+
+    def test_apply_override_rejects_sql_injection_field(self):
+        """apply_override must reject field names that are not in the allowlist."""
+        db = make_mock_db()
+        manager = ScenarioManager()
+        with pytest.raises(ValueError):
+            manager.apply_override(
+                scenario_id=UUID("00000000-0000-0000-0000-000000000002"),
+                node_id=UUID("00000000-0000-0000-0000-000000000003"),
+                field_name="'; DROP TABLE nodes; --",
+                new_value="evil",
+                applied_by=None,
+                db=db,
+            )
