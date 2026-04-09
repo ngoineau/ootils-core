@@ -9,11 +9,11 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
-from ootils_core.engine.scenario.manager import ScenarioManager
+from ootils_core.engine.scenario.manager import ScenarioManager, _ALLOWED_FIELDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/simulate", tags=["simulate"])
@@ -23,6 +23,16 @@ class OverrideIn(BaseModel):
     node_id: UUID
     field_name: str
     new_value: str
+
+    @field_validator("field_name")
+    @classmethod
+    def validate_field_name(cls, v: str) -> str:
+        if v not in _ALLOWED_FIELDS:
+            raise ValueError(
+                f"field_name {v!r} is not allowed. "
+                f"Allowed fields: {sorted(_ALLOWED_FIELDS)}"
+            )
+        return v
 
 
 class SimulateRequest(BaseModel):

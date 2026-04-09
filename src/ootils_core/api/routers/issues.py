@@ -48,6 +48,8 @@ class IssueRecord(BaseModel):
 class IssuesResponse(BaseModel):
     issues: list[IssueRecord]
     total: int
+    limit: int
+    offset: int
     as_of: str
 
 
@@ -57,11 +59,13 @@ async def get_issues(
     horizon_days: int = Query(default=90, description="Look-ahead window in days"),
     item_id: Optional[str] = Query(default=None, description="Filter by item ID"),
     location_id: Optional[str] = Query(default=None, description="Filter by location ID"),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max results to return (1–1000)"),
+    offset: int = Query(default=0, ge=0, description="Result offset for pagination"),
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> IssuesResponse:
-    """Return active shortages filtered by severity and horizon."""
+    """Return active shortages filtered by severity, horizon, item, and location with pagination."""
     from datetime import datetime, timezone
 
     detector = ShortageDetector()
@@ -70,7 +74,22 @@ async def get_issues(
     today = date.today()
     horizon_cutoff = today + timedelta(days=horizon_days)
 
-    issues: list[IssueRecord] = []
+    # Parse optional UUID filter params once
+    item_uuid: Optional[UUID] = None
+    if item_id is not None:
+        try:
+            item_uuid = UUID(item_id)
+        except ValueError:
+            item_uuid = None
+
+    loc_uuid: Optional[UUID] = None
+    if location_id is not None:
+        try:
+            loc_uuid = UUID(location_id)
+        except ValueError:
+            loc_uuid = None
+
+    filtered: list[IssueRecord] = []
 
     for s in all_shortages:
         # Horizon filter
@@ -78,26 +97,15 @@ async def get_issues(
             continue
 
         # Item filter
-        if item_id is not None:
-            try:
-                item_uuid = UUID(item_id)
-            except ValueError:
-                item_uuid = None
-            if item_uuid and s.item_id != item_uuid:
-                continue
+        if item_uuid is not None and s.item_id != item_uuid:
+            continue
 
         # Location filter
-        if location_id is not None:
-            try:
-                loc_uuid = UUID(location_id)
-            except ValueError:
-                loc_uuid = None
-            if loc_uuid and s.location_id != loc_uuid:
-                continue
+        if loc_uuid is not None and s.location_id != loc_uuid:
+            continue
 
-        # Severity classification
+        # Severity classification + filter
         sev = _classify_severity(s.severity_score)
-
         if severity != "all" and sev != severity:
             continue
 
@@ -107,7 +115,7 @@ async def get_issues(
             else None
         )
 
-        issues.append(
+        filtered.append(
             IssueRecord(
                 node_id=s.pi_node_id,
                 item_id=s.item_id,
@@ -121,13 +129,25 @@ async def get_issues(
             )
         )
 
+    total = len(filtered)
+    page = filtered[offset : offset + limit]
+
     as_of = datetime.now(timezone.utc).isoformat()
     logger.info(
-        "issues.fetched scenario=%s count=%d severity=%s horizon=%d",
+        "issues.fetched scenario=%s total=%d returned=%d severity=%s horizon=%d limit=%d offset=%d",
         scenario_id,
-        len(issues),
+        total,
+        len(page),
         severity,
         horizon_days,
+        limit,
+        offset,
     )
 
-    return IssuesResponse(issues=issues, total=len(issues), as_of=as_of)
+    return IssuesResponse(
+        issues=page,
+        total=total,
+        limit=limit,
+        offset=offset,
+        as_of=as_of,
+    )

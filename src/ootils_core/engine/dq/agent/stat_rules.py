@@ -375,7 +375,12 @@ def _check_negative_onhand(
     current_rows: list[tuple[UUID, int, dict]],
     entity_type: str,
 ) -> list[AgentIssue]:
-    """on_hand_qty < 0 (L1 allows quantity=0 to pass; this checks for negative stock)."""
+    """Safety net for entity types that bypass L1 numeric validation.
+
+    L1 now rejects negative on_hand quantities via the 'numeric_nonneg' type_check.
+    This rule serves as a belt-and-suspenders check for entity types that may reach
+    the agent layer without going through the standard L1 structural pipeline.
+    """
     issues: list[AgentIssue] = []
 
     if entity_type not in ("on_hand",):

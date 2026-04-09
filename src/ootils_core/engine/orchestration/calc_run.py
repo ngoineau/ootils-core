@@ -173,41 +173,26 @@ class CalcRunManager:
         run.completed_at = now
         run.error_message = error
 
-        # Persist failure record independently of the caller's transaction.
-        # autocommit=True ensures the UPDATE commits immediately even if the
-        # outer transaction is about to roll back.
+        # Persist failure record using the connection directly (psycopg3 compatible).
+        # db.connection.cursor() does not exist in psycopg3 — use db.execute() directly.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "fail_calc_run: persisting failure for run %s (error: %s)",
+            run.calc_run_id, error,
+        )
         try:
-            with db.connection.cursor() as fail_cur:
-                prev_autocommit = db.connection.autocommit
-                db.connection.autocommit = True
-                try:
-                    fail_cur.execute(
-                        """
-                        UPDATE calc_runs
-                        SET status = 'failed',
-                            completed_at = %s,
-                            error_message = %s
-                        WHERE calc_run_id = %s
-                        """,
-                        (now, error, run.calc_run_id),
-                    )
-                finally:
-                    db.connection.autocommit = prev_autocommit
+            db.execute(
+                """
+                UPDATE calc_runs
+                SET status = 'failed',
+                    completed_at = %s,
+                    error_message = %s
+                WHERE calc_run_id = %s
+                """,
+                (now, error, run.calc_run_id),
+            )
         except Exception:
-            # Last-resort fallback: use the connection as-is
-            try:
-                db.execute(
-                    """
-                    UPDATE calc_runs
-                    SET status = 'failed',
-                        completed_at = %s,
-                        error_message = %s
-                    WHERE calc_run_id = %s
-                    """,
-                    (now, error, run.calc_run_id),
-                )
-            except Exception:
-                pass
+            pass
 
         # Release advisory lock (best-effort on failure) — HIGH-3: use 64-bit hash
         try:

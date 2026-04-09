@@ -12,7 +12,7 @@ from typing import Generator
 from uuid import UUID
 
 import psycopg
-from fastapi import Header, Query
+from fastapi import Header, HTTPException, Query, status
 from psycopg.rows import dict_row
 
 from ootils_core.db.connection import OotilsDB
@@ -60,4 +60,7 @@ def resolve_scenario_id(
     try:
         return UUID(raw)
     except ValueError:
-        return BASELINE_SCENARIO_ID
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid scenario_id '{raw}' — must be a valid UUID or 'baseline'",
+        )

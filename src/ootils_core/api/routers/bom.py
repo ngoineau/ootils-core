@@ -19,13 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["bom"])
-
-BASELINE_SCENARIO_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 # ─────────────────────────────────────────────────────────────

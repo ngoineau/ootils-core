@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from ootils_core.api.routers import bom, calendars, dq, events, explain, ghosts, graph, ingest, issues, projection, rccp, simulate
 from ootils_core.api.routers.graph import nodes_router
@@ -25,6 +26,26 @@ _DESCRIPTION = _SPEC_PATH.read_text(encoding="utf-8") if _SPEC_PATH.exists() els
 
 API_VERSION = "1.0.0"
 
+_INGEST_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class IngestPayloadSizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject ingest requests whose body exceeds _INGEST_MAX_BYTES (10 MB)."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/v1/ingest/"):
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > _INGEST_MAX_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": "payload_too_large",
+                        "message": f"Request body exceeds the 10 MB limit for /v1/ingest/* endpoints.",
+                        "status": 413,
+                    },
+                )
+        return await call_next(request)
+
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -36,6 +57,9 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         openapi_url="/openapi.json",
     )
+
+    # Payload size limit middleware for ingest routes
+    application.add_middleware(IngestPayloadSizeLimitMiddleware)
 
     # Health endpoint (no auth)
     @application.get("/health", tags=["health"], include_in_schema=True)

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "fix/**", "feat/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check src/
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ootils
+          POSTGRES_PASSWORD: ootils
+          POSTGRES_DB: ootils_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ootils -d ootils_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      OOTILS_DSN: postgresql://ootils:ootils@localhost:5432/ootils_test
+      OOTILS_API_TOKEN: ${{ secrets.OOTILS_API_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short --ignore=tests/integration --ignore=tests/smoke

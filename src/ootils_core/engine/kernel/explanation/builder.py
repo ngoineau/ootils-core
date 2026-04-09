@@ -297,23 +297,40 @@ class ExplanationBuilder:
         self,
         target_node_id: UUID,
         db,
+        scenario_id: Optional[UUID] = None,
     ) -> Optional[Explanation]:
         """
         Load the most recent explanation for a given target node from the DB.
 
-        Returns None if no explanation exists.
+        If scenario_id is provided, the result is scoped to that scenario via
+        the calc_runs join. Returns None if no explanation exists.
         """
-        row = db.execute(
-            """
-            SELECT explanation_id, calc_run_id, target_node_id, target_type,
-                   root_cause_node_id, summary, created_at
-            FROM explanations
-            WHERE target_node_id = %s
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (target_node_id,),
-        ).fetchone()
+        if scenario_id is not None:
+            row = db.execute(
+                """
+                SELECT e.explanation_id, e.calc_run_id, e.target_node_id, e.target_type,
+                       e.root_cause_node_id, e.summary, e.created_at
+                FROM explanations e
+                JOIN calc_runs cr ON cr.calc_run_id = e.calc_run_id
+                WHERE e.target_node_id = %s
+                  AND cr.scenario_id = %s
+                ORDER BY e.created_at DESC
+                LIMIT 1
+                """,
+                (target_node_id, scenario_id),
+            ).fetchone()
+        else:
+            row = db.execute(
+                """
+                SELECT explanation_id, calc_run_id, target_node_id, target_type,
+                       root_cause_node_id, summary, created_at
+                FROM explanations
+                WHERE target_node_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (target_node_id,),
+            ).fetchone()
 
         if row is None:
             return None

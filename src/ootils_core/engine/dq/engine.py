@@ -62,7 +62,7 @@ class DQResult:
 # ──────────────────────────────────────────────────────────────
 # Schema definitions per entity_type
 # Each entry: field_name → (mandatory, type_check, max_len)
-# type_check: 'str' | 'date' | 'numeric_positive' | 'uuid' | 'int_positive'
+# type_check: 'str' | 'date' | 'numeric_positive' | 'numeric_nonneg' | 'uuid' | 'int_positive'
 # ──────────────────────────────────────────────────────────────
 
 _SCHEMAS: dict[str, list[tuple[str, bool, str, int | None]]] = {
@@ -109,7 +109,7 @@ _SCHEMAS: dict[str, list[tuple[str, bool, str, int | None]]] = {
     "on_hand": [
         ("item_external_id", True, "str", 255),
         ("location_external_id", True, "str", 255),
-        ("quantity", True, "numeric_positive", None),
+        ("quantity", True, "numeric_nonneg", None),
         ("uom", True, "str", 32),
         ("as_of_date", True, "date", None),
     ],
@@ -231,6 +231,24 @@ def _check_l1(
                     field_name=field_name,
                     raw_value=raw_str[:255],
                     message=f"Field '{field_name}' must be a positive number, got: {raw_str[:100]}",
+                ))
+
+        elif type_check == "numeric_nonneg":
+            try:
+                num = float(value)
+                if num < 0:
+                    raise ValueError("negative")
+            except (TypeError, ValueError):
+                type_error = True
+                issues.append(DQIssue(
+                    row_id=row_id,
+                    row_number=row_number,
+                    dq_level=1,
+                    rule_code="L1_INVALID_TYPE",
+                    severity="error",
+                    field_name=field_name,
+                    raw_value=raw_str[:255],
+                    message=f"Field '{field_name}' must be a non-negative number, got: {raw_str[:100]}",
                 ))
 
         elif type_check == "int_positive":
