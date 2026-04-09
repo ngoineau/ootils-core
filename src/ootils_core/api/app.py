@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ootils_core.api.routers import bom, calendars, dq, events, explain, ghosts, graph, ingest, issues, projection, rccp, simulate
+from ootils_core.api.routers import bom, calendars, dq, events, explain, ghosts, graph, ingest, issues, planning_params, projection, rccp, simulate
 from ootils_core.api.routers.graph import nodes_router
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ def create_app() -> FastAPI:
     application.include_router(calendars.router)
     application.include_router(rccp.router)
     application.include_router(ghosts.router)
+    application.include_router(planning_params.router)
 
     @application.exception_handler(Exception)
     async def generic_exception_handler(request, exc: Exception) -> JSONResponse:
