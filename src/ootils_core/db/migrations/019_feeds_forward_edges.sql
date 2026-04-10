@@ -18,7 +18,7 @@ INSERT INTO edges (
     to_node_id,
     scenario_id,
     priority,
-    weight_ratio,
+    weight_ratio,  -- 1.0 = full pass-through of closing_stock
     effective_start,
     effective_end,
     active,
@@ -31,7 +31,7 @@ SELECT
     n2.node_id,
     n1.scenario_id,
     0,
-    NULL,
+    1.0,
     n1.time_span_start,
     n2.time_span_end,
     TRUE,
