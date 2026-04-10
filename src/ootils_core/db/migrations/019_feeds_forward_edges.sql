@@ -1,4 +1,4 @@
--- Migration 019: create feeds_forward edges between consecutive PI nodes
+-- Migration 019: add feeds_forward to edge_type CHECK constraint + create edges
 --
 -- The propagator chains PI buckets via 'feeds_forward' edges:
 --   PI[bucket_sequence=N].closing_stock → PI[bucket_sequence=N+1].opening_stock
@@ -11,6 +11,18 @@
 -- ProjectedInventory nodes across all scenarios, using projection_series_id
 -- + bucket_sequence to identify consecutive pairs.
 
+-- Step 1: Add feeds_forward to the edge_type CHECK constraint
+ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_edge_type_check;
+ALTER TABLE edges ADD CONSTRAINT edges_edge_type_check CHECK (
+    edge_type = ANY (ARRAY[
+        'replenishes', 'transfers', 'requires', 'substitutes',
+        'fulfills', 'consumes', 'produces', 'ghost_member',
+        'bom_component', 'consumes_resource', 'feeds_forward',
+        'pegged_to'
+    ])
+);
+
+-- Step 2: Create feeds_forward edges between consecutive PI nodes
 INSERT INTO edges (
     edge_id,
     edge_type,
