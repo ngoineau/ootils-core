@@ -41,7 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_calc_runs_scenario_completed
 
 -- 6. DQ pipeline: batch by entity type and status
 CREATE INDEX IF NOT EXISTS idx_ingest_batches_entity_dq
-    ON ingest_batches (entity_type, dq_status, created_at DESC);
+    ON ingest_batches (entity_type, dq_status, submitted_at DESC);
 
 -- 7. DQ pipeline: rows by batch and row number
 CREATE INDEX IF NOT EXISTS idx_ingest_rows_batch_rownum
