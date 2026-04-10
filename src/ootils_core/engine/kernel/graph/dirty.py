@@ -113,15 +113,16 @@ class DirtyFlagManager:
         # Build batch values
         rows = [(calc_run_id, node_id, scenario_id, now) for node_id in node_ids]
 
-        # psycopg3 executemany
-        db.executemany(
-            """
-            INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
-            """,
-            rows,
-        )
+        # psycopg3: executemany lives on the cursor, not on the connection
+        with db.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
+                """,
+                rows,
+            )
 
     def load_from_postgres(
         self,
