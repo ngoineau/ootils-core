@@ -29,7 +29,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_node_type_policies_active
 -- ============================================================
 -- NULL != NULL in standard SQL UNIQUE, so global conversions (item_id IS NULL)
 -- can be inserted multiple times on re-run without triggering uniqueness errors.
--- Add a partial unique index covering only global (item_id IS NULL) rows.
+-- Deduplicate first (keep the row with the highest conversion_id), then add
+-- a partial unique index covering only global (item_id IS NULL) rows.
+
+DELETE FROM uom_conversions
+WHERE item_id IS NULL
+  AND ctid NOT IN (
+      SELECT MAX(ctid)
+      FROM uom_conversions
+      WHERE item_id IS NULL
+      GROUP BY from_uom, to_uom
+  );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_uom_global
     ON uom_conversions (from_uom, to_uom) WHERE item_id IS NULL;
