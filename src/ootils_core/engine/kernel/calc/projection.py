@@ -107,6 +107,13 @@ class ProjectionKernel:
         Raises:
             ValueError: If the rule is not recognised.
         """
+        # Invariant: bucket_end is EXCLUSIVE throughout the engine (fix for #159).
+        # bucket_start <= source_date < bucket_end.
+        # This assertion surfaces any caller that passes an inclusive end date.
+        assert bucket_start <= bucket_end, (
+            f"bucket_start ({bucket_start}) must be <= bucket_end ({bucket_end})"
+        )
+
         if rule == "point_in_bucket":
             if bucket_start <= source_date < bucket_end:
                 return Decimal(str(source_qty))

@@ -153,6 +153,10 @@ class OotilsDB:
 
         try:
             with self.conn() as conn:
+                # Apply a 5-second statement timeout for all health-check queries
+                # to prevent monitoring hangs on large tables (fix for #160).
+                conn.execute("SET LOCAL statement_timeout = '5000'")
+
                 # 1. Basic connectivity
                 conn.execute("SELECT 1")
 
