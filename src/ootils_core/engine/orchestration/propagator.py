@@ -310,6 +310,9 @@ class PropagationEngine:
 
         # ------------------------------------------------------------------
         # 2. Supply events: nodes connected via 'replenishes' to this PI node
+        # NOTE: OnHandSupply is excluded here — it is already captured as
+        # opening_stock in block 1. Including it again would double-count it
+        # as both opening_stock AND an inflow, producing incorrect projections.
         # ------------------------------------------------------------------
         supply_events: list = []
         replenish_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="replenishes")
@@ -322,6 +325,7 @@ class PropagationEngine:
                 # Use time_ref as the supply date
                 if src_node.time_ref is not None and src_node.quantity is not None:
                     supply_events.append((src_node.time_ref, src_node.quantity))
+            # OnHandSupply is intentionally skipped — handled as opening_stock above
 
         # ------------------------------------------------------------------
         # 3. Demand events: nodes connected via 'consumes' to this PI node
