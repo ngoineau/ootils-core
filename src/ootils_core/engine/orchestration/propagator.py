@@ -175,10 +175,10 @@ class PropagationEngine:
         self._calc_run_mgr.complete_calc_run(calc_run, scenario, db)
 
         # Mark all events in this calc run as processed
-        if calc_run.event_ids:
+        if calc_run.triggered_by_event_ids:
             db.execute(
                 "UPDATE events SET processed = TRUE WHERE event_id = ANY(%s)",
-                (list(calc_run.event_ids),),
+                (list(calc_run.triggered_by_event_ids),),
             )
 
         # Resolve stale shortages: any shortage from a previous calc_run
