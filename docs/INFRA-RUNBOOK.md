@@ -1,6 +1,6 @@
 # Documentation complete infrastructure OOTILS
 
-Mise a jour: 2026-04-08
+Mise a jour: 2026-04-10
 
 ## 1. Objectif
 
@@ -91,17 +91,15 @@ Etat connu:
 - Port API publie: 8000/tcp
 - Acces direct LAN: http://192.168.1.176:8000
 
-Etat connu au 2026-04-08:
+Etat connu au 2026-04-10:
 - repo: git@github.com:ngoineau/ootils-core.git (SSH, pas HTTPS)
 - branche: main
-- commit deploye: 98e8084 (Merge PR #80 — fix API spec english)
+- commit deploye: 81c520f (fix migration 015 — dedup uom_conversions)
 - remote git: correctement configure en SSH avec cle id_ed25519_github (voir section 4.1)
 - conteneurs en service:
   - ootils-core-api-1
   - ootils-core-postgres-1
-
-Note 2026-04-08: le clone initial etait partiel (refspec limite a live/v1-bootstrap).
-Fix applique: git remote set-branches origin '*' + git fetch --all + git reset --hard origin/main.
+- migrations appliquees: 17/17 (001 → 017), trackees dans schema_migrations
 
 ### 3.4 Poste admin Windows
 
@@ -194,11 +192,9 @@ Les secrets ne doivent pas etre republies dans GitHub. Pour reconstruire, verifi
 - Hote: 192.168.1.124
 - Chemin repo: /home/ubuntu/ootils-ui
 - Remote git: git@github.com:ngoineau/ootils-ui.git (branche master)
-- Commit deploye: 3219df6 (infra: Dockerfile + docker-compose + standalone build)
+- Commit deploye au 2026-04-10: da604c8 (GraphViz, ScenarioContext, hooks nouveaux)
 - Container: ootils-ui
 - Port: 3000
-
-Note: le runbook precedent indiquait /opt/ootils-ui — le deploiement 2026-04-08 a utilise /home/ubuntu/ootils-ui.
 
 ### 5.2 Publication reseau
 
@@ -265,9 +261,9 @@ curl -I http://127.0.0.1:13000
 - Hote: 192.168.1.176
 - Utilisateur d'exploitation verifie: debian
 - Chemin repo: ~/ootils-core
-- Remote git: https://github.com/ngoineau/ootils-core.git
+- Remote git: git@github.com:ngoineau/ootils-core.git (SSH)
 - Branche: main
-- Commit deploye au 2026-04-05: 1ee0cd77f54bd150cf5b1a98ec790fa9002f8cae
+- Commit deploye au 2026-04-10: 81c520f
 
 ### 6.2 Topologie Docker Compose
 
@@ -330,26 +326,31 @@ docker compose ps
 
 ### 6.5 Migrations et seed
 
-Point important valide en exploitation:
-- la commande documentee python -m ootils_core.db.migrate n'etait pas disponible telle quelle sur la cible
-- les migrations sont appliquees par le code applicatif via OotilsDB._apply_migrations()
-- lors du traitement GH 56, la migration 007 a du etre appliquee manuellement car la base ne la reflechissait pas encore
+Systeme de migration au 2026-04-10:
+- Les migrations sont appliquees automatiquement par OotilsDB._apply_migrations() au demarrage de l'API
+- Systeme incrémental avec table de tracking schema_migrations (PR #136)
+- Advisory lock PostgreSQL : une seule instance applique les migrations a la fois
+- 17 migrations actives : 001_initial_schema → 017_shortage_severity_class
+- Au demarrage : seules les migrations absentes de schema_migrations sont appliquees (O(1) si tout est a jour)
 
-Fichier critique:
-- ~/ootils-core/src/ootils_core/db/migrations/007_import_pipeline.sql
-
-Commande d'application manuelle en cas de besoin:
-
+Verification de l'etat des migrations:
 ```bash
-cd ~/ootils-core
-docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < src/ootils_core/db/migrations/007_import_pipeline.sql
+docker exec ootils-core-postgres-1 psql -U ootils -d ootils_dev \
+  -c "SELECT version, applied_at FROM schema_migrations ORDER BY applied_at;"
+```
+
+Application manuelle d'une migration si besoin (cas exceptionnel):
+```bash
+docker exec ootils-core-postgres-1 psql -U ootils -d ootils_dev \
+  < src/ootils_core/db/migrations/XXX_nom.sql
+# Puis enregistrer dans le tracker :
+docker exec ootils-core-postgres-1 psql -U ootils -d ootils_dev \
+  -c "INSERT INTO schema_migrations (version) VALUES ('XXX_nom.sql') ON CONFLICT DO NOTHING;"
 ```
 
 Relance du seed enrichi:
-
 ```bash
-cd ~/ootils-core
-docker compose exec -T api python scripts/seed_demo_data.py
+ssh ootils-core-vm201 "cd ~/ootils-core && docker compose exec -T api python scripts/seed_demo_data.py"
 ```
 
 ### 6.6 Validation fonctionnelle backend
@@ -471,15 +472,21 @@ Get-Content C:\dev\OpenClaw\logs\openclaw-tunnel.log -Tail 100
 
 ### 9.2 Livraisons confirmees
 
-- ootils-core#46 -> UI initiale, repo prive ngoineau/ootils-ui, deployee sur VM 200
-- ootils-ui#1 -> correction panneau d'explication, redeployee
-- ootils-core#47 -> Sprint UI-2, redeployee
-- ootils-ui#2 -> validation node_id requise pour simulate, redeployee
-- ootils-core#56 -> backend deploye et valide sur 192.168.1.176 avec fix 1ee0cd7
-- ootils-core#67 -> merge ingest-router + ghosts-tags sur main (213 tests)
-- ootils-core#83 -> SSH Claw setup (cle id_ed25519_infra autorisee sur VM 201 et VM 200) — ferme
-- ootils-core#84 -> fix VM 201 git remote + deploiement main 98e8084 — ferme
-- ootils-ui#3   -> deploiement VM 200 Dockerfile+compose, commit 3219df6 — ferme
+- ootils-core#46 -> UI initiale deployee sur VM 200
+- ootils-core#67 -> merge ingest-router + ghosts-tags sur main
+- ootils-core#83 -> SSH Claw setup (cle id_ed25519_infra)
+- ootils-core#84 -> fix VM 201 git remote + deploiement
+- ootils-ui#3   -> deploiement VM 200 Dockerfile+compose
+- ootils-core#136 -> migration runner schema_migrations + advisory lock + fixes securite
+- ootils-core#149 -> 30 fichiers tests + suppression modules legacy
+- ootils-core#161 -> 4 findings QC critiques/high (SQL injection, hash lock, auth startup, migration silent exception)
+- ootils-core#162 -> allocation SELECT FOR UPDATE
+- ootils-core#163 -> DQ ANY() chunking
+- ootils-core#164 -> 3 findings medium (orphaned edges, bucket boundary, health check timeout)
+- ootils-core#165 -> fix .dockerignore scripts/
+- ootils-core#166 -> fix migration 014 submitted_at
+- ootils-core#167 -> fix migration runner row_factory dict_row
+- ootils-core#168 -> fix migration 015 dedup uom_conversions
 
 ## 10. Procedure de reconstruction complete apres crash
 
@@ -629,9 +636,10 @@ http://127.0.0.1:13000
 
 1. VM 200 en DHCP: risque de changement d'IP si pas de reservation
 2. Tunnel Windows: solution pratique mais pas ideale structurellement
-3. Secrets distribues sur plusieurs emplacements: necessite un vrai coffre de secrets
-4. ootils-core#48 encore ouvert: le backend repond encore mal a certains payloads invalides directs
-5. Documentation de migration backend inexacte historiquement: la commande python -m ootils_core.db.migrate ne doit pas etre consideree comme procedure de reprise fiable sans revalidation
+3. Secrets distribues sur plusieurs emplacements: necessite un vrai coffre de secrets (issue ouverte)
+4. Migration runner — pas de transaction par migration (#169): etat partiel possible si une migration multi-statements echoue en cours de route. Mitige par idempotence des SQL actuels. A adresser avant la premiere migration destructrice.
+5. Dump Postgres quotidien non encore configure (a faire)
+6. Snapshots Proxmox VM 200 + VM 201 non encore automatises (a faire)
 
 ## 13. Checklist rapide post-reconstruction
 
@@ -639,10 +647,12 @@ http://127.0.0.1:13000
 - SSH VM 200 OK
 - SSH ootils-v1 OK
 - OpenClaw healthz OK sur 127.0.0.1:18789
-- ootils-ui HTTP 200 sur 127.0.0.1:13000
+- ootils-ui HTTP 200 sur 192.168.1.124:3000
 - ootils-core API UP sur 192.168.1.176:8000
-- /v1/issues repond
-- /v1/graph repond
+- curl http://192.168.1.176:8000/health -> {"status":"ok","version":"1.0.0"}
+- /v1/issues repond avec Bearer token
+- /v1/scenarios repond avec Bearer token
+- schema_migrations contient 17 lignes
 - tache Windows OpenClaw SSH Tunnel presente
 - secrets restaures et rotates si incident de securite
 
