@@ -303,35 +303,44 @@ def _check_l1(
 # L2 — Referential checks
 # ──────────────────────────────────────────────────────────────
 
-def _batch_resolve_items(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
-    """Return set of external_ids that exist in items table."""
+_BATCH_CHUNK_SIZE = 10_000  # safe below PostgreSQL's ANY() array limit (~32 767)
+
+
+def _chunked_resolve(
+    db: psycopg.Connection,
+    table: str,
+    external_ids: list[str],
+) -> set[str]:
+    """Return set of external_ids that exist in *table*.
+
+    Chunks the input into batches of _BATCH_CHUNK_SIZE to avoid hitting
+    PostgreSQL's array size limit (~32 767 elements) on large batch imports
+    (fix for issue #157).
+    """
     if not external_ids:
         return set()
-    rows = db.execute(
-        "SELECT external_id FROM items WHERE external_id = ANY(%s)",
-        (external_ids,),
-    ).fetchall()
-    return {r["external_id"] for r in rows}
+    found: set[str] = set()
+    for i in range(0, len(external_ids), _BATCH_CHUNK_SIZE):
+        chunk = external_ids[i : i + _BATCH_CHUNK_SIZE]
+        rows = db.execute(
+            f"SELECT external_id FROM {table} WHERE external_id = ANY(%s)",  # noqa: S608
+            (chunk,),
+        ).fetchall()
+        found.update(r["external_id"] for r in rows)
+    return found
+
+
+def _batch_resolve_items(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
+    """Return set of external_ids that exist in items table."""
+    return _chunked_resolve(db, "items", external_ids)
 
 
 def _batch_resolve_locations(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
-    if not external_ids:
-        return set()
-    rows = db.execute(
-        "SELECT external_id FROM locations WHERE external_id = ANY(%s)",
-        (external_ids,),
-    ).fetchall()
-    return {r["external_id"] for r in rows}
+    return _chunked_resolve(db, "locations", external_ids)
 
 
 def _batch_resolve_suppliers(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
-    if not external_ids:
-        return set()
-    rows = db.execute(
-        "SELECT external_id FROM suppliers WHERE external_id = ANY(%s)",
-        (external_ids,),
-    ).fetchall()
-    return {r["external_id"] for r in rows}
+    return _chunked_resolve(db, "suppliers", external_ids)
 
 
 def _check_l2(
