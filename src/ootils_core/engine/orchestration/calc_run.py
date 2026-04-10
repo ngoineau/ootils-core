@@ -37,9 +37,11 @@ class CalcRunManager:
         Coalesces all pending (unprocessed) events for this scenario,
         not just the triggering event_ids.
         """
-        # Try advisory lock — hashtext truncates to int32 internally
+        # Try advisory lock — hashtext() returns a native int32 (PostgreSQL internal);
+        # using it directly avoids the MD5-128bit→64bit truncation that caused hash
+        # collisions between unrelated scenario_ids (fix for issue #156).
         row = db.execute(
-            "SELECT pg_try_advisory_lock(('x' || md5(%s))::bit(64)::bigint) AS locked",
+            "SELECT pg_try_advisory_lock(hashtext(%s)::bigint) AS locked",
             (str(scenario_id),),
         ).fetchone()
 
@@ -151,9 +153,9 @@ class CalcRunManager:
                 (now, run.triggered_by_event_ids),
             )
 
-        # Release advisory lock
+        # Release advisory lock (must use same hash as acquire)
         db.execute(
-            "SELECT pg_advisory_unlock(('x' || md5(%s))::bit(64)::bigint)",
+            "SELECT pg_advisory_unlock(hashtext(%s)::bigint)",
             (str(run.scenario_id),),
         )
 
@@ -194,10 +196,10 @@ class CalcRunManager:
         except Exception:
             pass
 
-        # Release advisory lock (best-effort on failure) — HIGH-3: use 64-bit hash
+        # Release advisory lock (best-effort on failure — same hash as acquire)
         try:
             db.execute(
-                "SELECT pg_advisory_unlock(('x' || md5(%s))::bit(64)::bigint)",
+                "SELECT pg_advisory_unlock(hashtext(%s)::bigint)",
                 (str(run.scenario_id),),
             )
         except Exception:

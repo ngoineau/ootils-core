@@ -126,14 +126,12 @@ class OotilsDB:
                             "column already exists",
                             "constraint already exists",
                         ]):
-                            # Still record it so we don't retry
-                            try:
-                                conn.execute(
-                                    "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
-                                    (version,),
-                                )
-                            except Exception:
-                                pass
+                            # Record it so we don't retry — crash loudly if
+                            # this insert fails (schema_migrations table broken)
+                            conn.execute(
+                                "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
+                                (version,),
+                            )
                             continue
                         print(
                             f"[MIGRATION ERROR] {migration_path.name}: {e}",

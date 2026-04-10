@@ -18,22 +18,15 @@ logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(auto_error=False)
 
-
-def _expected_token() -> str:
-    """
-    Return the expected API token from the environment.
-
-    Raises RuntimeError at startup if OOTILS_API_TOKEN is not set,
-    so the server fails loudly rather than silently accepting 'dev-token'.
-    """
-    token = os.environ.get("OOTILS_API_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "OOTILS_API_TOKEN environment variable is not set. "
-            "The API cannot start without an explicit token — "
-            "set OOTILS_API_TOKEN to a strong secret before launching."
-        )
-    return token
+# Validate token at import time — fail loudly if OOTILS_API_TOKEN is unset
+# so misconfiguration is caught at startup, not on first request (fix for #155).
+_TOKEN = os.environ.get("OOTILS_API_TOKEN")
+if not _TOKEN:
+    raise RuntimeError(
+        "OOTILS_API_TOKEN environment variable is not set. "
+        "The API cannot start without an explicit token — "
+        "set OOTILS_API_TOKEN to a strong secret before launching."
+    )
 
 
 async def require_auth(
@@ -54,9 +47,8 @@ async def require_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    expected = _expected_token()
     # hmac.compare_digest prevents timing-based token enumeration
-    if not hmac.compare_digest(credentials.credentials, expected):
+    if not hmac.compare_digest(credentials.credentials, _TOKEN):
         logger.warning("auth.invalid_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

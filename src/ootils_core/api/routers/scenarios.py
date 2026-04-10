@@ -8,6 +8,7 @@ from typing import Optional
 from uuid import UUID
 
 import psycopg
+from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
@@ -41,19 +42,23 @@ async def list_scenarios(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> ScenariosListResponse:
-    conditions = []
+    conditions: list[sql.Composable] = []
     params: list = []
     if status_filter:
-        conditions.append("status = %s")
+        conditions.append(sql.SQL("status = %s"))
         params.append(status_filter)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = (
+        sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+        if conditions
+        else sql.SQL("")
+    )
     total_row = db.execute(
-        f"SELECT COUNT(*) AS cnt FROM scenarios {where}",
+        sql.SQL("SELECT COUNT(*) AS cnt FROM scenarios ") + where,
         params if params else None,
     ).fetchone()
     total = int(total_row["cnt"]) if total_row else 0
     rows = db.execute(
-        f"SELECT * FROM scenarios {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        sql.SQL("SELECT * FROM scenarios ") + where + sql.SQL(" ORDER BY created_at DESC LIMIT %s OFFSET %s"),
         (params + [limit, offset]) if params else [limit, offset],
     ).fetchall()
     return ScenariosListResponse(
