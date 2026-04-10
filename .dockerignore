@@ -22,4 +22,4 @@ build/
 .env.*
 !.env.example
 .github/
-scripts/
+# scripts/ is intentionally included in the image (seed, export tools)
