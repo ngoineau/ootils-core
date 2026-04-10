@@ -285,6 +285,41 @@ class ScenarioManager:
             )
             edge_count += 1
 
+        # Post-copy integrity check: verify no active edges in the new scenario
+        # reference node_ids outside the copied set (fix for issue #158).
+        orphan_row = db.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM edges e
+            WHERE e.scenario_id = %s AND e.active = TRUE
+              AND (
+                NOT EXISTS (
+                    SELECT 1 FROM nodes n
+                    WHERE n.node_id = e.from_node_id
+                      AND n.scenario_id = %s AND n.active = TRUE
+                )
+                OR NOT EXISTS (
+                    SELECT 1 FROM nodes n
+                    WHERE n.node_id = e.to_node_id
+                      AND n.scenario_id = %s AND n.active = TRUE
+                )
+              )
+            """,
+            (target_scenario_id, target_scenario_id, target_scenario_id),
+        ).fetchone()
+        orphan_count = int(orphan_row["cnt"]) if orphan_row else 0
+        if orphan_count > 0:
+            logger.error(
+                "scenario.copy_nodes: %d orphaned edge(s) detected in new scenario %s — "
+                "graph connectivity is broken; scenario creation should be rolled back",
+                orphan_count,
+                target_scenario_id,
+            )
+            raise RuntimeError(
+                f"Scenario copy produced {orphan_count} orphaned edge(s) in {target_scenario_id}. "
+                "This indicates a data integrity issue in the source scenario. "
+                "The transaction has been aborted."
+            )
+
         logger.info(
             "scenario.copy_nodes src=%s dst=%s nodes=%d edges=%d",
             source_scenario_id,

@@ -279,6 +279,9 @@ class PropagationEngine:
             return False
 
         bucket_start = node.time_span_start
+        # bucket_end is EXCLUSIVE — consistent with ProjectionKernel.apply_contribution_rule
+        # and ADR-002d (bucket boundary = start of next bucket).
+        # Events on bucket_end itself belong to the next bucket, not this one (fix for #159).
         bucket_end = node.time_span_end
 
         if bucket_start is None or bucket_end is None:
@@ -344,6 +347,8 @@ class PropagationEngine:
                             daily_qty = src_node.quantity / Decimal(str(span_days))
                             # Count days within this bucket
                             overlap_start = max(bucket_start, src_node.time_span_start)
+                            # Both bucket_end and time_span_end are exclusive —
+                            # overlap is [overlap_start, overlap_end) days.
                             overlap_end = min(bucket_end, src_node.time_span_end)
                             if overlap_end > overlap_start:
                                 overlap_days = (overlap_end - overlap_start).days
