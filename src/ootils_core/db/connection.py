@@ -81,7 +81,11 @@ class OotilsDB:
         # concurrent migration attempts from multiple app instances.
         _LOCK_KEY = 8_037_421_901  # arbitrary fixed int64
 
-        with psycopg.connect(self.database_url, autocommit=True) as conn:
+        with psycopg.connect(
+            self.database_url,
+            autocommit=True,
+            row_factory=psycopg.rows.dict_row,
+        ) as conn:
             # Acquire advisory lock (blocks until available)
             conn.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
             try:
