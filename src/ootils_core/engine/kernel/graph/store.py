@@ -39,12 +39,26 @@ class GraphStore:
     # Node reads
     # ------------------------------------------------------------------
 
-    def get_node(self, node_id: UUID, scenario_id: UUID) -> Optional[Node]:
-        """Fetch a single node by ID and scenario. Returns None if not found."""
+    def get_node(
+        self,
+        node_id: UUID,
+        scenario_id: UUID,
+        for_update: bool = False,
+    ) -> Optional[Node]:
+        """Fetch a single node by ID and scenario. Returns None if not found.
+
+        Args:
+            for_update: If True, appends FOR UPDATE to lock the row until the
+                current transaction commits. Use this during allocation to
+                prevent concurrent runners from reading stale closing_stock
+                and double-deducting supply (#154).
+        """
+        lock_clause = " FOR UPDATE" if for_update else ""
         row = self._conn.execute(
-            """
+            f"""
             SELECT * FROM nodes
             WHERE node_id = %s AND scenario_id = %s AND active = TRUE
+            {lock_clause}
             """,
             (node_id, scenario_id),
         ).fetchone()

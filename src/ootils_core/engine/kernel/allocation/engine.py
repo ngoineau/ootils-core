@@ -234,7 +234,10 @@ class AllocationEngine:
                 break
 
             pi_node_id = consumes_edge.to_node_id
-            pi_node = store.get_node(pi_node_id, scenario_id)
+            # for_update=True locks the row until our UPDATE on closing_stock
+            # commits, preventing concurrent allocation runs from double-deducting
+            # supply from the same PI node (fix for issue #154).
+            pi_node = store.get_node(pi_node_id, scenario_id, for_update=True)
 
             if pi_node is None:
                 logger.warning(
