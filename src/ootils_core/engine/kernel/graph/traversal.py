@@ -51,6 +51,25 @@ class GraphTraversal:
             if edge.to_node_id in node_ids and edge.from_node_id in node_ids:
                 predecessors[edge.to_node_id].add(edge.from_node_id)
 
+        # Add implicit ordering: PI buckets in the same projection_series must be
+        # processed in bucket_sequence order (feeds_forward edges may not exist).
+        # We inject synthetic predecessor relationships between consecutive PI buckets.
+        pi_nodes = {nid: self._store.get_node(nid, scenario_id) for nid in node_ids}
+        from collections import defaultdict
+        series_buckets: dict = defaultdict(list)
+        for nid, nd in pi_nodes.items():
+            if nd and nd.node_type == "ProjectedInventory" and nd.projection_series_id and nd.bucket_sequence is not None:
+                series_buckets[nd.projection_series_id].append((nd.bucket_sequence, nid))
+        for series_id, seq_list in series_buckets.items():
+            seq_list.sort(key=lambda x: x[0])
+            for i in range(1, len(seq_list)):
+                prev_nid = seq_list[i - 1][1]
+                curr_nid = seq_list[i][1]
+                if curr_nid in predecessors:
+                    predecessors[curr_nid].add(prev_nid)
+                else:
+                    predecessors[curr_nid] = {prev_nid}
+
         # Use graphlib.TopologicalSorter
         # TopologicalSorter takes {node: predecessors} mapping
         sorter = graphlib.TopologicalSorter(predecessors)

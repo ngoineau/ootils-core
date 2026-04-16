@@ -292,16 +292,24 @@ class PropagationEngine:
         # ------------------------------------------------------------------
         opening_stock = Decimal("0")
 
-        # Find predecessor via 'feeds_forward' edge (to_node_id = this node)
-        pred_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="feeds_forward")
-        if pred_edges:
-            pred_node = self._store.get_node(pred_edges[0].from_node_id, scenario_id)
-            if pred_node and pred_node.closing_stock is not None:
-                opening_stock = pred_node.closing_stock
+        pred_node = None
+        if node.projection_series_id is not None and node.bucket_sequence is not None and node.bucket_sequence > 0:
+            pred_rows = self._store._conn.execute(
+                "SELECT * FROM nodes WHERE projection_series_id = %s AND bucket_sequence = %s AND scenario_id = %s AND active = TRUE LIMIT 1",
+                (node.projection_series_id, node.bucket_sequence - 1, scenario_id),
+            ).fetchall()
+            if pred_rows:
+                from ootils_core.engine.kernel.graph.store import _row_to_node
+                pred_node = _row_to_node(pred_rows[0])
+
+        if pred_node is None:
+            pred_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="feeds_forward")
+            if pred_edges:
+                pred_node = self._store.get_node(pred_edges[0].from_node_id, scenario_id)
+
+        if pred_node is not None and pred_node.closing_stock is not None:
+            opening_stock = pred_node.closing_stock
         else:
-            # First bucket — find on-hand supply nodes for this item/location
-            # OnHandSupply nodes connect via 'replenishes' edge too, but at bucket 0
-            # Check for any on-hand node feeding into this PI node
             oh_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="replenishes")
             for edge in oh_edges:
                 src_node = self._store.get_node(edge.from_node_id, scenario_id)

@@ -84,6 +84,49 @@ async def create_simulation(
     else:
         base_id = BASELINE_SCENARIO_ID
 
+    # --- Ensure baseline is fresh before comparing ---
+    # If the baseline has never been fully computed (no completed calc_run),
+    # run a full recompute now so the comparison is valid.
+    try:
+        last_run = db.execute(
+            "SELECT calc_run_id, nodes_recalculated, completed_at FROM calc_runs WHERE scenario_id = %s ORDER BY started_at DESC LIMIT 1",
+            (base_id,),
+        ).fetchone()
+        baseline_needs_refresh = (
+            last_run is None
+            or (last_run["nodes_recalculated"] or 0) == 0
+            or last_run["completed_at"] is None
+        )
+        if baseline_needs_refresh:
+            logger.info("simulate: baseline stale — triggering full recompute")
+            from ootils_core.api.routers.events import _build_propagation_engine
+            from ootils_core.engine.orchestration.calc_run import CalcRunManager
+            from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+            from datetime import datetime, timezone
+            _trigger_id = uuid4()
+            db.execute(
+                "INSERT INTO events (event_id, event_type, scenario_id, processed, source, created_at) VALUES (%s, 'calc_triggered', %s, FALSE, 'api', %s)",
+                (_trigger_id, base_id, datetime.now(timezone.utc)),
+            )
+            _engine = _build_propagation_engine(db)
+            _crm = CalcRunManager()
+            _cr = _crm.start_calc_run(scenario_id=base_id, event_ids=[_trigger_id], db=db)
+            if _cr is not None:
+                _all_pi = db.execute(
+                    "SELECT node_id FROM nodes WHERE scenario_id = %s AND node_type = 'ProjectedInventory' AND active = TRUE",
+                    (base_id,),
+                ).fetchall()
+                _pi_ids = {UUID(str(r["node_id"])) for r in _all_pi}
+                if _pi_ids:
+                    _dm = DirtyFlagManager()
+                    _dm.mark_dirty(_pi_ids, base_id, _cr.calc_run_id, db)
+                    _dm.flush_to_postgres(_cr.calc_run_id, base_id, db)
+                    _engine._propagate(_cr, _pi_ids, db)
+                _engine._finish_run(_cr, base_id, db)
+                logger.info("simulate: baseline recomputed %d nodes", _cr.nodes_recalculated or 0)
+    except Exception as exc:
+        logger.warning("simulate: baseline freshness check failed: %s", exc)
+
     manager = ScenarioManager()
     try:
         scenario = manager.create_scenario(
