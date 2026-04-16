@@ -375,7 +375,7 @@ class AgentReport:
     issues_found: int
     issues_analyzed: int
     simulations_run: int
-    recommendations: List[AgentRecommendation]
+
     run_at: datetime
     summary: str              # 1-paragraph plain English
 # ---------------------------------------------------------------------------
@@ -423,55 +423,3 @@ class MPSOrder:
 
 
 # ---------------------------------------------------------------------------
-# Forecasting models
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ForecastSeries:
-    """Time series of demand forecasts for an item/location."""
-    series_id: UUID
-    item_id: UUID
-    location_id: UUID
-    scenario_id: UUID
-    horizon_start: date
-    horizon_end: date
-    forecast_method: str = "statistical"  # statistical | consensus | machine_learning
-    confidence_level: Decimal = Decimal("0.8")
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-@dataclass
-class ForecastAdjustment:
-    """Adjustment applied to a forecast series (manual or algorithmic)."""
-    adjustment_id: UUID
-    series_id: UUID
-    scenario_id: UUID
-    adjustment_date: date
-    quantity_delta: Decimal  # positive = increase, negative = decrease
-    reason: str  # manual_override | promotion | seasonality | outlier_correction
-    applied_by: Optional[str] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ---------------------------------------------------------------------------
-# ATP models (Available-to-Promise)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ATPResponse:
-    """Result of an ATP check for a requested demand."""
-    atp_check_id: UUID
-    scenario_id: UUID
-    item_id: UUID
-    location_id: UUID
-    requested_date: date
-    requested_quantity: Decimal
-    available_quantity: Decimal
-    available_date: date  # earliest date full quantity available
-    shortage_quantity: Decimal = Decimal("0")
-    status: str = "available"  # available | partial | unavailable
-    allocation_details: List[UUID] = field(default_factory=list)  # IDs of allocated supply nodes
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
