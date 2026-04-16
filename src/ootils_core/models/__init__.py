@@ -375,55 +375,7 @@ class AgentReport:
     issues_found: int
     issues_analyzed: int
     simulations_run: int
-    recommendations: List[AgentRecommendation]
-    run_at: datetime
-    summary: str              # 1-paragraph plain English
-# ---------------------------------------------------------------------------
-# MPS models (Master Production Schedule)
-# ---------------------------------------------------------------------------
 
-
-@dataclass
-class MPSNode:
-    """Master Production Schedule node representing a planned production batch."""
-    mps_node_id: UUID
-    scenario_id: UUID
-    item_id: UUID
-    location_id: UUID
-    planned_date: date
-    quantity: Decimal
-    uom: str = "EA"
-    status: str = "planned"  # planned | confirmed | released | completed
-    priority: int = 0
-    lot_number: Optional[str] = None
-    work_center: Optional[str] = None
-    dependencies: List[UUID] = field(default_factory=list)  # IDs of dependent MPS nodes
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-@dataclass
-class MPSOrder:
-    """Production order derived from MPS, with detailed scheduling."""
-    order_id: UUID
-    mps_node_id: UUID
-    scenario_id: UUID
-    item_id: UUID
-    location_id: UUID
-    start_date: date
-    end_date: date
-    quantity: Decimal
-    uom: str = "EA"
-    status: str = "scheduled"  # scheduled | in_progress | completed | cancelled
-    actual_start_date: Optional[date] = None
-    actual_end_date: Optional[date] = None
-    actual_quantity: Optional[Decimal] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ---------------------------------------------------------------------------
-# Forecasting models
 # ---------------------------------------------------------------------------
 
 
@@ -448,30 +400,3 @@ class ForecastAdjustment:
     adjustment_id: UUID
     series_id: UUID
     scenario_id: UUID
-    adjustment_date: date
-    quantity_delta: Decimal  # positive = increase, negative = decrease
-    reason: str  # manual_override | promotion | seasonality | outlier_correction
-    applied_by: Optional[str] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ---------------------------------------------------------------------------
-# ATP models (Available-to-Promise)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ATPResponse:
-    """Result of an ATP check for a requested demand."""
-    atp_check_id: UUID
-    scenario_id: UUID
-    item_id: UUID
-    location_id: UUID
-    requested_date: date
-    requested_quantity: Decimal
-    available_quantity: Decimal
-    available_date: date  # earliest date full quantity available
-    shortage_quantity: Decimal = Decimal("0")
-    status: str = "available"  # available | partial | unavailable
-    allocation_details: List[UUID] = field(default_factory=list)  # IDs of allocated supply nodes
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
