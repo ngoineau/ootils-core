@@ -313,6 +313,7 @@ def test_health_check_ok(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -328,6 +329,7 @@ def test_health_check_orphaned_edges(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -344,6 +346,7 @@ def test_health_check_stuck_calc_runs(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -360,6 +363,7 @@ def test_health_check_both_issues(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -373,10 +377,11 @@ def test_health_check_connection_error(empty_migrations_dir):
         db = OotilsDB("postgresql:///x")
 
     # Now patch psycopg.connect inside conn() to blow up
-    with patch(
-        "ootils_core.db.connection.psycopg.connect",
-        side_effect=Exception("could not connect"),
-    ):
+    with patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
+            patch(
+                "ootils_core.db.connection.psycopg.connect",
+                side_effect=Exception("could not connect"),
+            ):
         result = db.health_check()
     assert result["ok"] is False
     assert any("Connection error" in i for i in result["issues"])
