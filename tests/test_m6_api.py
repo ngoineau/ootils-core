@@ -7,7 +7,7 @@ Tests cover: auth, events, projection, issues, explain, simulate, graph.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from typing import Generator
 from unittest.mock import MagicMock, patch
@@ -20,10 +20,9 @@ from fastapi.testclient import TestClient
 os.environ["OOTILS_API_TOKEN"] = "test-token"
 
 from ootils_core.api.app import create_app
-from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.api.dependencies import get_db
 from ootils_core.models import (
     CausalStep,
-    Edge,
     Explanation,
     Node,
     Scenario,
@@ -619,12 +618,34 @@ def test_get_graph_success(app, auth_headers):
 
 
 def test_openapi_schema_accessible(client, auth_headers):
-    """OpenAPI schema should be reachable without auth."""
+    """OpenAPI schema is disabled by default unless explicitly enabled."""
     resp = client.get("/openapi.json")
-    assert resp.status_code == 200
-    schema = resp.json()
-    assert schema["info"]["title"] == "Ootils Core API"
-    assert schema["info"]["version"] == "1.0.0"
+    assert resp.status_code == 404
+
+
+def test_openapi_schema_accessible_when_docs_enabled(monkeypatch, app, auth_headers):
+    monkeypatch.setenv("OOTILS_ENABLE_API_DOCS", "1")
+    application = create_app()
+
+    mock_conn = _mock_db()
+
+    def override_db():
+        yield mock_conn
+
+    application.dependency_overrides[get_db] = override_db
+
+    with TestClient(application) as c:
+        resp = c.get("/openapi.json")
+        assert resp.status_code == 200
+        schema = resp.json()
+        assert schema["info"]["title"] == "Ootils Core API"
+        assert schema["info"]["version"] == "1.0.0"
+
+        docs_resp = c.get("/docs")
+        assert docs_resp.status_code == 200
+        assert "Swagger UI" in docs_resp.text
+
+    application.dependency_overrides.clear()
 
 
 def test_post_simulate_invalid_node_returns_422(app, auth_headers):

@@ -36,6 +36,45 @@ DEFAULT_DATABASE_URL = (
     or "postgresql:///ootils_dev"
 )
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _make_connection_pool(database_url: str):
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        return None
+
+    min_size = _env_int("OOTILS_DB_POOL_MIN_SIZE", 1)
+    max_size = _env_int("OOTILS_DB_POOL_MAX_SIZE", 10)
+    timeout = _env_float("OOTILS_DB_POOL_TIMEOUT_SECONDS", 10.0)
+    if min_size < 1:
+        raise ValueError("OOTILS_DB_POOL_MIN_SIZE must be >= 1")
+    if max_size < min_size:
+        raise ValueError("OOTILS_DB_POOL_MAX_SIZE must be >= OOTILS_DB_POOL_MIN_SIZE")
+    if timeout <= 0:
+        raise ValueError("OOTILS_DB_POOL_TIMEOUT_SECONDS must be > 0")
+
+    return ConnectionPool(
+        conninfo=database_url,
+        min_size=min_size,
+        max_size=max_size,
+        timeout=timeout,
+        open=True,
+        kwargs={"row_factory": dict_row},
+    )
+
 
 def _sqlstate_of(exc: Exception) -> str | None:
     """Return PostgreSQL SQLSTATE when available."""
@@ -56,7 +95,20 @@ class OotilsDB:
 
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or DEFAULT_DATABASE_URL
+        self._pool = None
+        self._pool_checked = False
         self._apply_migrations()
+
+    def _get_pool(self):
+        if not self._pool_checked:
+            self._pool = _make_connection_pool(self.database_url)
+            self._pool_checked = True
+        return self._pool
+
+    def close(self) -> None:
+        pool = self._get_pool()
+        if pool is not None:
+            pool.close()
 
     @contextmanager
     def conn(self) -> Generator[psycopg.Connection, None, None]:
@@ -64,7 +116,10 @@ class OotilsDB:
         Yield a configured psycopg3 Connection with dict_row factory.
         Commits on success, rolls back on exception, always closes.
         """
-        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+        pool = self._get_pool()
+        connection_cm = pool.connection() if pool is not None else psycopg.connect(self.database_url, row_factory=dict_row)
+
+        with connection_cm as connection:
             try:
                 yield connection
                 connection.commit()

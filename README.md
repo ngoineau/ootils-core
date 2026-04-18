@@ -59,6 +59,7 @@ git clone https://github.com/ngoineau/ootils-core.git
 cd ootils-core
 cp .env.example .env
 # Edit .env — set POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, OOTILS_API_TOKEN
+# Optional: set OOTILS_ENABLE_API_DOCS=1 only for local/dev interactive docs
 ```
 
 ### 2. Start services
@@ -75,8 +76,12 @@ This starts PostgreSQL 16 and the FastAPI server on port 8000. Migrations run au
 curl http://localhost:8000/health
 # {"status": "ok"}
 
-curl http://localhost:8000/docs
-# Opens Swagger UI
+curl http://localhost:8000/health
+# {"status": "ok", "version": "1.0.0"}
+
+# Optional: expose interactive docs locally only
+# echo 'OOTILS_ENABLE_API_DOCS=1' >> .env && docker compose up -d --build
+# Then open http://localhost:8000/docs
 ```
 
 ### 4. Load demo data (optional)
@@ -124,13 +129,18 @@ curl -X POST -H "Authorization: Bearer <your-token>" \
 
 ## API documentation
 
-Interactive Swagger UI: **http://localhost:8000/docs**
+Interactive Swagger UI: disabled by default, enable with `OOTILS_ENABLE_API_DOCS=1`
 
-ReDoc: **http://localhost:8000/redoc**
+ReDoc: disabled by default, enable with `OOTILS_ENABLE_API_DOCS=1`
 
 Static OpenAPI spec: `docs/openapi.json`
 
 Authentication: `Authorization: Bearer <OOTILS_API_TOKEN>`
+
+Application-side PostgreSQL pooling is enabled via `psycopg_pool` with defaults:
+- `OOTILS_DB_POOL_MIN_SIZE=1`
+- `OOTILS_DB_POOL_MAX_SIZE=10`
+- `OOTILS_DB_POOL_TIMEOUT_SECONDS=10`
 
 ---
 

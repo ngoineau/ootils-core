@@ -136,6 +136,17 @@ def test_init_uses_default_database_url(empty_migrations_dir):
         assert db.database_url == conn_module.DEFAULT_DATABASE_URL
 
 
+def test_get_pool_is_cached(empty_migrations_dir):
+    fake_pool = MagicMock(name="pool")
+
+    with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=fake_pool) as mk_pool:
+        db = OotilsDB("postgresql:///fake")
+        assert db._get_pool() is fake_pool
+        assert db._get_pool() is fake_pool
+        mk_pool.assert_called_once_with("postgresql:///fake")
+
+
 # ---------------------------------------------------------------------------
 # conn() context manager — commit on success, rollback on exception
 # ---------------------------------------------------------------------------
@@ -143,6 +154,7 @@ def test_init_uses_default_database_url(empty_migrations_dir):
 def test_conn_commits_on_success(empty_migrations_dir):
     fake_conn, _ = _make_fake_connection()
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn) as mock_connect:
         db = OotilsDB("postgresql:///x")
         with db.conn() as c:
@@ -155,6 +167,7 @@ def test_conn_commits_on_success(empty_migrations_dir):
 def test_conn_rolls_back_on_exception(empty_migrations_dir):
     fake_conn, _ = _make_fake_connection()
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         with pytest.raises(RuntimeError, match="boom"):
@@ -162,6 +175,43 @@ def test_conn_rolls_back_on_exception(empty_migrations_dir):
                 raise RuntimeError("boom")
         fake_conn.rollback.assert_called_once()
         fake_conn.commit.assert_not_called()
+
+
+def test_conn_uses_connection_pool_when_available(empty_migrations_dir):
+    fake_conn = MagicMock(name="pooled_connection")
+
+    class _PoolConnCM:
+        def __enter__(self):
+            return fake_conn
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    fake_pool = MagicMock(name="pool")
+    fake_pool.connection.return_value = _PoolConnCM()
+
+    with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=fake_pool), \
+            patch("ootils_core.db.connection.psycopg.connect") as mock_connect:
+        db = OotilsDB("postgresql:///x")
+        with db.conn() as c:
+            assert c is fake_conn
+
+    fake_pool.connection.assert_called_once()
+    fake_conn.commit.assert_called_once()
+    fake_conn.rollback.assert_not_called()
+    mock_connect.assert_not_called()
+
+
+def test_close_closes_pool(empty_migrations_dir):
+    fake_pool = MagicMock(name="pool")
+
+    with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=fake_pool):
+        db = OotilsDB("postgresql:///x")
+        db.close()
+
+    fake_pool.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +313,7 @@ def test_health_check_ok(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -278,6 +329,7 @@ def test_health_check_orphaned_edges(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -294,6 +346,7 @@ def test_health_check_stuck_calc_runs(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -310,6 +363,7 @@ def test_health_check_both_issues(empty_migrations_dir):
         ],
     )
     with patch.object(OotilsDB, "_apply_migrations"), \
+            patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
             patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
         db = OotilsDB("postgresql:///x")
         result = db.health_check()
@@ -323,10 +377,11 @@ def test_health_check_connection_error(empty_migrations_dir):
         db = OotilsDB("postgresql:///x")
 
     # Now patch psycopg.connect inside conn() to blow up
-    with patch(
-        "ootils_core.db.connection.psycopg.connect",
-        side_effect=Exception("could not connect"),
-    ):
+    with patch("ootils_core.db.connection._make_connection_pool", return_value=None), \
+            patch(
+                "ootils_core.db.connection.psycopg.connect",
+                side_effect=Exception("could not connect"),
+            ):
         result = db.health_check()
     assert result["ok"] is False
     assert any("Connection error" in i for i in result["issues"])
