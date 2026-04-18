@@ -36,7 +36,7 @@ router = APIRouter(prefix="/v1/mrp", tags=["mrp-apics"])
 class MrpApicsRunRequest(BaseModel):
     """Request body for APICS MRP run."""
     scenario_id: Optional[str] = None
-    location_id: Optional[str] = None
+    location_id: str = Field(..., min_length=1)
     item_ids: Optional[List[str]] = None
     horizon_days: int = Field(default=90, ge=7, le=365)
     bucket_grain: str = Field(default="week", pattern="^(day|week|month)$")
@@ -91,7 +91,7 @@ class MrpApicsRunResponse(BaseModel):
 class ConsumptionRequest(BaseModel):
     """Request for forecast consumption."""
     item_ids: Optional[List[str]] = None
-    location_id: Optional[str] = None
+    location_id: str = Field(..., min_length=1)
     scenario_id: Optional[str] = None
     horizon_days: int = Field(default=90, ge=7, le=365)
     strategy: str = Field(default="MAX", pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$")
