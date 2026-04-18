@@ -86,17 +86,34 @@ CREATE TABLE IF NOT EXISTS mrp_action_messages (
     message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL REFERENCES mrp_runs(run_id) ON DELETE CASCADE,
     item_id UUID NOT NULL,
-    location_id UUID,
-    message_type TEXT NOT NULL,
-    message_date DATE NOT NULL,
-    period_start DATE NOT NULL,
-    period_end DATE NOT NULL,
-    quantity NUMERIC(18,6) NOT NULL DEFAULT 0,
-    shortage_qty NUMERIC(18,6) NOT NULL DEFAULT 0,
-    time_fence_zone TEXT,
-    llc INTEGER NOT NULL DEFAULT 0,
+    location_id UUID NOT NULL,
+    node_id UUID,
+    message_type TEXT NOT NULL CHECK (message_type IN ('EXPEDITE', 'DEFER', 'CANCEL', 'RELEASE', 'RESCHEDULE')),
+    priority TEXT NOT NULL CHECK (priority IN ('HIGH', 'MEDIUM', 'LOW')),
+    description TEXT NOT NULL,
+    reference_date DATE,
+    proposed_date DATE,
+    current_qty NUMERIC(18,6),
+    proposed_qty NUMERIC(18,6),
+    status TEXT NOT NULL DEFAULT 'NEW' CHECK (status IN ('NEW', 'REVIEWED', 'ACCEPTED', 'REJECTED', 'APPLIED')),
+    reviewed_by TEXT,
+    reviewed_at TIMESTAMPTZ,
+    rejection_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE mrp_action_messages
+    ADD COLUMN IF NOT EXISTS node_id UUID,
+    ADD COLUMN IF NOT EXISTS priority TEXT,
+    ADD COLUMN IF NOT EXISTS description TEXT,
+    ADD COLUMN IF NOT EXISTS reference_date DATE,
+    ADD COLUMN IF NOT EXISTS proposed_date DATE,
+    ADD COLUMN IF NOT EXISTS current_qty NUMERIC(18,6),
+    ADD COLUMN IF NOT EXISTS proposed_qty NUMERIC(18,6),
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'NEW',
+    ADD COLUMN IF NOT EXISTS reviewed_by TEXT,
+    ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_mrp_runs_scenario ON mrp_runs (scenario_id);
 CREATE INDEX IF NOT EXISTS idx_mrp_runs_scenario_date ON mrp_runs (scenario_id, created_at DESC);
@@ -104,3 +121,5 @@ CREATE INDEX IF NOT EXISTS idx_mrp_runs_status ON mrp_runs (status) WHERE status
 CREATE INDEX IF NOT EXISTS idx_mrp_bucket_records_run ON mrp_bucket_records (run_id);
 CREATE INDEX IF NOT EXISTS idx_mrp_bucket_records_item ON mrp_bucket_records (item_id, period_start);
 CREATE INDEX IF NOT EXISTS idx_mrp_action_messages_run ON mrp_action_messages (run_id);
+CREATE INDEX IF NOT EXISTS idx_mrp_messages_run ON mrp_action_messages (run_id, priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_mrp_messages_item ON mrp_action_messages (item_id, location_id, status) WHERE status = 'NEW';
