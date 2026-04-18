@@ -7,7 +7,7 @@ name = "ootils-core"
 version = "0.1.0"
 description = "The first supply chain decision engine designed for the age of AI agents"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "ngoineau" }]
 keywords = ["supply-chain", "decision-engine", "ai-agents", "inventory", "procurement"]
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Office/Business",

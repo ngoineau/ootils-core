@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -26,6 +28,45 @@ REPO_ROOT = Path(__file__).parents[2]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 SEED_SCRIPT = REPO_ROOT / "scripts" / "seed_demo_data.py"
+
+
+def _free_tcp_port() -> int:
+    """Return an available localhost TCP port for temporary test use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _compose_cmd() -> list[str]:
+    """Prefer `docker compose`, fall back to `docker-compose` when needed."""
+    if shutil.which("docker") is not None:
+        try:
+            result = subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return ["docker", "compose"]
+        except Exception:
+            pass
+
+    if shutil.which("docker-compose") is not None:
+        return ["docker-compose"]
+
+    raise RuntimeError("Neither 'docker compose' nor 'docker-compose' is available")
+
+
+def _run_compose(*args: str, env: dict[str, str], timeout: int, cwd: Path) -> subprocess.CompletedProcess:
+    """Run a compose command using the available CLI flavor."""
+    return subprocess.run(
+        [*_compose_cmd(), "-f", str(COMPOSE_FILE), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(cwd),
+        env=env,
+    )
 
 
 def _docker_available() -> bool:
@@ -67,7 +108,7 @@ def test_27_dockerfile_copies_scripts():
 
     # Must have a COPY instruction that includes scripts/
     lines = content.splitlines()
-    copy_lines = [l.strip() for l in lines if l.strip().upper().startswith("COPY")]
+    copy_lines = [line.strip() for line in lines if line.strip().upper().startswith("COPY")]
 
     scripts_copied = any("scripts" in line for line in copy_lines)
     assert scripts_copied, (
@@ -91,7 +132,7 @@ def test_28_dockerfile_copy_before_install():
     """
     assert DOCKERFILE.exists(), f"Dockerfile not found at {DOCKERFILE}"
     content = DOCKERFILE.read_text(encoding="utf-8")
-    lines = [l.strip() for l in content.splitlines() if l.strip()]
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
 
     # Find line numbers for COPY src/ and RUN pip install
     copy_src_line = None
@@ -131,31 +172,29 @@ def test_29_docker_compose_up_build():
         pytest.skip(f"docker-compose.yml not found at {COMPOSE_FILE}")
 
     env_file = REPO_ROOT / ".env"
+    api_port = _free_tcp_port()
+    compose_env = os.environ.copy()
+    compose_env["COMPOSE_PROJECT_NAME"] = f"ootils-smoke-{uuid4().hex[:8]}"
+    compose_env["OOTILS_API_PORT"] = str(api_port)
     # Bug 5 fix: always use ephemeral .env, never reuse prod/dev .env
     existing_env_backup = env_file.read_text(encoding="utf-8") if env_file.exists() else None
     smoke_env_content = (
         "POSTGRES_USER=ootils\n"
         "POSTGRES_PASSWORD=ootils\n"
         "POSTGRES_DB=ootils_smoke\n"
+        f"OOTILS_API_PORT={api_port}\n"
         f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
     )
     env_file.write_text(smoke_env_content)
 
     try:
         # Build and start
-        result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "--build", "-d"],
-            capture_output=True, text=True, timeout=300,
-            cwd=str(REPO_ROOT),
+        result = _run_compose(
+            "up", "--build", "-d",
+            env=compose_env,
+            timeout=300,
+            cwd=REPO_ROOT,
         )
-
-        if result.returncode != 0:
-            # Try older syntax
-            result = subprocess.run(
-                ["docker-compose", "-f", str(COMPOSE_FILE), "up", "--build", "-d"],
-                capture_output=True, text=True, timeout=300,
-                cwd=str(REPO_ROOT),
-            )
 
         assert result.returncode == 0, (
             f"docker compose up failed (rc={result.returncode}):\n"
@@ -167,19 +206,17 @@ def test_29_docker_compose_up_build():
         time.sleep(10)
 
         # Verify containers are running
-        ps_result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "ps"],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(REPO_ROOT),
+        ps_result = _run_compose(
+            "ps",
+            env=compose_env,
+            timeout=30,
+            cwd=REPO_ROOT,
         )
         assert ps_result.returncode == 0
 
     finally:
         # Tear down
-        subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
-            capture_output=True, timeout=60, cwd=str(REPO_ROOT),
-        )
+        _run_compose("down", "-v", env=compose_env, timeout=60, cwd=REPO_ROOT)
         # Restore original .env or remove ephemeral one
         if existing_env_backup is not None:
             env_file.write_text(existing_env_backup)
@@ -197,30 +234,34 @@ def test_30_full_smoke_migrate_seed_health_issues():
     Full end-to-end smoke: docker compose up → migrate → seed → health → issues.
     """
     import requests
-    import sys
-
     if not COMPOSE_FILE.exists():
         pytest.skip(f"docker-compose.yml not found at {COMPOSE_FILE}")
 
     env_file = REPO_ROOT / ".env"
+    api_port = _free_tcp_port()
+    compose_env = os.environ.copy()
+    compose_env["COMPOSE_PROJECT_NAME"] = f"ootils-smoke-{uuid4().hex[:8]}"
+    compose_env["OOTILS_API_PORT"] = str(api_port)
     # Bug 5 fix: always use ephemeral .env, never reuse prod/dev .env
     existing_env_backup = env_file.read_text(encoding="utf-8") if env_file.exists() else None
     env_content = (
         "POSTGRES_USER=ootils\n"
         "POSTGRES_PASSWORD=ootils\n"
         "POSTGRES_DB=ootils_smoke30\n"
+        f"OOTILS_API_PORT={api_port}\n"
         f"OOTILS_API_TOKEN={SMOKE_API_TOKEN}\n"
     )
     env_file.write_text(env_content)
 
-    db_url = "postgresql://ootils:ootils@localhost:5432/ootils_smoke30"
+    db_url = "postgresql://ootils:ootils@postgres:5432/ootils_smoke30"
 
     try:
         # 1. Start services
-        up_result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "--build", "-d"],
-            capture_output=True, text=True, timeout=300,
-            cwd=str(REPO_ROOT),
+        up_result = _run_compose(
+            "up", "--build", "-d",
+            env=compose_env,
+            timeout=300,
+            cwd=REPO_ROOT,
         )
         # Bug 2 fix: FAIL (not skip) when Docker is available but compose fails
         if up_result.returncode != 0:
@@ -230,24 +271,43 @@ def test_30_full_smoke_migrate_seed_health_issues():
         max_wait = 60
         for i in range(max_wait):
             time.sleep(1)
-            ps = subprocess.run(
-                ["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "--format", "json"],
-                capture_output=True, text=True, timeout=10,
-                cwd=str(REPO_ROOT),
+            ps = _run_compose(
+                "ps", "--format", "json",
+                env=compose_env,
+                timeout=10,
+                cwd=REPO_ROOT,
             )
             if "healthy" in ps.stdout or i > 15:
                 break
 
-        # 3. Run seed via docker exec (the seed script is in the image)
-        # Get the API container name
-        ps_result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "-q", "api"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(REPO_ROOT),
+        # 3. Resolve the API container
+        ps_result = _run_compose(
+            "ps", "-q", "api",
+            env=compose_env,
+            timeout=10,
+            cwd=REPO_ROOT,
         )
         api_container = ps_result.stdout.strip()
 
         if api_container:
+            migrate_result = subprocess.run(
+                [
+                    "docker", "exec",
+                    "-e", f"DATABASE_URL={db_url}",
+                    api_container,
+                    "python", "-c",
+                    (
+                        "import os; "
+                        "from ootils_core.db.connection import OotilsDB; "
+                        "OotilsDB(os.environ['DATABASE_URL'])"
+                    ),
+                ],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert migrate_result.returncode == 0, (
+                f"Migration bootstrap failed in container:\n{migrate_result.stdout}\n{migrate_result.stderr}"
+            )
+
             seed_result = subprocess.run(
                 [
                     "docker", "exec",
@@ -266,7 +326,7 @@ def test_30_full_smoke_migrate_seed_health_issues():
         for _ in range(30):
             time.sleep(2)
             try:
-                r = requests.get("http://localhost:8000/health", timeout=3)
+                r = requests.get(f"http://localhost:{api_port}/health", timeout=3)
                 if r.status_code == 200:
                     api_ready = True
                     break
@@ -275,16 +335,16 @@ def test_30_full_smoke_migrate_seed_health_issues():
 
         # Bug 2 fix: FAIL (not skip) when Docker is running but API is unreachable
         if not api_ready:
-            pytest.fail("API not reachable on localhost:8000 — port may not be exposed in docker-compose.yml")
+            pytest.fail(f"API not reachable on localhost:{api_port} — check docker-compose port mapping")
 
         # 5. Health check
-        resp = requests.get("http://localhost:8000/health", timeout=10)
+        resp = requests.get(f"http://localhost:{api_port}/health", timeout=10)
         assert resp.status_code == 200, f"Health check failed: {resp.text}"
         assert resp.json()["status"] == "ok"
 
         # 6. Issues with auth
         resp = requests.get(
-            "http://localhost:8000/v1/issues",
+            f"http://localhost:{api_port}/v1/issues",
             headers={"Authorization": f"Bearer {SMOKE_API_TOKEN}"},
             timeout=10,
         )
@@ -294,10 +354,7 @@ def test_30_full_smoke_migrate_seed_health_issues():
         assert "total" in data
 
     finally:
-        subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
-            capture_output=True, timeout=60, cwd=str(REPO_ROOT),
-        )
+        _run_compose("down", "-v", env=compose_env, timeout=60, cwd=REPO_ROOT)
         # Restore original .env or remove ephemeral one
         if existing_env_backup is not None:
             env_file.write_text(existing_env_backup)

@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -109,7 +109,7 @@ def _make_store_mock(
 
     store.get_edges_from.side_effect = _get_edges_from
 
-    def _get_node(node_id, scenario_id):
+    def _get_node(node_id, scenario_id, for_update=False):
         node = pi_nodes.get(node_id)
         if node is None:
             return None
@@ -298,8 +298,6 @@ class TestPartialAllocation:
                 demand.node_id: [_consumes_edge(demand.node_id, pi_id, scenario_id)]
             },
         )
-
-        original_upsert = store.upsert_edge.side_effect
 
         def capture_upsert(edge):
             upserted_edges.append(edge)
@@ -718,12 +716,114 @@ class TestAllocationIntegration:
 
     def test_integration_basic_allocation(self, db):
         """Insert demand + PI node, run allocation, verify pegged_to edge."""
-        from ootils_core.engine.kernel.graph.store import GraphStore
+        from ootils_core.models import Scenario
 
-        store = GraphStore(db)
-        scenario_id = uuid4()
+        engine = AllocationEngine()
+        scenario_id = Scenario.BASELINE_ID
+        item_id = uuid4()
+        location_id = uuid4()
+        pi_node_id = uuid4()
+        demand_node_id = uuid4()
 
-        # We'd need to insert a scenario row first in a real DB.
-        # For now, this test documents the intended integration contract.
-        # Full DB fixture is out of scope for Sprint 2 unit delivery.
-        pytest.skip("Full DB fixture not yet seeded — integration contract documented above.")
+        db.execute(
+            "INSERT INTO items (item_id, name) VALUES (%s, %s)",
+            (item_id, "Allocation Test Item"),
+        )
+        db.execute(
+            "INSERT INTO locations (location_id, name) VALUES (%s, %s)",
+            (location_id, "Allocation Test Location"),
+        )
+
+        db.execute(
+            """
+            INSERT INTO nodes (
+                node_id, node_type, scenario_id, item_id, location_id,
+                time_grain, time_span_start, time_span_end,
+                closing_stock, opening_stock, inflows, outflows
+            ) VALUES (
+                %s, 'ProjectedInventory', %s, %s, %s,
+                'day', %s, %s,
+                %s, %s, 0, 0
+            )
+            """,
+            (
+                pi_node_id,
+                scenario_id,
+                item_id,
+                location_id,
+                date(2026, 4, 10),
+                date(2026, 4, 11),
+                Decimal("100"),
+                Decimal("100"),
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO nodes (
+                node_id, node_type, scenario_id, item_id, location_id,
+                quantity, qty_uom, time_grain, time_ref
+            ) VALUES (
+                %s, 'CustomerOrderDemand', %s, %s, %s,
+                %s, 'EA', 'exact_date', %s
+            )
+            """,
+            (
+                demand_node_id,
+                scenario_id,
+                item_id,
+                location_id,
+                Decimal("40"),
+                date(2026, 4, 10),
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio
+            ) VALUES (
+                %s, 'consumes', %s, %s, %s,
+                1, 1.0
+            )
+            """,
+            (uuid4(), demand_node_id, pi_node_id, scenario_id),
+        )
+        db.commit()
+
+        result = engine.allocate(scenario_id, db)
+        db.commit()
+
+        pegged_edges = db.execute(
+            """
+            SELECT * FROM edges
+            WHERE scenario_id = %s
+              AND edge_type = 'pegged_to'
+              AND from_node_id = %s
+              AND to_node_id = %s
+              AND active = TRUE
+            """,
+            (scenario_id, demand_node_id, pi_node_id),
+        ).fetchall()
+        pi_row = db.execute(
+            "SELECT closing_stock FROM nodes WHERE node_id = %s AND scenario_id = %s",
+            (pi_node_id, scenario_id),
+        ).fetchone()
+
+        assert result.demands_total == 1
+        assert result.demands_fully_allocated == 1
+        assert result.demands_partially_allocated == 0
+        assert result.demands_unallocated == 0
+        assert result.total_qty_demanded == Decimal("40")
+        assert result.total_qty_allocated == Decimal("40")
+        assert result.edges_created == 1
+        assert result.edges_updated == 0
+
+        assert len(pegged_edges) == 1
+        assert Decimal(str(pegged_edges[0]["weight_ratio"])) == Decimal("40")
+        assert Decimal(str(pi_row["closing_stock"])) == Decimal("60")
+
+        db.execute("DELETE FROM edges WHERE scenario_id = %s AND from_node_id = %s", (scenario_id, demand_node_id))
+        db.execute("DELETE FROM nodes WHERE node_id IN (%s, %s)", (demand_node_id, pi_node_id))
+        db.execute("DELETE FROM locations WHERE location_id = %s", (location_id,))
+        db.execute("DELETE FROM items WHERE item_id = %s", (item_id,))
+        db.commit()

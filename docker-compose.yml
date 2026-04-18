@@ -27,7 +27,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       OOTILS_API_TOKEN: ${OOTILS_API_TOKEN}
     ports:
-      - "8000:8000"
+      - "${OOTILS_API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy

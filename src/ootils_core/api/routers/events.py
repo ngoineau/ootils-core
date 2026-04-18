@@ -11,7 +11,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/events", tags=["events"])
 
 
-def _build_propagation_engine(db) -> "PropagationEngine":
+def _build_propagation_engine(db):
     """Build a PropagationEngine instance wired to the given DB connection."""
     from ootils_core.engine.kernel.graph.store import GraphStore
     from ootils_core.engine.kernel.graph.traversal import GraphTraversal

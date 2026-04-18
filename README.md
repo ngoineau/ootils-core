@@ -30,8 +30,9 @@
                        │
 ┌──────────────────────▼──────────────────────┐
 │  PostgreSQL 16                               │
-│  Typed schema — 16 migrations               │
-│  UUID PKs, TIMESTAMPTZ UTC, no JSONB         │
+│  Typed schema — SQL migrations               │
+│  UUID PKs, TIMESTAMPTZ UTC, JSONB only for   │
+│  diagnostic or staging payloads              │
 └─────────────────────────────────────────────┘
 ```
 
@@ -41,9 +42,11 @@
 
 | Dependency | Version |
 |-----------|---------|
-| Python | 3.12+ |
+| Python | 3.11+ |
 | PostgreSQL | 16 |
 | Docker + Docker Compose | Latest |
+
+CI validates Python 3.11. The default Docker image runs Python 3.12.
 
 ---
 
@@ -61,7 +64,7 @@ cp .env.example .env
 ### 2. Start services
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 This starts PostgreSQL 16 and the FastAPI server on port 8000. Migrations run automatically on first boot.
@@ -79,7 +82,7 @@ curl http://localhost:8000/docs
 ### 4. Load demo data (optional)
 
 ```bash
-docker-compose exec api python scripts/seed_demo_data.py
+docker compose exec api python scripts/seed_demo_data.py
 ```
 
 ### 5. First API call
@@ -145,7 +148,7 @@ pip install -e ".[dev]"
 python3 -m pytest tests/ -q
 ```
 
-Tests use an in-memory PostgreSQL test database (via `DATABASE_URL` env var). No mocks — tests run against a real PostgreSQL instance.
+Tests use a real PostgreSQL test database (via `DATABASE_URL` env var). No mocks for DB-backed integration tests.
 
 ### Run locally (without Docker)
 
@@ -166,7 +169,7 @@ src/ootils_core/
 │   └── routers/            # One router per capability domain
 ├── db/
 │   ├── connection.py       # PostgreSQL connection + migration runner
-│   └── migrations/         # 016 sequential SQL migrations
+│   └── migrations/         # Sequential SQL migrations
 ├── engine/
 │   ├── propagator.py       # Incremental graph propagation
 │   ├── shortage/           # Shortage detection + severity scoring

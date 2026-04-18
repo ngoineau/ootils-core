@@ -56,8 +56,6 @@ def migrated_db():
     if not DB_AVAILABLE:
         pytest.skip("No PostgreSQL available")
 
-    import psycopg
-
     old_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = TEST_DB_URL
 
@@ -69,24 +67,10 @@ def migrated_db():
 
     yield TEST_DB_URL
 
-    # Tear down
-    try:
-        with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
-            conn.execute("""
-                DO $$
-                DECLARE r RECORD;
-                BEGIN
-                    FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-                        EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
-                    END LOOP;
-                END $$;
-            """)
-            # Drop custom types
-            conn.execute("DROP TYPE IF EXISTS lot_size_rule_type CASCADE")
-            conn.execute("DROP TYPE IF EXISTS planning_source_type CASCADE")
-    except Exception:
-        pass
-
+    # Do not tear down the shared test schema here.
+    # This module runs in the same DATABASE_URL as the broader suite, and
+    # dropping all public tables in module teardown breaks later DB-backed
+    # tests that expect the migrated schema to remain available.
     if old_url is not None:
         os.environ["DATABASE_URL"] = old_url
     elif "DATABASE_URL" in os.environ:

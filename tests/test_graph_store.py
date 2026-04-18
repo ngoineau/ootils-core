@@ -566,18 +566,57 @@ class TestUpsertEdge:
         conn = _mock_conn()
 
         # First execute: SELECT existing -> returns None
-        # Second execute: INSERT
+        # Second execute: validate_no_cycle edge scan
+        # Third execute: INSERT
         cursor_select = MagicMock()
         cursor_select.fetchone.return_value = None
+        cursor_validate = MagicMock()
+        cursor_validate.fetchall.return_value = []
         cursor_insert = MagicMock()
-        conn.execute.side_effect = [cursor_select, cursor_insert]
+        conn.execute.side_effect = [cursor_select, cursor_validate, cursor_insert]
 
         store = GraphStore(conn)
         edge = _make_edge()
         result_edge, created = store.upsert_edge(edge)
         assert created is True
         assert result_edge is edge
-        assert conn.execute.call_count == 2
+        assert conn.execute.call_count == 3
+
+    def test_insert_new_non_pegged_edge_validates_cycle(self):
+        conn = _mock_conn()
+
+        cursor_select = MagicMock()
+        cursor_select.fetchone.return_value = None
+        cursor_insert = MagicMock()
+        conn.execute.side_effect = [cursor_select, cursor_insert]
+
+        store = GraphStore(conn)
+        store.validate_no_cycle = MagicMock()
+
+        edge = _make_edge(edge_type="depends_on")
+        store.upsert_edge(edge)
+
+        store.validate_no_cycle.assert_called_once_with(
+            edge.from_node_id,
+            edge.to_node_id,
+            edge.scenario_id,
+        )
+
+    def test_insert_new_pegged_edge_skips_cycle_validation(self):
+        conn = _mock_conn()
+
+        cursor_select = MagicMock()
+        cursor_select.fetchone.return_value = None
+        cursor_insert = MagicMock()
+        conn.execute.side_effect = [cursor_select, cursor_insert]
+
+        store = GraphStore(conn)
+        store.validate_no_cycle = MagicMock()
+
+        edge = _make_edge(edge_type="pegged_to")
+        store.upsert_edge(edge)
+
+        store.validate_no_cycle.assert_not_called()
 
 
 # ===========================================================================

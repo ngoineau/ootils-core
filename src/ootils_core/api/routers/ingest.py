@@ -19,6 +19,8 @@ Behaviour contract (all 7 endpoints):
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import date
 from typing import Any, Optional
@@ -26,7 +28,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import sql
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
@@ -79,7 +81,82 @@ def _dry_run_response(items: list[Any], label: str = "external_id") -> IngestRes
 
 def _raise_422(errors: list[dict]) -> None:
     """Raise HTTP 422 with structured error list. Nothing is persisted."""
-    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=errors)
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
+
+
+def _idempotency_key_from_request(request: Request, dry_run: bool) -> str | None:
+    if dry_run:
+        return None
+
+    key = request.headers.get("Idempotency-Key")
+    if key is None:
+        return None
+
+    key = key.strip()
+    if not key:
+        return None
+    if len(key) > 128:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key must be 128 characters or fewer",
+        )
+    return key
+
+
+def _request_hash(body: BaseModel) -> str:
+    normalized = json.dumps(
+        body.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _load_idempotent_response(
+    db: psycopg.Connection,
+    entity_type: str,
+    request: Request,
+    response: Response,
+    body: BaseModel,
+) -> tuple[str | None, str | None, IngestResponse | None]:
+    idempotency_key = _idempotency_key_from_request(request, getattr(body, "dry_run", False))
+    if idempotency_key is None:
+        return None, None, None
+
+    request_hash = _request_hash(body)
+    row = db.execute(
+        """
+        SELECT entity_type, request_hash, response_json
+        FROM ingest_batches
+        WHERE idempotency_key = %s
+        """,
+        (idempotency_key,),
+    ).fetchone()
+
+    if row is None:
+        return idempotency_key, request_hash, None
+
+    if row["entity_type"] != entity_type or row["request_hash"] != request_hash:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "idempotency.conflict",
+                "message": "Idempotency-Key already used with a different ingest payload.",
+            },
+        )
+
+    if not row["response_json"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "idempotency.pending",
+                "message": "Idempotency-Key already reserved by an in-flight ingest request.",
+            },
+        )
+
+    response.headers["X-Idempotent-Replay"] = "true"
+    return idempotency_key, request_hash, IngestResponse.model_validate_json(row["response_json"])
 
 
 def _create_ingest_batch(
@@ -87,6 +164,10 @@ def _create_ingest_batch(
     entity_type: str,
     rows_data: list[Any],
     source_system: str = "ingest_api",
+    submitted_by: str = "ingest_api",
+    idempotency_key: str | None = None,
+    request_hash: str | None = None,
+    correlation_id: str | None = None,
 ) -> UUID:
     """
     Create an ingest_batch record and persist all rows as ingest_rows.
@@ -94,14 +175,39 @@ def _create_ingest_batch(
     """
     import json as _json
     batch_id = uuid4()
-    db.execute(
-        """
-        INSERT INTO ingest_batches
-            (batch_id, entity_type, source_system, status, total_rows, submitted_by)
-        VALUES (%s, %s, %s, 'processing', %s, 'ingest_api')
-        """,
-        (batch_id, entity_type, source_system, len(rows_data)),
-    )
+    try:
+        with db.transaction():
+            db.execute(
+                """
+                INSERT INTO ingest_batches
+                    (
+                        batch_id, entity_type, source_system, status, total_rows, submitted_by,
+                        idempotency_key, request_hash, correlation_id
+                    )
+                VALUES (%s, %s, %s, 'processing', %s, %s, %s, %s, %s)
+                """,
+                (
+                    batch_id,
+                    entity_type,
+                    source_system,
+                    len(rows_data),
+                    submitted_by,
+                    idempotency_key,
+                    request_hash,
+                    correlation_id,
+                ),
+            )
+    except Exception as exc:
+        if idempotency_key is not None and getattr(exc, "sqlstate", None) == "23505":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "idempotency.pending",
+                    "message": "Idempotency-Key already reserved by another ingest request.",
+                },
+            ) from exc
+        raise
+
     for i, row in enumerate(rows_data):
         raw = _json.dumps(row if isinstance(row, dict) else row.model_dump(), default=str)
         db.execute(
@@ -114,10 +220,29 @@ def _create_ingest_batch(
     return batch_id
 
 
+def _finalize_ingest_batch(
+    db: psycopg.Connection,
+    batch_id: UUID,
+    response_payload: IngestResponse,
+) -> None:
+    db.execute(
+        """
+        UPDATE ingest_batches
+        SET status = 'imported',
+            processed_at = now(),
+            imported_at = now(),
+            response_json = %s
+        WHERE batch_id = %s
+        """,
+        (response_payload.model_dump_json(), batch_id),
+    )
+
+
 def _trigger_dq(db: psycopg.Connection, batch_id: UUID) -> str:
     """Run DQ pipeline on a batch. Returns dq_status string, never raises."""
     try:
-        result = run_dq(db, batch_id)
+        with db.transaction():
+            result = run_dq(db, batch_id)
         return result.batch_dq_status
     except Exception as exc:
         logger.warning("DQ run failed for batch %s: %s", batch_id, exc)
@@ -218,10 +343,8 @@ def _wire_node_to_pi(
     """
     if node_type in ("PurchaseOrderSupply", "WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply"):
         edge_type = "replenishes"
-        direction = "supply"
     elif node_type in ("ForecastDemand", "CustomerOrderDemand"):
         edge_type = "consumes"
-        direction = "demand"
     else:
         return 0
 
@@ -345,6 +468,8 @@ class IngestItemsRequest(BaseModel):
 @router.post("/items", response_model=IngestResponse, summary="Import items", description="Upsert a batch of items. Upsert key: external_id.")
 async def ingest_items(
     body: IngestItemsRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -365,6 +490,20 @@ async def ingest_items(
 
     if body.dry_run:
         return _dry_run_response(body.items)
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "items", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "items",
+        body.items,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     # Batch-fetch existing items
     existing = _batch_existing(
@@ -400,9 +539,10 @@ async def ingest_items(
             inserted += 1
 
     logger.info("ingest.items total=%d inserted=%d updated=%d", len(body.items), inserted, updated)
-    batch_id = _create_ingest_batch(db, "items", [it.model_dump() for it in body.items])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.items), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.items), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -436,6 +576,8 @@ class IngestLocationsRequest(BaseModel):
 @router.post("/locations", response_model=IngestResponse, summary="Import locations", description="Upsert a batch of sites/DCs. Upsert key: external_id.")
 async def ingest_locations(
     body: IngestLocationsRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -470,6 +612,20 @@ async def ingest_locations(
     if body.dry_run:
         return _dry_run_response(body.locations)
 
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "locations", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "locations",
+        body.locations,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
     existing = _batch_existing(
         db, "locations", "external_id", "location_id",
         [loc.external_id for loc in body.locations],
@@ -503,9 +659,10 @@ async def ingest_locations(
             inserted += 1
 
     logger.info("ingest.locations total=%d inserted=%d updated=%d", len(body.locations), inserted, updated)
-    batch_id = _create_ingest_batch(db, "locations", [loc.model_dump() for loc in body.locations])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.locations), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.locations), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -540,6 +697,8 @@ class IngestSuppliersRequest(BaseModel):
 @router.post("/suppliers", response_model=IngestResponse, summary="Import suppliers", description="Upsert a batch of suppliers.")
 async def ingest_suppliers(
     body: IngestSuppliersRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -560,6 +719,20 @@ async def ingest_suppliers(
 
     if body.dry_run:
         return _dry_run_response(body.suppliers)
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "suppliers", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "suppliers",
+        body.suppliers,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     existing = _batch_existing(
         db, "suppliers", "external_id", "supplier_id",
@@ -595,9 +768,10 @@ async def ingest_suppliers(
             inserted += 1
 
     logger.info("ingest.suppliers total=%d inserted=%d updated=%d", len(body.suppliers), inserted, updated)
-    batch_id = _create_ingest_batch(db, "suppliers", [sup.model_dump() for sup in body.suppliers])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.suppliers), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.suppliers), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -623,6 +797,8 @@ class IngestSupplierItemsRequest(BaseModel):
 @router.post("/supplier-items", response_model=IngestResponse, summary="Import supplier items", description="Upsert supply conditions per (supplier × item) pair.")
 async def ingest_supplier_items(
     body: IngestSupplierItemsRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -667,6 +843,20 @@ async def ingest_supplier_items(
             summary=IngestSummary(total=len(body.supplier_items), inserted=0, updated=0, errors=0),
             results=results,
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "supplier_items", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "supplier_items",
+        body.supplier_items,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     results: list[dict] = []
     inserted = updated = 0
@@ -720,9 +910,10 @@ async def ingest_supplier_items(
         "ingest.supplier_items total=%d inserted=%d updated=%d",
         len(body.supplier_items), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "supplier_items", [si.model_dump() for si in body.supplier_items])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.supplier_items), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.supplier_items), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -745,6 +936,8 @@ class IngestOnHandRequest(BaseModel):
 @router.post("/on-hand", response_model=IngestResponse, summary="Import on-hand stock", description="Upsert available stock (OnHandSupply) per (item × location).")
 async def ingest_on_hand(
     body: IngestOnHandRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -785,6 +978,20 @@ async def ingest_on_hand(
             summary=IngestSummary(total=len(body.on_hand), inserted=0, updated=0, errors=0),
             results=results,
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "on_hand", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "on_hand",
+        body.on_hand,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     results: list[dict] = []
     inserted = updated = 0
@@ -854,9 +1061,10 @@ async def ingest_on_hand(
         "ingest.on_hand total=%d inserted=%d updated=%d",
         len(body.on_hand), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "on_hand", [r.model_dump() for r in body.on_hand])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.on_hand), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.on_hand), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -892,6 +1100,8 @@ class IngestPurchaseOrdersRequest(BaseModel):
 @router.post("/purchase-orders", response_model=IngestResponse, summary="Import purchase orders", description="Upsert purchase orders (PurchaseOrderSupply) with ERP external_id tracking.")
 async def ingest_purchase_orders(
     body: IngestPurchaseOrdersRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -927,6 +1137,20 @@ async def ingest_purchase_orders(
             summary=IngestSummary(total=len(body.purchase_orders), inserted=0, updated=0, errors=0),
             results=[{"external_id": po.external_id, "action": "dry_run"} for po in body.purchase_orders],
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "purchase_orders", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "purchase_orders",
+        body.purchase_orders,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     # Fetch existing PO node references
     po_ext_ids = [po.external_id for po in body.purchase_orders]
@@ -997,9 +1221,10 @@ async def ingest_purchase_orders(
         "ingest.purchase_orders total=%d inserted=%d updated=%d",
         len(body.purchase_orders), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "purchase_orders", [po.model_dump() for po in body.purchase_orders])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.purchase_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.purchase_orders), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1036,6 +1261,8 @@ class IngestForecastRequest(BaseModel):
 @router.post("/forecast-demand", response_model=IngestResponse, summary="Import forecast demand", description="Upsert forecasts (ForecastDemand) per (item × location × bucket × grain).")
 async def ingest_forecast_demand(
     body: IngestForecastRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -1095,6 +1322,20 @@ async def ingest_forecast_demand(
                 for fc in body.forecasts
             ],
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "forecasts", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "forecasts",
+        body.forecasts,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     results: list[dict] = []
     inserted = updated = 0
@@ -1164,9 +1405,10 @@ async def ingest_forecast_demand(
         "ingest.forecast_demand total=%d inserted=%d updated=%d",
         len(body.forecasts), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "forecast_demand", [fc.model_dump() for fc in body.forecasts])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.forecasts), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.forecasts), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1206,6 +1448,8 @@ class IngestResourcesRequest(BaseModel):
 )
 async def ingest_resources(
     body: IngestResourcesRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -1243,6 +1487,20 @@ async def ingest_resources(
 
     if body.dry_run:
         return _dry_run_response(body.resources)
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "resources", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "resources",
+        body.resources,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     # Batch-fetch existing resources
     existing_resources = _batch_existing(
@@ -1319,7 +1577,9 @@ async def ingest_resources(
         "ingest.resources total=%d inserted=%d updated=%d",
         len(body.resources), inserted, updated,
     )
-    return _ok(inserted, updated, len(body.resources), results)
+    ingest_response = _ok(inserted, updated, len(body.resources), results, batch_id=batch_id, dq_status=None)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1358,6 +1618,8 @@ class IngestWorkOrdersRequest(BaseModel):
 )
 async def ingest_work_orders(
     body: IngestWorkOrdersRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -1387,6 +1649,20 @@ async def ingest_work_orders(
             summary=IngestSummary(total=len(body.work_orders), inserted=0, updated=0, errors=0),
             results=[{"external_id": wo.external_id, "action": "dry_run"} for wo in body.work_orders],
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "work_orders", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "work_orders",
+        body.work_orders,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     wo_ext_ids = [wo.external_id for wo in body.work_orders]
     existing_refs_rows = db.execute(
@@ -1454,9 +1730,10 @@ async def ingest_work_orders(
         "ingest.work_orders total=%d inserted=%d updated=%d",
         len(body.work_orders), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "work_orders", [wo.model_dump() for wo in body.work_orders])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.work_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.work_orders), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1495,6 +1772,8 @@ class IngestCustomerOrdersRequest(BaseModel):
 )
 async def ingest_customer_orders(
     body: IngestCustomerOrdersRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -1524,6 +1803,20 @@ async def ingest_customer_orders(
             summary=IngestSummary(total=len(body.customer_orders), inserted=0, updated=0, errors=0),
             results=[{"external_id": co.external_id, "action": "dry_run"} for co in body.customer_orders],
         )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "customer_orders", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "customer_orders",
+        body.customer_orders,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
 
     co_ext_ids = [co.external_id for co in body.customer_orders]
     existing_refs_rows = db.execute(
@@ -1591,9 +1884,10 @@ async def ingest_customer_orders(
         "ingest.customer_orders total=%d inserted=%d updated=%d",
         len(body.customer_orders), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "customer_orders", [co.model_dump() for co in body.customer_orders])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.customer_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.customer_orders), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1636,6 +1930,8 @@ class IngestTransfersRequest(BaseModel):
 )
 async def ingest_transfers(
     body: IngestTransfersRequest,
+    request: Request,
+    response: Response,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
@@ -1670,6 +1966,20 @@ async def ingest_transfers(
             results=[{"external_id": t.external_id, "action": "dry_run"} for t in body.transfers],
         )
 
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "transfers", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db,
+        "transfers",
+        body.transfers,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
     tr_ext_ids = [t.external_id for t in body.transfers]
     existing_refs_rows = db.execute(
         """
@@ -1685,7 +1995,6 @@ async def ingest_transfers(
 
     for t in body.transfers:
         item_id = item_map[t.item_external_id]
-        from_location_id = loc_map[t.from_location_external_id]
         to_location_id = loc_map[t.to_location_external_id]
         active = t.status not in ("delivered", "cancelled")
 
@@ -1744,6 +2053,7 @@ async def ingest_transfers(
         "ingest.transfers total=%d inserted=%d updated=%d",
         len(body.transfers), inserted, updated,
     )
-    batch_id = _create_ingest_batch(db, "transfers", [t.model_dump() for t in body.transfers])
     dq_status = _trigger_dq(db, batch_id)
-    return _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response

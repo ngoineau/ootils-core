@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict, deque
 from datetime import date
-from typing import Any, Optional
+from typing import Optional
 from uuid import UUID, uuid4
 
 import psycopg

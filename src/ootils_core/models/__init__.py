@@ -1,7 +1,8 @@
 """
 Domain models for the Ootils planning engine.
 These are pure Python dataclasses — no ORM, no DB coupling.
-All field types are explicit (no JSONB blobs).
+Core planning fields stay explicit and typed. JSONB is reserved for a few
+diagnostic or staging payloads at the SQL layer, not for these domain models.
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +157,7 @@ class CalcRun:
     dirty_node_count: Optional[int] = None
     nodes_recalculated: int = 0
     nodes_unchanged: int = 0
-    status: str = "pending"  # pending | running | completed | completed_stale | failed
+    status: str = "pending"  # pending | running | completed | completed_stale | interrupted | failed
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None

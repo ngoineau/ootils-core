@@ -13,7 +13,6 @@ from uuid import UUID
 
 import psycopg
 from fastapi import Header, HTTPException, Query, status
-from psycopg.rows import dict_row
 
 from ootils_core.db.connection import OotilsDB
 

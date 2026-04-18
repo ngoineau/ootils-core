@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
-from ootils_core.engine.kernel.calc.calendar import add_working_days_sync
 
 logger = logging.getLogger(__name__)
 

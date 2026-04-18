@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from ootils_core.models import CalcRun, Node, PlanningEvent, Scenario
+from ootils_core.models import CalcRun, Node, Scenario
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.engine.kernel.graph.traversal import GraphTraversal
 from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
@@ -123,6 +123,27 @@ class PropagationEngine:
                 scenario_id=scenario_id,
                 time_window=(window_start, window_end),
             )
+
+            # For dated item/location changes, also dirty the PI buckets in the
+            # affected window directly. This covers moves where an edge was
+            # rewired from an old bucket to a new bucket before propagation,
+            # so the old bucket is no longer reachable from the trigger node
+            # via current outbound edges.
+            trigger_node = self._store.get_node(trigger_node_id, scenario_id)
+            if (
+                isinstance(trigger_node, Node)
+                and trigger_node.item_id is not None
+                and trigger_node.location_id is not None
+                and (old_date is not None or new_date is not None)
+            ):
+                impacted_pi_nodes = self._store.get_pi_nodes_for_item_location_in_window(
+                    item_id=trigger_node.item_id,
+                    location_id=trigger_node.location_id,
+                    scenario_id=scenario_id,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                dirty_node_ids.update(node.node_id for node in impacted_pi_nodes)
 
             # Mark dirty in memory + flush to Postgres for durability
             self._dirty.mark_dirty(dirty_node_ids, scenario_id, calc_run.calc_run_id, db)

@@ -632,14 +632,35 @@ http://127.0.0.1:13000
 - /home/ubuntu/ootils-ui — pas critique (reclonable depuis GitHub a tout moment)
 - documentation d'exploitation dans C:\dev\OpenClaw
 
+### Backup Postgres quotidien (VM 201)
+
+- Script repo: `scripts/backup_postgres.sh`
+- Install cron: `scripts/install_backup_cron.sh`
+- Repertoire par defaut: `~/ootils-backups/postgres`
+- Retention par defaut: `7` jours
+- Installation type:
+
+```bash
+cd ~/ootils-core
+chmod +x scripts/backup_postgres.sh scripts/install_backup_cron.sh
+BACKUP_CRON_SCHEDULE="15 2 * * *" scripts/install_backup_cron.sh
+scripts/backup_postgres.sh
+```
+
+- Verification rapide:
+
+```bash
+ls -lah ~/ootils-backups/postgres
+crontab -l
+```
+
 ## 12. Risques et points faibles restants
 
 1. VM 200 en DHCP: risque de changement d'IP si pas de reservation
 2. Tunnel Windows: solution pratique mais pas ideale structurellement
 3. Secrets distribues sur plusieurs emplacements: necessite un vrai coffre de secrets (issue ouverte)
-4. Migration runner — pas de transaction par migration (#169): etat partiel possible si une migration multi-statements echoue en cours de route. Mitige par idempotence des SQL actuels. A adresser avant la premiere migration destructrice.
-5. Dump Postgres quotidien non encore configure (a faire)
-6. Snapshots Proxmox VM 200 + VM 201 non encore automatises (a faire)
+4. Dump Postgres quotidien local OK si `scripts/install_backup_cron.sh` est installe sur VM 201; la copie hors machine reste a faire.
+5. Snapshots Proxmox VM 200 + VM 201 non encore automatises (a faire)
 
 ## 13. Checklist rapide post-reconstruction
 

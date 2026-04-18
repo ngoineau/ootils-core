@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
-
-import pytest
+from unittest.mock import MagicMock
+from uuid import uuid4
 
 from ootils_core.engine.dq.agent.temporal_rules import (
     run_temporal_rules,
@@ -26,7 +24,6 @@ from ootils_core.engine.dq.agent.temporal_rules import (
     _check_forecast_horizon_short,
     _check_mass_change,
 )
-from ootils_core.engine.dq.agent.stat_rules import SEVERITY_WARNING, SEVERITY_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +111,18 @@ class TestLoadBatchRows:
 # =========================================================================
 
 class TestGetPreviousBatchId:
+
+    def test_query_uses_batch_status_and_runtime_timestamps(self):
+        db = _mock_db()
+        db.execute.return_value = _make_cursor(None)
+
+        _get_previous_batch_id(db, "items", uuid4())
+
+        sql = db.execute.call_args[0][0]
+        assert "status IN ('validated', 'rejected', 'imported', 'partial')" in sql
+        assert "COALESCE(imported_at, processed_at, submitted_at)" in sql
+        assert "dq_status" not in sql
+        assert "created_at" not in sql
 
     def test_returns_previous_batch(self):
         db = _mock_db()

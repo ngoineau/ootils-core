@@ -1,7 +1,7 @@
 # Contributing to Ootils
 
-> We are at the white paper stage. There is no code yet.
-> That means every contribution right now shapes the architecture — not just implements it.
+> This project now has real code, migrations, APIs, and tests.
+> Contributions still shape the architecture, but they must match running repo reality, not an old white-paper snapshot.
 
 ---
 
@@ -20,7 +20,7 @@ Your job: challenge the propagation model. Find the edge cases. Propose better a
 ### Operations Research / Optimization
 You know LP, MILP, constraint programming. You've modeled supply-demand problems formally.
 
-Your job: validate that our deterministic approach is sound. Identify where we'll need solvers in V2.
+Your job: validate that our deterministic core computation is sound. Also call out where determinism claims should be narrowed to exclude UUID generation, audit timestamps, or other non-computational metadata.
 
 ### AI / Agent Builders
 You're building autonomous agents. You know what a well-designed API looks like from an agent's perspective. You've seen tools that are impossible to use programmatically.

@@ -27,7 +27,6 @@ from ootils_core.api.dependencies import get_db
 from ootils_core.models import (
     CausalStep,
     Edge,
-    Explanation,
     Node,
     ShortageRecord,
 )
@@ -622,7 +621,7 @@ class TestSimulateRouterBranches:
         ])
 
         with patch.object(ScenarioManager, "create_scenario", return_value=fake_scenario), \
-             patch.object(ScenarioManager, "apply_override") as mock_apply, \
+             patch.object(ScenarioManager, "apply_override"), \
              patch.object(ShortageDetector, "get_active_shortages", side_effect=[[], []]), \
              patch.object(CalcRunManager, "start_calc_run", return_value=calc_run), \
              patch.object(DirtyFlagManager, "mark_dirty"), \
@@ -716,10 +715,8 @@ class TestBomRouterEdgeCases:
         assert _recalculate_llc(conn, []) == 0
 
         # Now with multi-level edges that exercise max_depth update + visited cycle skip
-        from collections import namedtuple
-
         a, b, c = uuid4(), uuid4(), uuid4()
-        line1, line2, line3, line4 = uuid4(), uuid4(), uuid4(), uuid4()
+        line1, line2, line3 = uuid4(), uuid4(), uuid4()
 
         edges = [
             {"parent_item_id": a, "component_item_id": b, "line_id": line1},
@@ -787,8 +784,6 @@ class TestAppMiddlewareAndExceptionHandler:
     def test_generic_exception_handler_returns_500(self):
         """app.py 91-95 — unhandled exception → 500 + sanitized error"""
         # Force an exception in a known route by mocking a dependency
-        from ootils_core.api.routers import calc as calc_module
-
         app = create_app()
 
         # Override get_db to raise
@@ -1139,7 +1134,7 @@ class TestPhaseTransitionGaps:
 
         class _FakeDate(real_date):
             def __sub__(self, other):
-                td = real_date.__sub__(self, other)
+                real_date.__sub__(self, other)
                 # Return a 0-days timedelta to force the branch
                 from datetime import timedelta
                 return timedelta(days=0)
@@ -1253,9 +1248,10 @@ class TestScenarioManagerGaps:
             [],            # nodes
             [],            # edges
         ]
+        db.execute.return_value.fetchone.return_value = {"cnt": 0}
 
         manager = ScenarioManager()
-        scenario = manager.create_scenario(
+        manager.create_scenario(
             name="WithSeries",
             parent_scenario_id=UUID("00000000-0000-0000-0000-000000000001"),
             db=db,
@@ -1334,9 +1330,10 @@ class TestScenarioManagerGaps:
             [node_row_a, node_row_b],     # nodes
             [good_edge, bad_edge],        # edges
         ]
+        db.execute.return_value.fetchone.return_value = {"cnt": 0}
 
         manager = ScenarioManager()
-        scenario = manager.create_scenario(
+        manager.create_scenario(
             name="WithEdges",
             parent_scenario_id=UUID("00000000-0000-0000-0000-000000000001"),
             db=db,

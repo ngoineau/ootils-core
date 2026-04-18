@@ -1,6 +1,6 @@
 # ADR-005: Storage Layer and Data Model
 
-**Status:** Proposed  
+**Status:** Superseded for runtime persistence, retained as historical design context  
 **Date:** 2026-04-03  
 **Author:** Architecture Review (Claw / subagent)  
 **Milestone:** M1 — Data Model
@@ -13,7 +13,7 @@ The graph domain model is settled (ADR-001). The object-local time model is sett
 
 What is not settled: **how does everything actually get stored, indexed, and queried?**
 
-This ADR answers:
+This ADR answers the original proof-stage question set:
 1. Which persistence technology to use at proof stage
 2. The complete SQL schema (nodes, edges, events, scenarios, explanations)
 3. How scenario isolation works without full data copies
@@ -33,9 +33,17 @@ This ADR answers:
 
 ---
 
+> Status note, the live runtime is PostgreSQL via psycopg3. The SQLite-first sections
+> below describe an earlier proof-stage design and should not be read as the current
+> production or demo runtime architecture.
+>
+> JSONB note: the live runtime still avoids JSONB for core planning structures. Limited
+> exceptions are allowed for diagnostic or staging payloads whose shape is intentionally
+> dynamic, such as `dq_agent_runs.summary` and staging-layer raw import payloads.
+
 ## Decision 1: Persistence Technology
 
-**Use SQLite for the proof stage. Full stop.**
+**Historical proof-stage choice: use SQLite for the proof stage.**
 
 The reasoning is in section 5 of this ADR. The key points:
 

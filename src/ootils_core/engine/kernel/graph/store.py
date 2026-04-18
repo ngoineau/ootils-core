@@ -13,7 +13,6 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 import psycopg
-from psycopg.rows import dict_row
 
 from ootils_core.models import (
     CycleDetectedError,
@@ -73,6 +72,32 @@ class GraphStore:
             ORDER BY bucket_sequence ASC, node_id ASC
             """,
             (series_id,),
+        ).fetchall()
+        return [_row_to_node(r) for r in rows]
+
+    def get_pi_nodes_for_item_location_in_window(
+        self,
+        item_id: UUID,
+        location_id: UUID,
+        scenario_id: UUID,
+        window_start: date,
+        window_end: date,
+    ) -> list[Node]:
+        """Return active PI buckets for an item/location intersecting a time window."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM nodes
+            WHERE scenario_id = %s
+              AND item_id = %s
+              AND location_id = %s
+              AND node_type = 'ProjectedInventory'
+              AND active = TRUE
+              AND time_span_start IS NOT NULL
+              AND time_span_start >= %s
+              AND time_span_start < %s
+            ORDER BY bucket_sequence ASC, node_id ASC
+            """,
+            (scenario_id, item_id, location_id, window_start, window_end),
         ).fetchall()
         return [_row_to_node(r) for r in rows]
 
@@ -468,9 +493,9 @@ class GraphStore:
 
         Returns (edge, created) where created=True when a new row was inserted.
 
-        No cycle check is performed here — pegged_to edges go from demand to
-        supply (demand → supply), which is the reverse of the computation DAG
-        direction and cannot create planning cycles.
+        pegged_to edges are exempt from cycle checks because they point from
+        demand to supply, the reverse of the computation DAG. All other edge
+        types must pass cycle validation before insert.
         """
         existing = self._conn.execute(
             """
@@ -508,6 +533,8 @@ class GraphStore:
             edge.edge_id = UUID(str(existing["edge_id"]))
             return edge, False
         else:
+            if edge.edge_type != "pegged_to":
+                self.validate_no_cycle(edge.from_node_id, edge.to_node_id, edge.scenario_id)
             self._conn.execute(
                 """
                 INSERT INTO edges (

@@ -18,3 +18,14 @@ Quick start (agent tools)::
 __version__ = "0.1.0"
 __all__: list = []
 
+# FastAPI resolves string annotations at runtime. Some psycopg builds do not
+# expose Connection at the top level, which breaks route import/collection.
+try:
+    import psycopg  # type: ignore
+
+    if not hasattr(psycopg, "Connection"):
+        from psycopg.connection import Connection as _PsycopgConnection
+
+        psycopg.Connection = _PsycopgConnection
+except Exception:
+    pass

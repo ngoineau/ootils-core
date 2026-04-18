@@ -106,7 +106,7 @@ async def get_graph(
         (scenario_id, item_uuid, location_uuid),
     ).fetchall()
 
-    from ootils_core.engine.kernel.graph.store import _row_to_node, _row_to_edge
+    from ootils_core.engine.kernel.graph.store import _row_to_node
 
     nodes = [_row_to_node(r) for r in all_nodes]
 

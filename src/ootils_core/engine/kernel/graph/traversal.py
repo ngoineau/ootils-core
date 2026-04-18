@@ -11,8 +11,6 @@ import graphlib
 from datetime import date
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.models import EngineStartupError
 from ootils_core.engine.kernel.graph.store import GraphStore
 

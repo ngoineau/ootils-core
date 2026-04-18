@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
@@ -43,7 +43,6 @@ async def trigger_calc_run(
     from ootils_core.api.routers.events import _build_propagation_engine
     from ootils_core.engine.orchestration.calc_run import CalcRunManager
     from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
-    from ootils_core.engine.kernel.graph.store import GraphStore
 
     # Create a trigger event
     trigger_event_id = uuid4()

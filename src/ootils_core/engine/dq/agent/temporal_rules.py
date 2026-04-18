@@ -50,8 +50,8 @@ def _get_previous_batch_id(
         FROM ingest_batches
         WHERE entity_type = %s
           AND batch_id != %s
-          AND dq_status IN ('validated', 'rejected')
-        ORDER BY created_at DESC
+          AND status IN ('validated', 'rejected', 'imported', 'partial')
+        ORDER BY COALESCE(imported_at, processed_at, submitted_at) DESC
         LIMIT 1
         """,
         (entity_type, current_batch_id),

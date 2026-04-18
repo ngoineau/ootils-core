@@ -9,13 +9,10 @@ All branches including skip conditions, parse errors, threshold logic.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
-
-import pytest
+from unittest.mock import MagicMock
+from uuid import uuid4
 
 from ootils_core.engine.dq.agent.stat_rules import (
-    AgentIssue,
     run_stat_rules,
     _load_history,
     _load_current_rows,
@@ -26,7 +23,6 @@ from ootils_core.engine.dq.agent.stat_rules import (
     _check_safety_stock_zero,
     _check_negative_onhand,
     SEVERITY_ERROR,
-    SEVERITY_WARNING,
 )
 
 
@@ -74,6 +70,18 @@ class TestGetEntityType:
 # =========================================================================
 
 class TestLoadHistory:
+
+    def test_query_uses_batch_status_and_runtime_timestamps(self):
+        db = _mock_db()
+        db.execute.return_value = _make_cursor([])
+
+        _load_history(db, "items", uuid4())
+
+        sql = db.execute.call_args[0][0]
+        assert "ib.status IN ('validated', 'rejected', 'imported', 'partial')" in sql
+        assert "COALESCE(ib.imported_at, ib.processed_at, ib.submitted_at)" in sql
+        assert "ib.dq_status" not in sql
+        assert "ib.created_at" not in sql
 
     def test_loads_and_parses_json_strings(self):
         db = _mock_db()

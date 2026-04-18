@@ -13,9 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 SCRIPTS_DIR = Path(__file__).parents[2] / "scripts"
 SEED_SCRIPT = SCRIPTS_DIR / "seed_demo_data.py"
@@ -183,7 +181,6 @@ def test_16_after_seed_api_health_and_issues(migrated_db):
     from ootils_core.api.app import create_app
     from ootils_core.api.dependencies import get_db
     from ootils_core.db.connection import OotilsDB
-    from httpx import ASGITransport, Client
 
     app = create_app()
 
@@ -214,3 +211,77 @@ def test_16_after_seed_api_health_and_issues(migrated_db):
         assert isinstance(data["issues"], list)
 
     app.dependency_overrides.clear()
+
+
+@requires_db
+def test_16b_seed_full_recompute_rebuilds_shortages(migrated_db):
+    """After seed, a full recompute rebuilds active shortages from PI state."""
+    import os
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    os.environ["DATABASE_URL"] = migrated_db
+    os.environ["OOTILS_API_TOKEN"] = "test-token-seed"
+
+    result = _run_seed()
+    assert result.returncode == 0, f"Seed failed: {result.stderr}"
+
+    with psycopg.connect(migrated_db, row_factory=dict_row) as conn:
+        conn.execute("DELETE FROM shortages")
+        pump_row = conn.execute(
+            "SELECT item_id FROM items WHERE external_id = 'PUMP-01'"
+        ).fetchone()
+        valve_row = conn.execute(
+            "SELECT item_id FROM items WHERE external_id = 'VALVE-02'"
+        ).fetchone()
+        conn.commit()
+
+    assert pump_row is not None
+    assert valve_row is not None
+
+    from ootils_core.api.app import create_app
+    from ootils_core.api.dependencies import get_db
+    from ootils_core.db.connection import OotilsDB
+    from fastapi.testclient import TestClient
+
+    app = create_app()
+
+    def override_db():
+        db = OotilsDB(migrated_db)
+        with db.conn() as c:
+            yield c
+
+    app.dependency_overrides[get_db] = override_db
+
+    with TestClient(app) as client:
+        calc_resp = client.post(
+            "/v1/calc/run",
+            headers={"Authorization": "Bearer test-token-seed"},
+            json={"full_recompute": True},
+        )
+        assert calc_resp.status_code == 200, f"Calc run failed: {calc_resp.text}"
+        calc_data = calc_resp.json()
+        assert calc_data["status"] == "completed"
+        assert calc_data["nodes_recalculated"] > 0
+
+        issues_resp = client.get(
+            "/v1/issues",
+            headers={"Authorization": "Bearer test-token-seed"},
+        )
+        assert issues_resp.status_code == 200, f"Issues failed: {issues_resp.text}"
+        issues_data = issues_resp.json()
+
+    app.dependency_overrides.clear()
+
+    assert issues_data["total"] > 0
+    issue_item_ids = {issue["item_id"] for issue in issues_data["issues"]}
+    assert str(pump_row["item_id"]) in issue_item_ids
+    assert str(valve_row["item_id"]) in issue_item_ids
+
+    with psycopg.connect(migrated_db, row_factory=dict_row) as conn:
+        active_shortages = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM shortages WHERE status = 'active'"
+        ).fetchone()["cnt"]
+
+    assert active_shortages >= issues_data["total"]

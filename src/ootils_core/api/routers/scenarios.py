@@ -9,7 +9,7 @@ from uuid import UUID
 
 import psycopg
 from psycopg import sql
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth

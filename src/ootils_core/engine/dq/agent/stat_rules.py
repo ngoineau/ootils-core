@@ -12,11 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
@@ -69,8 +66,8 @@ def _load_history(
         JOIN ingest_batches ib ON ib.batch_id = ir.batch_id
         WHERE ib.entity_type = %s
           AND ib.batch_id != %s
-          AND ib.dq_status IN ('validated', 'rejected')
-        ORDER BY ib.created_at DESC
+          AND ib.status IN ('validated', 'rejected', 'imported', 'partial')
+        ORDER BY COALESCE(ib.imported_at, ib.processed_at, ib.submitted_at) DESC
         LIMIT %s
         """,
         (entity_type, current_batch_id, window * 100),  # rough cap
