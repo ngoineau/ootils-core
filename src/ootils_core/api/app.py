@@ -42,6 +42,11 @@ for _spec_path in _SPEC_CANDIDATES:
 API_VERSION = "1.0.0"
 
 _INGEST_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _api_docs_enabled() -> bool:
+    return os.environ.get("OOTILS_ENABLE_API_DOCS", "0").strip().lower() in _TRUTHY
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -173,9 +178,9 @@ def create_app() -> FastAPI:
         title="Ootils Core API",
         version=API_VERSION,
         description=_DESCRIPTION,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if _api_docs_enabled() else None,
+        redoc_url="/redoc" if _api_docs_enabled() else None,
+        openapi_url="/openapi.json" if _api_docs_enabled() else None,
         lifespan=lifespan,
     )
 
