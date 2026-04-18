@@ -5,18 +5,17 @@ Covers:
 - OotilsDB.__init__
 - conn() context manager (commit and rollback paths)
 - _apply_migrations (advisory lock dance, schema_migrations creation,
-  reading migration files, applying pending, "already exists" tolerance,
-  raising on other errors)
+  reading migration files, per-migration transaction, raising on errors)
 - health_check (ok, orphaned edges, stuck calc_runs, connection error)
 - new_id() returns a UUID
 """
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from psycopg import errors as pg_errors
 
 from ootils_core.db import connection as conn_module
 from ootils_core.db.connection import OotilsDB, new_id
@@ -38,6 +37,16 @@ class _FakeCursorCM:
         return False
 
 
+class _FakeTransactionCM:
+    """Context manager wrapping a fake transaction."""
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
 def _make_fake_connection(execute_results=None, execute_side_effect=None):
     """
     Build a MagicMock connection that supports:
@@ -53,6 +62,7 @@ def _make_fake_connection(execute_results=None, execute_side_effect=None):
     if execute_side_effect is not None:
         cursor.execute.side_effect = execute_side_effect
     conn.cursor.return_value = _FakeCursorCM(cursor)
+    conn.transaction.return_value = _FakeTransactionCM()
 
     if execute_results is not None:
         # execute_results: list of dicts (or None) returned by .fetchone()
@@ -174,43 +184,39 @@ def test_apply_migrations_runs_pending_files(fake_migrations_dir):
         kwargs = mock_connect.call_args.kwargs
         assert kwargs.get("autocommit") is True
         # cursor.execute called with the SQL from our fake file
+        fake_conn.transaction.assert_called_once()
         cursor.execute.assert_called_once()
         sql_arg = cursor.execute.call_args.args[0]
         assert "CREATE TABLE foo" in sql_arg
+        schema_migration_inserts = [
+            call for call in fake_conn.execute.call_args_list
+            if "INSERT INTO schema_migrations" in call.args[0]
+        ]
+        assert len(schema_migration_inserts) == 1
+        assert "ON CONFLICT DO NOTHING" in schema_migration_inserts[0].args[0]
 
 
-def test_apply_migrations_ignores_already_exists(fake_migrations_dir):
-    """A migration that raises 'relation already exists' should be swallowed."""
-    fake_conn, _ = _make_fake_connection(
-        execute_side_effect=Exception("ERROR: relation already exists")
-    )
+@pytest.mark.parametrize(
+    ("exc", "sqlstate"),
+    [
+        (pg_errors.DuplicateTable("relation already exists"), "42P07"),
+        (pg_errors.DuplicateColumn("column already exists"), "42701"),
+        (pg_errors.DuplicateObject("constraint already exists"), "42710"),
+    ],
+)
+def test_apply_migrations_raises_on_duplicate_sqlstate(fake_migrations_dir, exc, sqlstate, capsys):
+    fake_conn, _ = _make_fake_connection(execute_side_effect=exc)
     with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        # Should NOT raise
-        OotilsDB("postgresql:///x")
+        with pytest.raises(type(exc)):
+            OotilsDB("postgresql:///x")
 
-
-def test_apply_migrations_ignores_duplicate_key(fake_migrations_dir):
-    fake_conn, _ = _make_fake_connection(
-        execute_side_effect=Exception("duplicate key value violates unique constraint")
-    )
-    with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        OotilsDB("postgresql:///x")  # No raise
-
-
-def test_apply_migrations_ignores_column_already_exists(fake_migrations_dir):
-    fake_conn, _ = _make_fake_connection(
-        execute_side_effect=Exception("column already exists")
-    )
-    with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        OotilsDB("postgresql:///x")
-
-
-def test_apply_migrations_ignores_constraint_already_exists(fake_migrations_dir):
-    fake_conn, _ = _make_fake_connection(
-        execute_side_effect=Exception("constraint already exists")
-    )
-    with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        OotilsDB("postgresql:///x")
+    captured = capsys.readouterr()
+    assert f"[sqlstate={sqlstate}]" in captured.err
+    schema_migration_inserts = [
+        call for call in fake_conn.execute.call_args_list
+        if "INSERT INTO schema_migrations" in call.args[0]
+    ]
+    assert schema_migration_inserts == []
 
 
 def test_apply_migrations_raises_on_real_error(fake_migrations_dir, capsys):
@@ -240,6 +246,7 @@ def test_apply_migrations_runs_files_in_sorted_order(tmp_path, monkeypatch):
 
     executed_sql = [c.args[0] for c in cursor.execute.call_args_list]
     assert executed_sql == ["SELECT 1;", "SELECT 2;"]
+    assert fake_conn.transaction.call_count == 2
 
 
 # ---------------------------------------------------------------------------

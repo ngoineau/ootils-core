@@ -17,6 +17,7 @@ Environment:
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,6 +35,11 @@ DEFAULT_DATABASE_URL = (
     or os.environ.get("OOTILS_DSN")
     or "postgresql:///ootils_dev"
 )
+
+
+def _sqlstate_of(exc: Exception) -> str | None:
+    """Return PostgreSQL SQLSTATE when available."""
+    return getattr(exc, "sqlstate", None) or getattr(getattr(exc, "diag", None), "sqlstate", None)
 
 
 class OotilsDB:
@@ -70,11 +76,11 @@ class OotilsDB:
         """Apply pending .sql migration files in order.
 
         Uses a schema_migrations tracking table so each migration runs
-        exactly once.  An advisory lock prevents concurrent migration
-        attempts from racing.
+        exactly once. An advisory lock prevents concurrent migration
+        attempts from racing. Each migration runs inside its own database
+        transaction so partial multi-statement application cannot be marked
+        as successful.
         """
-        import sys
-
         migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
         if not migration_files:
             return
@@ -114,33 +120,19 @@ class OotilsDB:
 
                     migration_sql = migration_path.read_text(encoding="utf-8")
                     try:
-                        with conn.cursor() as cur:
-                            cur.execute(migration_sql)
-                        # Record successful migration
-                        conn.execute(
-                            "INSERT INTO schema_migrations (version) VALUES (%s)",
-                            (version,),
-                        )
-                    except Exception as e:
-                        err_msg = str(e).lower()
-                        # Tolerate "already exists" only for initial bootstrap
-                        # where the tracking table didn't exist yet.
-                        if any(phrase in err_msg for phrase in [
-                            "already exists",
-                            "duplicate key",
-                            "relation already exists",
-                            "column already exists",
-                            "constraint already exists",
-                        ]):
-                            # Record it so we don't retry — crash loudly if
-                            # this insert fails (schema_migrations table broken)
+                        with conn.transaction():
+                            with conn.cursor() as cur:
+                                cur.execute(migration_sql)
                             conn.execute(
                                 "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
                                 (version,),
                             )
-                            continue
+                        applied.add(version)
+                    except Exception as e:
+                        sqlstate = _sqlstate_of(e)
+                        sqlstate_suffix = f" [sqlstate={sqlstate}]" if sqlstate else ""
                         print(
-                            f"[MIGRATION ERROR] {migration_path.name}: {e}",
+                            f"[MIGRATION ERROR] {migration_path.name}{sqlstate_suffix}: {e}",
                             file=sys.stderr,
                         )
                         raise
