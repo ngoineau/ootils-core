@@ -13,15 +13,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any, Optional
+from typing import Optional
 from uuid import UUID, uuid4
 
 import psycopg
 
 from ootils_core.models import (
-    Node,
-    PlanningEvent,
     Scenario,
     ScenarioDiff,
     ScenarioOverride,

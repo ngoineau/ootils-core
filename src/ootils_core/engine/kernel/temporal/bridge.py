@@ -16,8 +16,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 

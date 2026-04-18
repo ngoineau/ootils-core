@@ -4,7 +4,7 @@ POST /v1/simulate — Create a scenario with overrides and return delta.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 from uuid import UUID
 
 import psycopg

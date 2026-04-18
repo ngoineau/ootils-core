@@ -26,9 +26,9 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
 import psycopg
@@ -40,8 +40,8 @@ from ootils_core.engine.mrp.gross_to_net import (
     GrossToNetCalculator,
     TimeBucket,
 )
-from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer, ConsumptionStrategy
-from ootils_core.engine.mrp.lot_sizing import LotSizingEngine, LotSizeRule
+from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
+from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
 from ootils_core.engine.mrp.time_fences import TimeFenceChecker, TimeFenceZone
 from ootils_core.engine.mrp.graph_integration import GraphIntegration
 
@@ -132,9 +132,9 @@ class MrpApicsEngine:
 
             # 2. Calculate or retrieve LLCs
             if config.recalculate_llc:
-                llc_map = self.llc_calculator.calculate_all()
+                self.llc_calculator.calculate_all()
             else:
-                llc_map = self.llc_calculator.load_existing_llc()
+                self.llc_calculator.load_existing_llc()
 
             # Items with no BOM (finished goods) get LLC 0
             items_by_llc = self.llc_calculator.get_items_by_llc(config.location_id)
@@ -305,7 +305,6 @@ class MrpApicsEngine:
         time_buckets: List[TimeBucket],
     ):
         """Apply lot sizing and time fence rules to bucket records."""
-        lead_time_days = int(params.get("lead_time_total_days") or 0)
         time_fence = TimeFenceChecker.from_planning_params(params)
 
         for i, record in enumerate(records):
@@ -338,7 +337,6 @@ class MrpApicsEngine:
             record.projected_on_hand += lot_qty
 
             # Lead time offset: release date = receipt date - lead time
-            release_date = record.period_start - timedelta(days=lead_time_days)
             record.planned_order_releases = lot_qty
 
             # Handle frozen zone: push orders to frozen boundary

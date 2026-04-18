@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from uuid import UUID
@@ -336,7 +336,6 @@ class LLCCalculator:
         Returns:
             Dict mapping llc_level → [item_ids]
         """
-        location_filter = ""
         location_join = ""
         params: list = []
 
