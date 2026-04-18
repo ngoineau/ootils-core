@@ -18,8 +18,8 @@ from __future__ import annotations
 import logging
 import math
 from enum import Enum
-from decimal import Decimal, ROUND_UP
-from typing import Dict, List, Optional, Tuple
+from decimal import Decimal
+from typing import List, Optional, Tuple
 
 import psycopg
 

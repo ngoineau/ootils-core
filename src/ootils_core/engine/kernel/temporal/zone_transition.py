@@ -17,13 +17,12 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
 from uuid import UUID, uuid4
 
 import psycopg
 
 from ootils_core.engine.kernel.graph.store import GraphStore
-from ootils_core.models import Node, NodeTypeTemporalPolicy
+from ootils_core.models import Node
 
 logger = logging.getLogger(__name__)
 

@@ -14,7 +14,6 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
 from uuid import UUID
 
 from .stat_rules import AgentIssue

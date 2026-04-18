@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -409,7 +409,7 @@ class ForecastConsumer:
             Dict[item_id, Dict[period_start, net_demand]]
         """
         # Resolve strategy (handles old DB enum values too)
-        strat = ConsumptionStrategy(strategy)
+        ConsumptionStrategy(strategy)
 
         items = self._get_items_with_forecast(location_id, horizon_days)
         results: Dict[UUID, Dict[date, Decimal]] = {}

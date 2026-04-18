@@ -23,12 +23,19 @@ from unittest.mock import MagicMock, patch
 import types
 import sys
 
-# Mock psycopg before importing
+# Mock psycopg only during import of the APICS modules, then restore it so the
+# later DB-backed tests in the full suite can import the real psycopg package.
+_psycopg_original = sys.modules.get('psycopg')
 psycopg_mock = types.ModuleType('psycopg')
 sys.modules['psycopg'] = psycopg_mock
 
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine, LotSizeRule
 from ootils_core.engine.mrp.gross_to_net import BucketRecord, TimeBucket
+
+if _psycopg_original is not None:
+    sys.modules['psycopg'] = _psycopg_original
+else:
+    sys.modules.pop('psycopg', None)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

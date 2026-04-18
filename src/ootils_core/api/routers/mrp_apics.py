@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
@@ -22,9 +22,8 @@ from pydantic import BaseModel, Field
 
 from ootils_core.api.dependencies import get_db, resolve_scenario_id, BASELINE_SCENARIO_ID
 from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
-from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer, ForecastConsumerCore, ConsumptionStrategy
-from ootils_core.engine.mrp.lot_sizing import LotSizingEngine, LotSizeRule
-from ootils_core.engine.mrp.time_fences import TimeFenceChecker, TimeFenceZone
+from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
+from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
 from ootils_core.engine.mrp.llc_calculator import LLCCalculator
 
 logger = logging.getLogger(__name__)

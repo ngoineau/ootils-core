@@ -14,8 +14,6 @@ These tools wrap the graph-based kernel API for use by LLM agents.
 """
 from __future__ import annotations
 
-from typing import Any
-from uuid import UUID
 
 
 def get_active_issues(db, scenario_id: str = "00000000-0000-0000-0000-000000000001") -> list[dict]:

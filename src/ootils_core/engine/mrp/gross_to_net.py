@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
 import psycopg
@@ -304,7 +304,6 @@ class GrossToNetCalculator:
         # Re-chain: POH_after(t) = PAB(t) + POR(t)
         #           PAB(t+1)      = POH_after(t) + SR(t+1) - GR(t+1)
 
-        running = records[0].projected_on_hand  # initial PAB from gross-to-net
         # But this PAB doesn't include prior planned orders yet.
         # We need to re-compute from scratch using POR.
 
