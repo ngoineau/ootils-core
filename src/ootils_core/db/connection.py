@@ -29,8 +29,10 @@ from psycopg.rows import dict_row
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 # Default: Unix socket connection to local postgres, database 'ootils_dev'
-DEFAULT_DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql:///ootils_dev"
+DEFAULT_DATABASE_URL = (
+    os.environ.get("DATABASE_URL")
+    or os.environ.get("OOTILS_DSN")
+    or "postgresql:///ootils_dev"
 )
 
 

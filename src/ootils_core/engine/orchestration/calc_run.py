@@ -5,7 +5,7 @@ Advisory lock strategy:
   pg_try_advisory_lock(hashtext(str(scenario_id)))
   Returns NULL if already locked — caller gets None back.
 
-State machine: pending → running → completed | completed_stale | failed
+State machine: pending → running → completed | completed_stale | interrupted | failed
 """
 from __future__ import annotations
 
@@ -207,8 +207,8 @@ class CalcRunManager:
 
     def recover_pending_runs(self, db) -> list[CalcRun]:
         """
-        On startup: transition all 'running' runs to 'failed' (they were interrupted).
-        Return all 'pending' runs so the engine can retry them.
+        On startup: transition all 'running' runs to 'interrupted'.
+        Return all replayable runs (pending + interrupted) so the engine can retry them.
 
         Called once on engine startup.
 
@@ -219,16 +219,16 @@ class CalcRunManager:
         locks surviving a crash — they are cleaned up at the transport level.
 
         What this method handles: the *calc_runs table state*, which does not auto-recover.
-        Running rows must be transitioned to 'failed' so the engine does not think
-        a run is in progress when it restarts.
+        Running rows must be transitioned to 'interrupted' so the engine does not think
+        a run is in progress when it restarts, while keeping the reason explicit.
         """
         now = datetime.now(timezone.utc)
 
-        # Mark running runs as failed (they crashed)
+        # Mark running runs as interrupted (they crashed mid-flight)
         db.execute(
             """
             UPDATE calc_runs
-            SET status = 'failed',
+            SET status = 'interrupted',
                 completed_at = %s,
                 error_message = 'Recovered on startup — previous run was interrupted'
             WHERE status = 'running'
@@ -236,11 +236,11 @@ class CalcRunManager:
             (now,),
         )
 
-        # Fetch pending runs
+        # Fetch replayable runs
         rows = db.execute(
             """
             SELECT * FROM calc_runs
-            WHERE status = 'pending'
+            WHERE status IN ('pending', 'interrupted')
             ORDER BY created_at ASC
             """,
         ).fetchall()

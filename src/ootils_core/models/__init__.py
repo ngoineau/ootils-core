@@ -156,7 +156,7 @@ class CalcRun:
     dirty_node_count: Optional[int] = None
     nodes_recalculated: int = 0
     nodes_unchanged: int = 0
-    status: str = "pending"  # pending | running | completed | completed_stale | failed
+    status: str = "pending"  # pending | running | completed | completed_stale | interrupted | failed
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None

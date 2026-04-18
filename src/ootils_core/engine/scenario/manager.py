@@ -47,6 +47,10 @@ class ScenarioManager:
     """
     Manages scenario lifecycle operations.
 
+    Current implementation clones nodes, edges, and projection series into the
+    child scenario. It is scenario isolation by explicit copy, not true
+    copy-on-write storage.
+
     All methods accept a psycopg3 Connection.  The caller owns commit/rollback
     — this class never calls conn.commit() directly.
     """
@@ -68,6 +72,7 @@ class ScenarioManager:
           1. Insert a new row in scenarios (is_baseline=False, status='active').
           2. Deep-copy all active nodes from the parent scenario, assigning
              new node_id values and the new scenario_id.
+          3. Deep-copy edges and projection series needed by those nodes.
 
         Returns the newly created Scenario.
         """

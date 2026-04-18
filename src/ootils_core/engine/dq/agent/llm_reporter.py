@@ -6,7 +6,7 @@ Assemble le contexte DQ complet et génère :
   - priority_actions (liste d'actions)
   - llm_explanation / llm_suggestion par issue
 
-Fallback : si OPENAI_API_KEY absent ou API indisponible → rapport JSON sans narration.
+Fallback : si OPENAI_API_KEY absent, timeout, ou API indisponible → rapport JSON sans narration.
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from .stat_rules import AgentIssue
 
 logger = logging.getLogger(__name__)
 
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = os.environ.get("OOTILS_DQ_LLM_MODEL", "gpt-4.1-mini")
+OPENAI_TIMEOUT_SECONDS = float(os.environ.get("OOTILS_DQ_LLM_TIMEOUT_SECONDS", "20"))
 
 _SYSTEM_PROMPT = """You are a senior supply chain expert specialized in data quality management.
 Your role is to analyze data quality issues detected in supply chain data (purchase orders, forecasts, 
@@ -113,58 +114,71 @@ def generate_llm_report(
         return _fallback_report(issues, entity_type)
 
     try:
-        from openai import OpenAI, APIError, APIConnectionError
-        client = OpenAI(api_key=api_key)
-
-        critical_count = sum(1 for i in issues if i.severity == "error")
-        issues_json = _build_issues_context(issues)
-
-        user_message = _USER_PROMPT_TEMPLATE.format(
-            entity_type=entity_type,
-            batch_id=str(batch_id),
-            total_rows=total_rows,
-            issues_count=len(issues),
-            critical_count=critical_count,
-            issues_json=issues_json,
-        )
-
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=2000,
-        )
-
-        content = response.choices[0].message.content
-        data = json.loads(content)
-
-        report = LLMReport(
-            narrative=data.get("narrative", ""),
-            priority_actions=data.get("priority_actions", []),
-            issue_explanations=data.get("issue_explanations", {}),
-            model_used=OPENAI_MODEL,
-            llm_available=True,
-        )
-
-        # Apply explanations to issues
-        for issue in issues:
-            explanation = report.issue_explanations.get(str(issue.issue_id), {})
-            if explanation:
-                issue.llm_explanation = explanation.get("explanation")
-                issue.llm_suggestion = explanation.get("suggestion")
-
-        return report
-
+        from openai import OpenAI
     except ImportError:
         logger.warning("openai package not installed — using fallback report")
         return _fallback_report(issues, entity_type)
-    except Exception as exc:
-        logger.warning("LLM API call failed (%s) — using fallback report", exc)
-        return _fallback_report(issues, entity_type)
+
+    critical_count = sum(1 for i in issues if i.severity == "error")
+    issues_json = _build_issues_context(issues)
+
+    user_message = _USER_PROMPT_TEMPLATE.format(
+        entity_type=entity_type,
+        batch_id=str(batch_id),
+        total_rows=total_rows,
+        issues_count=len(issues),
+        critical_count=critical_count,
+        issues_json=issues_json,
+    )
+
+    client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS)
+    candidate_models = [OPENAI_MODEL, *_fallback_models()]
+    last_error: Exception | None = None
+
+    for model_name in candidate_models:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=2000,
+                timeout=OPENAI_TIMEOUT_SECONDS,
+            )
+
+            content = response.choices[0].message.content
+            data = json.loads(content)
+
+            report = LLMReport(
+                narrative=data.get("narrative", ""),
+                priority_actions=data.get("priority_actions", []),
+                issue_explanations=data.get("issue_explanations", {}),
+                model_used=model_name,
+                llm_available=True,
+            )
+
+            for issue in issues:
+                explanation = report.issue_explanations.get(str(issue.issue_id), {})
+                if explanation:
+                    issue.llm_explanation = explanation.get("explanation")
+                    issue.llm_suggestion = explanation.get("suggestion")
+
+            return report
+        except Exception as exc:
+            last_error = exc
+            logger.warning("LLM API call failed on model %s (%s)", model_name, exc)
+
+    logger.warning("All LLM attempts failed — using fallback report (%s)", last_error)
+    return _fallback_report(issues, entity_type)
+
+
+def _fallback_models() -> list[str]:
+    raw = os.environ.get("OOTILS_DQ_LLM_FALLBACK_MODELS", "")
+    models = [model.strip() for model in raw.split(",") if model.strip()]
+    return [model for model in models if model != OPENAI_MODEL]
 
 
 def _fallback_report(issues: list[AgentIssue], entity_type: str) -> LLMReport:

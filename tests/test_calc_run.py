@@ -5,7 +5,7 @@ Covers every method and branch:
   - start_calc_run: lock acquired, lock NOT acquired (row missing, row locked=False)
   - complete_calc_run: completed vs completed_stale, with/without triggered_by_event_ids
   - fail_calc_run: normal path, db.execute raises on UPDATE, db.execute raises on unlock
-  - recover_pending_runs: returns pending rows, empty result
+  - recover_pending_runs: returns pending/interrupted rows, empty result
   - _row_to_calc_run: full row, minimal row with defaults
 """
 from __future__ import annotations
@@ -315,6 +315,21 @@ class TestRecoverPendingRuns:
         assert len(runs) == 1
         assert runs[0].status == "pending"
 
+    def test_returns_interrupted_runs_for_replay(self):
+        db = _mock_db()
+        interrupted_row = _full_calc_run_row(status="interrupted")
+
+        cursor_update = MagicMock()
+        cursor_select = MagicMock()
+        cursor_select.fetchall.return_value = [interrupted_row]
+        db.execute.side_effect = [cursor_update, cursor_select]
+
+        mgr = CalcRunManager()
+        runs = mgr.recover_pending_runs(db)
+
+        assert len(runs) == 1
+        assert runs[0].status == "interrupted"
+
     def test_no_pending_runs(self):
         db = _mock_db()
         cursor_update = MagicMock()
@@ -326,7 +341,7 @@ class TestRecoverPendingRuns:
         runs = mgr.recover_pending_runs(db)
         assert runs == []
 
-    def test_marks_running_as_failed(self):
+    def test_marks_running_as_interrupted(self):
         db = _mock_db()
         cursor_update = MagicMock()
         cursor_select = MagicMock()
@@ -336,7 +351,10 @@ class TestRecoverPendingRuns:
         mgr = CalcRunManager()
         mgr.recover_pending_runs(db)
 
-        # First call should be the UPDATE running -> failed
+        # First call should be the UPDATE running -> interrupted
         first_call_sql = db.execute.call_args_list[0][0][0]
-        assert "status = 'failed'" in first_call_sql
+        assert "status = 'interrupted'" in first_call_sql
         assert "WHERE status = 'running'" in first_call_sql
+
+        second_call_sql = db.execute.call_args_list[1][0][0]
+        assert "status IN ('pending', 'interrupted')" in second_call_sql

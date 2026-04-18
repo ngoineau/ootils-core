@@ -233,6 +233,34 @@ class TestGenerateLlmReport:
         assert report.llm_available is False
         assert report.model_used is None
 
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "OOTILS_DQ_LLM_FALLBACK_MODELS": "backup-model"})
+    def test_retries_with_fallback_model(self):
+        issue = _make_issue()
+        good_response = MagicMock()
+        good_response.choices = [MagicMock()]
+        good_response.choices[0].message.content = json.dumps({
+            "narrative": "fallback ok",
+            "priority_actions": [],
+            "issue_explanations": {},
+        })
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = [RuntimeError("primary down"), good_response]
+
+        with patch("ootils_core.engine.dq.agent.llm_reporter.OPENAI_MODEL", "primary-model"):
+            with patch("ootils_core.engine.dq.agent.llm_reporter.OPENAI_TIMEOUT_SECONDS", 7.0):
+                with patch("openai.OpenAI", return_value=mock_client) as mock_openai:
+                    report = generate_llm_report([issue], "items", uuid4(), 10)
+
+        assert report.llm_available is True
+        assert report.model_used == "backup-model"
+        mock_openai.assert_called_once_with(api_key="sk-test", timeout=7.0)
+        first_call = mock_client.chat.completions.create.call_args_list[0].kwargs
+        second_call = mock_client.chat.completions.create.call_args_list[1].kwargs
+        assert first_call["model"] == "primary-model"
+        assert second_call["model"] == "backup-model"
+        assert first_call["timeout"] == 7.0
+
     @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"})
     def test_llm_response_without_optional_fields(self):
         """Test when LLM response is missing optional fields."""

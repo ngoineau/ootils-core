@@ -7,12 +7,15 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from ootils_core.api.auth import _expected_token
 from ootils_core.api.routers import bom, calc, calendars, dq, events, explain, ghosts, graph, ingest, issues, mrp, planning_params, projection, rccp, scenarios, simulate
 from ootils_core.api.routers.graph import nodes_router
 
@@ -49,6 +52,58 @@ class IngestPayloadSizeLimitMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    _expected_token()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        if os.environ.get("OOTILS_ENABLE_STARTUP_RECOVERY", "0").lower() in {"1", "true", "yes", "on"}:
+            from ootils_core.api.dependencies import _get_ootils_db
+            from ootils_core.api.routers.events import _build_propagation_engine
+            from ootils_core.engine.orchestration.calc_run import CalcRunManager
+
+            db_handle = _get_ootils_db()
+            calc_run_mgr = CalcRunManager()
+
+            with db_handle.conn() as conn:
+                replayable_runs = calc_run_mgr.recover_pending_runs(conn)
+                if not replayable_runs:
+                    logger.info("startup.recovery none")
+                else:
+                    engine = _build_propagation_engine(conn)
+                    for run in replayable_runs:
+                        dirty_nodes = engine._dirty.get_dirty_nodes(run.calc_run_id, run.scenario_id, conn)
+                        if not dirty_nodes:
+                            logger.warning(
+                                "startup.recovery skipped calc_run=%s scenario=%s, no durable dirty nodes",
+                                run.calc_run_id,
+                                run.scenario_id,
+                            )
+                            continue
+
+                        try:
+                            logger.info(
+                                "startup.recovery replay calc_run=%s scenario=%s dirty_nodes=%d",
+                                run.calc_run_id,
+                                run.scenario_id,
+                                len(dirty_nodes),
+                            )
+                            engine._propagate(run, dirty_nodes, conn)
+                            engine._finish_run(run, run.scenario_id, conn)
+                        except Exception as exc:
+                            logger.exception(
+                                "startup.recovery failed calc_run=%s scenario=%s: %s",
+                                run.calc_run_id,
+                                run.scenario_id,
+                                exc,
+                            )
+                            engine._calc_run_mgr.fail_calc_run(
+                                run,
+                                f"Startup replay failed: {exc}",
+                                conn,
+                            )
+
+        yield
+
     application = FastAPI(
         title="Ootils Core API",
         version=API_VERSION,
@@ -56,6 +111,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        lifespan=lifespan,
     )
 
     # Payload size limit middleware for ingest routes

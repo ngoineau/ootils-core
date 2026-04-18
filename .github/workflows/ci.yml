@@ -44,8 +44,10 @@ jobs:
           --health-retries 10
 
     env:
+      DATABASE_URL: postgresql://ootils:ootils@localhost:5432/ootils_test
       OOTILS_DSN: postgresql://ootils:ootils@localhost:5432/ootils_test
-      OOTILS_API_TOKEN: ${{ secrets.OOTILS_API_TOKEN }}
+      OOTILS_API_TOKEN: test-token-ci
+      OOTILS_ENABLE_STARTUP_RECOVERY: "0"
 
     steps:
       - uses: actions/checkout@v4

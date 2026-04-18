@@ -468,9 +468,9 @@ class GraphStore:
 
         Returns (edge, created) where created=True when a new row was inserted.
 
-        No cycle check is performed here — pegged_to edges go from demand to
-        supply (demand → supply), which is the reverse of the computation DAG
-        direction and cannot create planning cycles.
+        pegged_to edges are exempt from cycle checks because they point from
+        demand to supply, the reverse of the computation DAG. All other edge
+        types must pass cycle validation before insert.
         """
         existing = self._conn.execute(
             """
@@ -508,6 +508,8 @@ class GraphStore:
             edge.edge_id = UUID(str(existing["edge_id"]))
             return edge, False
         else:
+            if edge.edge_type != "pegged_to":
+                self.validate_no_cycle(edge.from_node_id, edge.to_node_id, edge.scenario_id)
             self._conn.execute(
                 """
                 INSERT INTO edges (
