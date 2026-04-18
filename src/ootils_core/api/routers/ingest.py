@@ -79,7 +79,7 @@ def _dry_run_response(items: list[Any], label: str = "external_id") -> IngestRes
 
 def _raise_422(errors: list[dict]) -> None:
     """Raise HTTP 422 with structured error list. Nothing is persisted."""
-    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=errors)
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
 
 
 def _create_ingest_batch(
@@ -218,10 +218,8 @@ def _wire_node_to_pi(
     """
     if node_type in ("PurchaseOrderSupply", "WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply"):
         edge_type = "replenishes"
-        direction = "supply"
     elif node_type in ("ForecastDemand", "CustomerOrderDemand"):
         edge_type = "consumes"
-        direction = "demand"
     else:
         return 0
 
@@ -1685,7 +1683,6 @@ async def ingest_transfers(
 
     for t in body.transfers:
         item_id = item_map[t.item_external_id]
-        from_location_id = loc_map[t.from_location_external_id]
         to_location_id = loc_map[t.to_location_external_id]
         active = t.status not in ("delivered", "cancelled")
 

@@ -16,13 +16,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch, PropertyMock
-from uuid import UUID, uuid4
+from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
 from ootils_core.engine.orchestration.propagator import PropagationEngine
-from ootils_core.models import CalcRun, Edge, Node, Scenario
+from ootils_core.models import CalcRun, Edge, Node
 
 
 # ---------------------------------------------------------------------------
@@ -1645,14 +1645,14 @@ class TestRecomputePiNode:
         }
 
         shortage_detector = MagicMock()
-        shortage_detector.detect.return_value = MagicMock()
+        shortage_detector.detect_with_params.return_value = MagicMock()
 
         engine = self._make_engine_for_recompute(
             store=store, kernel=kernel, shortage_detector=shortage_detector,
         )
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
-        shortage_detector.detect.assert_called_once()
+        shortage_detector.detect_with_params.assert_called_once()
         shortage_detector.persist.assert_called_once()
 
     def test_shortage_detector_detect_returns_none(self):
@@ -1682,12 +1682,13 @@ class TestRecomputePiNode:
         }
 
         shortage_detector = MagicMock()
-        shortage_detector.detect.return_value = None
+        shortage_detector.detect_with_params.return_value = None
 
         engine = self._make_engine_for_recompute(
             store=store, kernel=kernel, shortage_detector=shortage_detector,
         )
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
+        shortage_detector.detect_with_params.assert_called_once()
         shortage_detector.persist.assert_not_called()
 
     def test_shortage_detector_exception_swallowed(self):
@@ -1717,7 +1718,7 @@ class TestRecomputePiNode:
         }
 
         shortage_detector = MagicMock()
-        shortage_detector.detect.side_effect = RuntimeError("detector boom")
+        shortage_detector.detect_with_params.side_effect = RuntimeError("detector boom")
 
         engine = self._make_engine_for_recompute(
             store=store, kernel=kernel, shortage_detector=shortage_detector,
@@ -1757,7 +1758,7 @@ class TestRecomputePiNode:
             store=store, kernel=kernel, shortage_detector=shortage_detector,
         )
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
-        shortage_detector.detect.assert_not_called()
+        shortage_detector.detect_with_params.assert_not_called()
 
     def test_demand_uses_time_span_start_when_time_ref_none(self):
         """demand_date = src_node.time_ref or src_node.time_span_start"""

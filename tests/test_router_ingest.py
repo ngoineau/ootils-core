@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from typing import Any, Generator
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from psycopg import sql as psy_sql
 
 # Auth token must be set BEFORE the app is imported
 os.environ.setdefault("OOTILS_API_TOKEN", "test-token")
@@ -32,8 +33,6 @@ from ootils_core.api.app import create_app
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.api.routers import ingest as ingest_module
 from ootils_core.api.routers.ingest import (
-    IngestResponse,
-    IngestSummary,
     _batch_existing,
     _create_ingest_batch,
     _dry_run_response,
@@ -98,8 +97,13 @@ class FakeDB:
         self.calls: list[tuple[str, tuple]] = []
 
     def execute(self, sql, params=None):
-        self.calls.append((sql, params if params is not None else ()))
-        result = self.handler(sql, params if params is not None else ())
+        rendered_sql = sql
+        if not isinstance(sql, str):
+            rendered_sql = psy_sql.as_string(sql)
+            rendered_sql = rendered_sql.replace('"', '')
+            rendered_sql = ' '.join(rendered_sql.split())
+        self.calls.append((rendered_sql, params if params is not None else ()))
+        result = self.handler(rendered_sql, params if params is not None else ())
         return result if result is not None else FakeCursor()
 
 

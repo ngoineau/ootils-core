@@ -9,7 +9,6 @@ Callers own commit/rollback on the db connection.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
 from uuid import UUID
 
 
@@ -113,16 +112,20 @@ class DirtyFlagManager:
         # Build batch values
         rows = [(calc_run_id, node_id, scenario_id, now) for node_id in node_ids]
 
-        # psycopg3: executemany lives on the cursor, not on the connection
+        sql = """
+            INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
+        """
+
+        executemany = getattr(db, "executemany", None)
+        if callable(executemany):
+            executemany(sql, rows)
+            return
+
+        # psycopg3 connections do not expose executemany(), so fall back to a cursor.
         with db.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
-                """,
-                rows,
-            )
+            cur.executemany(sql, rows)
 
     def load_from_postgres(
         self,
