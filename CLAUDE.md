@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Target-architecture notes may appear below. Verify runtime reality before treating any capability as shipped.
+
 ## Project
 
 `ootils-core` — a graph-based supply chain decision engine. FastAPI REST API on top of a Python kernel that models supply chains as typed nodes + edges, persisted in PostgreSQL 16. Core capabilities: incremental propagation, shortage detection, MRP explosion, scenario branching (copy-on-write), RCCP, a ghost/virtual-supply engine, and a data quality (DQ) pipeline.

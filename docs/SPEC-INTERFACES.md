@@ -1,8 +1,9 @@
 # Ootils Core — Specification Opérationnelle des Interfaces
 
 > Version 1.0 — 2026-04-18
-> Statut : **REFERENCE OPÉRATIONNELLE** — ce document décrit ce qui existe (implémenté) et ce qui est proposé (`[PROPOSED]`). Il prime sur `docs/api-spec.md` pour toute question de contrat.
+> Statut : **RÉFÉRENCE MIXTE (ACTUEL + CIBLE)** — ce document distingue ce qui existe aujourd'hui de ce qui est seulement proposé (`[PROPOSED]`). Il ne doit pas être lu comme une preuve que toutes les surfaces décrites sont déjà livrées.
 > Audiences : (a) intégrateurs humains, (b) connecteurs ERP (SAP / Dynamics / WMS), (c) agents IA (MCP / API directe).
+> Règle de lecture : quand une capacité n'est pas explicitement observée dans le code ou dans le runtime validé, elle doit être lue comme cible et non comme fonctionnalité déjà livrée.
 
 ---
 
@@ -20,7 +21,7 @@
 
 | Audience | Préféré aujourd'hui | Cible (post-Phase 1) |
 |----------|---------------------|----------------------|
-| **Intégrateur humain** (ops, data engineer) | Upload TSV manuel via UI / POST JSON via curl | SFTP drop + `[PROPOSED]` dashboard de runs d'import + templates TSV versionnés |
+| **Intégrateur humain** (ops, data engineer) | POST JSON via curl / scripts / client API ; upload TSV manuel via UI = `[PROPOSED]` | SFTP drop + `[PROPOSED]` dashboard de runs d'import + templates TSV versionnés |
 | **Connecteur ERP** (SAP/Dynamics/WMS) | REST JSON sync, un endpoint par entité | Webhook ERP→Ootils `[PROPOSED]` + outbound webhook recommandations signé HMAC `[PROPOSED]` |
 | **Agent IA** | API REST directe + Bearer token partagé | `[PROPOSED]` MCP server + streaming explain SSE + determinism contract documenté |
 

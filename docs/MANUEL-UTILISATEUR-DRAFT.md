@@ -3,7 +3,8 @@
 > **Version** : 0.1 (draft)
 > **Date** : 2026-04-18
 > **Public** : directeurs supply chain, planificateurs lead, responsables IT impliqués dans le pilote.
-> **Ce que ce manuel n'est PAS** : une documentation développeur. Pour la référence API complète, voir `docs/SPEC-INTERFACES.md` ou l'interface Swagger exposée par le serveur (`/docs`).
+> **Ce que ce manuel n'est PAS** : une documentation développeur. Pour la référence API complète, voir `docs/SPEC-INTERFACES.md`. En environnement contrôlé, l'OpenAPI et Swagger peuvent être réactivés explicitement, mais ils ne doivent pas être supposés exposés par défaut.
+> **Note d'intégrité** : ce document ne vaut pas engagement produit complet. Il sert de support pilote et doit être relu contre le runtime effectivement déployé.
 
 ---
 
@@ -26,8 +27,8 @@ Ootils est un **moteur de décision supply chain**. Il prend en entrée votre é
 - Une **projection de stock** à horizon configurable (jour/semaine/mois).
 - La **détection des ruptures** à venir, avec date et magnitude.
 - Une **explication causale** de chaque rupture — quelle est la demande qui n'est pas couverte, par quel flux entrant, pourquoi ce flux arrive trop tard ou trop peu.
-- Des **recommandations MRP** (suggestions d'approvisionnement, ordres de fabrication planifiés, alertes capacitaires).
-- Des **scénarios what-if** : qu'est-ce qui change si on accélère une commande fournisseur, si la demande augmente de 20 %, si un article est substitué.
+- Des **recommandations MRP** (par exemple suggestions d'approvisionnement et ordres planifiés sur le périmètre aujourd'hui démontré).
+- Des **analyses de scénario** sur le périmètre activé et validé. Selon la version déployée, certaines variantes avancées restent à confirmer ou à livrer.
 
 **Particularité Ootils** : le moteur est conçu pour être opéré par des agents IA, pas cliqué par des humains dans une interface. Les humains (votre équipe) :
 - Fournissent les données (intégration avec votre ERP / WMS / fichiers).
@@ -128,15 +129,15 @@ Causes les plus fréquentes :
 - Port 8000 déjà pris sur la machine.
 - Volume Postgres corrompu → supprimer le volume et relancer (attention : perte de données).
 
-### 3.5 Accéder à la documentation interactive
+### 3.5 Accéder à la documentation interactive (si explicitement activée)
 
-Ouvrir dans un navigateur :
+Dans un environnement contrôlé où l'équipe technique a réactivé la documentation API, ouvrir dans un navigateur :
 
 ```
 http://<ip-serveur>:8000/docs
 ```
 
-C'est l'interface Swagger. Elle liste tous les endpoints disponibles, avec des formulaires pour tester chaque appel. Utile pour valider que votre token fonctionne avant de coder l'intégration.
+Cette interface Swagger ne doit pas être présumée exposée par défaut. Elle sert à valider rapidement un token ou un appel API avant de coder l'intégration.
 
 ### 3.6 (Optionnel) Charger des données de démonstration
 
@@ -286,7 +287,7 @@ C'est là que la valeur arrive. Une fois les données envoyées, Ootils calcule,
 | **Liste des ruptures à venir** | ✅ Aujourd'hui | Planificateur, directeur SC | JSON (API) — exportable Excel |
 | **Projection de stock** | ✅ Aujourd'hui | Planificateur | JSON — exportable Excel |
 | **Explication causale d'une rupture** | ✅ Aujourd'hui | Planificateur métier | JSON structuré |
-| **Comparaison de scénarios what-if** | ✅ Aujourd'hui | Décideur SC | JSON |
+| **Analyses de scénario sur périmètre activé** | ✅ Selon version déployée | Décideur SC | JSON |
 | **Rapport d'audit Markdown** (synthèse humainement lisible) | 🛠 Planifié — voir §5.5 | Directeur SC / audit | Markdown / PDF |
 | **Recommandations agent IA** (décisions proposées) | 🛠 Planifié | Décideur SC | Rapport + flux push vers ERP |
 
@@ -341,7 +342,7 @@ Rupture : SKU-0042 sur DC-PARIS, 25/04/2026, magnitude 120 EA
 
 **Pourquoi c'est important** : un planificateur peut valider (ou contester) chaque étape de la chaîne. Pas de boîte noire. C'est un principe non négociable (voir `CONTRIBUTING.md` §Explicit over magic).
 
-### 5.4 Comparer un scénario what-if au baseline
+### 5.4 Comparer un scénario au baseline (si cette surface est activée)
 
 Cas typique : *"Si on accélère la PO 4500123456-10 de 3 jours, que se passe-t-il ?"*
 
@@ -361,7 +362,7 @@ Format prévu (voir `docs/SPEC-VALIDATION-HARNESS.md` §4) : un document Markdow
 - Période couverte, scénario, événements déclencheurs.
 - Top 5 ruptures détectées, avec la chaîne causale résumée.
 - Top 5 recommandations d'action (avec priorité et échéance).
-- Scénarios what-if comparés au baseline.
+- Scénarios comparés au baseline quand cette surface est activée et validée.
 - Zones d'incertitude (où le moteur signale une donnée douteuse ou une règle métier non résolue).
 
 Cadence recommandée : un audit quotidien (le matin, après ingestion de nuit) ou hebdomadaire (vendredi avant S&OP).
@@ -404,7 +405,7 @@ Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 | Consultation des ruptures du jour | Quotidienne | 10 min | Planificateur |
 | Revue des recommandations agent IA | Quotidienne | 20 min | Planificateur |
 | Audit Markdown par la direction | Hebdomadaire | 30 min | Directeur SC |
-| Analyse what-if sur décisions critiques | À la demande | Variable | Équipe S&OP |
+| Analyse de scénario sur décisions critiques | À la demande | Variable | Équipe S&OP |
 | Revue de la qualité des données (DQ) | Hebdomadaire | 30 min | IT + métier |
 | Comité pilote Ootils | Bimensuel | 1 h | Sponsor + équipe |
 
@@ -417,7 +418,7 @@ Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 | Terme | Définition |
 |-------|------------|
 | **external_id** | Votre code métier ERP (ex: SAP `MATNR`). Clé universelle entre vos systèmes et Ootils. |
-| **Scénario** | Version de votre plan. Le baseline = état courant. Un fork = variante what-if. |
+| **Scénario** | Version de votre plan. Le baseline = état courant. Une variante = branche de simulation quand cette surface est activée. |
 | **Calc run** | Une exécution du moteur de calcul. Chaque run a un identifiant unique traçable. |
 | **Projection (PI)** | Projected Inventory — stock projeté par bucket temporel. |
 | **Shortage** | Rupture détectée : moment où la projection passe sous 0 (stockout) ou sous le stock de sécurité. |
@@ -482,7 +483,7 @@ R : `docker-compose down -v` supprime les volumes (⚠️ perte de données). Pu
 
 | Ressource | Où |
 |-----------|-----|
-| Documentation API interactive | `http://<votre-serveur>:8000/docs` |
+| Documentation API interactive | `/docs` uniquement si explicitement réactivé en environnement contrôlé |
 | Documentation technique (référence) | `docs/SPEC-INTERFACES.md` |
 | Stratégie d'intégration | `docs/SPEC-INTEGRATION-STRATEGY.md` |
 | Spec validation & audit | `docs/SPEC-VALIDATION-HARNESS.md` |

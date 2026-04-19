@@ -1,8 +1,9 @@
 # Ootils Core — Specification Opérationnelle de l'UI Static-Data
 
 > Version 1.0 — 2026-04-18
-> Statut : **SPÉCIFICATION** — une partie est `[PROPOSED]` (non présente dans le code aujourd'hui) et doit être livrée avant que l'UI ne soit consommable.
+> Statut : **SPÉCIFICATION CIBLE** — ce document décrit une surface UI non livrée à date. Il ne doit pas être lu comme une preuve d'existence d'une UI dans le runtime actuel.
 > Audience : équipe front-end (stack React Admin / Vite / TS), équipe back-end (contrats REST à ajouter), product owner, reviewers doctrine.
+> Document de cible produit : aucune existence d'UI ne doit être inférée de cette spécification.
 
 ---
 
@@ -10,11 +11,11 @@
 
 ### 1.1 La doctrine corrigée
 
-> **L'UI d'Ootils existe pour la curation des données maîtres — jamais pour la décision opérationnelle.**
+> **Si une UI Ootils est livrée, son seul périmètre légitime en v1 sera la curation des données maîtres, jamais la décision opérationnelle.**
 
 Les agents IA et les intégrations ERP pilotent la surface de décision (simulate, explain, recommendations, events). Les humains qui entrent dans l'UI viennent corriger un `lead_time_days` manquant, archiver un fournisseur obsolète, résoudre une issue DQ — rien de plus. Toute feature proposée qui *déplace la décision dans un écran* (dashboard d'alertes, what-if visuel, approbation de planning) est hors-doctrine et doit être refusée en revue.
 
-### 1.2 Diffs à committer sur la doctrine
+### 1.2 Proposition de doctrine à arbitrer avant implémentation
 
 #### `CONTRIBUTING.md` — remplacer lignes 61-62
 
@@ -28,7 +29,7 @@ Les agents IA et les intégrations ERP pilotent la surface de décision (simulat
 +recommendations, what-if visualizers) — those belong to agents and integrated systems.
 ```
 
-*Justification à committer* : la règle originelle était défensive contre la dérive "Kinaxis-with-AI". Six mois plus tard, le gap opérationnel est clair : sans UI de curation, chaque correction de master data devient un ticket IT ou un `curl POST /v1/ingest/items`, ce qui tue l'adoption pilote. La règle est reformulée pour interdire la dérive (*UI never for decisions*) tout en autorisant le minimum vital (*UI only for curation*).
+*Justification si cette doctrine est validée* : la règle originelle était défensive contre la dérive "Kinaxis-with-AI". Six mois plus tard, le gap opérationnel est clair : sans UI de curation, chaque correction de master data devient un ticket IT ou un `curl POST /v1/ingest/items`, ce qui tue l'adoption pilote. La règle est reformulée pour interdire la dérive (*UI never for decisions*) tout en autorisant le minimum vital (*UI only for curation*).
 
 #### `VISION.md` — remplacer lignes 98-99
 

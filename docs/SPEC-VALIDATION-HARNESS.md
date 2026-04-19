@@ -1,7 +1,7 @@
 # Ootils Core — Spécification Opérationnelle du Harnais de Validation Business
 
 > Version 1.0 — 2026-04-18
-> Statut : **REFERENCE OPÉRATIONNELLE** (`[PROPOSED]` sur l'essentiel — la couche 1 existe dans `tests/`, les couches 2, 3 et 3.5 sont à construire)
+> Statut : **BLUEPRINT OPÉRATIONNEL / CIBLE D'IMPLÉMENTATION** — seule la couche 1 existe aujourd'hui dans `tests/`. Les couches 2, 3 et 3.5 décrites ici sont des cibles à construire.
 > Audiences : (a) ingénieurs qui étendent le moteur, (b) SC practitioners qui écrivent des scénarios, (c) AI eng qui étendent la suite agent, (d) planificateurs qui auditent des runs post-hoc.
 > Ce document prime sur `docs/QC-*.md` et `docs/DEMO-M7-*.md` pour toute question de contrat sur la manière dont le moteur est validé.
 
