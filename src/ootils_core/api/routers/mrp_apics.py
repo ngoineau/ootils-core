@@ -1,10 +1,15 @@
 """
 API Router for APICS-compliant MRP endpoints.
 
+⚠️  DEPRECATION NOTICE (2026-04-28):
+    POST /v1/mrp/apics/run is deprecated. Use POST /v1/mrp/run with apics_mode=true instead.
+    This endpoint will be removed in a future release.
+
 Endpoints:
-- POST /v1/mrp/apics/run – Full multi-level APICS MRP run
+- POST /v1/mrp/apics/run – [DEPRECATED] Full multi-level APICS MRP run
 - POST /v1/mrp/consumption – Forecast consumption
 - POST /v1/mrp/lot-sizing – Lot sizing calculation
+- GET /v1/mrp/apics/llc – Low-Level Code calculation
 """
 
 from __future__ import annotations
@@ -154,12 +159,17 @@ async def run_mrp_apics(
     db: Connection = Depends(get_db),
 ):
     """
-    Execute a full APICS-compliant multi-level MRP run.
-
+    [DEPRECATED] Execute a full APICS-compliant multi-level MRP run.
+    
+    ⚠️  DEPRECATED: Use POST /v1/mrp/run with apics_mode=true instead.
+    
     Processes items from LLC 0 (finished goods) through LLC N (raw materials),
     consuming forecast, calculating gross-to-net, applying lot sizing and time fences,
     and exploding dependent demand through the BOM.
     """
+    logger.warning(
+        "DEPRECATED: /v1/mrp/apics/run called. Use /v1/mrp/run with apics_mode=true instead."
+    )
     try:
         # Parse scenario
         scenario_id = BASELINE_SCENARIO_ID

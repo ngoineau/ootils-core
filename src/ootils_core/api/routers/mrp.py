@@ -1,21 +1,24 @@
 """
-POST /v1/mrp/run — Time-phased MRP explosion with graph integration.
+POST /v1/mrp/run — Unified MRP endpoint with optional APICS mode.
 
-Runs MRP for a given item/location, creates PlannedSupply nodes,
-wires them into the graph, and triggers propagation.
+Runs MRP for a given item/location:
+- Default (apics_mode=False): Single-level MRP with graph integration
+- APICS mode (apics_mode=True): Full multi-level APICS MRP with BOM explosion,
+  forecast consumption, and time-phased planning.
 """
 from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
@@ -30,14 +33,28 @@ router = APIRouter(prefix="/v1/mrp", tags=["mrp"])
 # ─────────────────────────────────────────────────────────────
 
 class MrpRunRequest(BaseModel):
+    """Request for MRP run with optional APICS mode."""
     item_id: str
     location_id: str
     horizon_days: int = 90
     scenario_id: Optional[str] = None  # defaults to baseline
-    clear_existing: bool = False  # if True, delete existing PlannedSupply nodes first
+    clear_existing: bool = False
+    # APICS Phase 0 options
+    apics_mode: bool = Field(
+        default=False,
+        description="Enable full APICS multi-level MRP with BOM explosion and forecast consumption"
+    )
+    bucket_grain: str = Field(default="week", pattern="^(day|week|month)$")
+    forecast_strategy: str = Field(
+        default="MAX",
+        pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$"
+    )
+    consumption_window_days: int = Field(default=7, ge=1, le=90)
+    recalculate_llc: bool = False
 
 
 class PlannedOrderOut(BaseModel):
+    """Single planned order output (simple MRP mode)."""
     node_id: UUID
     item_id: UUID
     location_id: UUID
@@ -49,6 +66,7 @@ class PlannedOrderOut(BaseModel):
 
 
 class MrpRunResponse(BaseModel):
+    """Response from MRP run (simple mode)."""
     scenario_id: UUID
     item_id: str
     location_id: str
@@ -57,8 +75,22 @@ class MrpRunResponse(BaseModel):
     message: str
 
 
+class MrpRunResponseApics(BaseModel):
+    """Response from MRP run (APICS mode)."""
+    run_id: str
+    scenario_id: str
+    status: str
+    items_processed: int
+    total_records: int
+    action_messages: int
+    nodes_created: int
+    edges_created: int
+    elapsed_ms: float
+    errors: List[str] = []
+
+
 # ─────────────────────────────────────────────────────────────
-# Helpers
+# Helpers — Simple MRP
 # ─────────────────────────────────────────────────────────────
 
 def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
@@ -212,7 +244,7 @@ def _clear_existing_planned_supply(
 
 
 # ─────────────────────────────────────────────────────────────
-# POST /v1/mrp/run
+# POST /v1/mrp/run — Unified endpoint
 # ─────────────────────────────────────────────────────────────
 
 @router.post(
@@ -222,19 +254,41 @@ def _clear_existing_planned_supply(
     description=(
         "Time-phased MRP explosion for a given item/location. "
         "Creates PlannedSupply nodes for shortage buckets, wires them via 'replenishes' edges, "
-        "and emits ingestion_complete events to trigger graph propagation."
+        "and emits ingestion_complete events to trigger graph propagation.\n\n"
+        "**APICS Mode:** Set `apics_mode=true` for full multi-level MRP with BOM explosion, "
+        "forecast consumption, and time-phased planning. Returns extended response format."
     ),
 )
 async def run_mrp(
     body: MrpRunRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
-) -> MrpRunResponse:
+) -> MrpRunResponse | MrpRunResponseApics:
     """
-    Time-phased MRP: scan PI shortage buckets, create PlannedSupply nodes,
-    wire them into the graph, and trigger propagation via events.
+    Unified MRP endpoint with optional APICS mode.
+    
+    - **Simple mode (apics_mode=False):** Single-level MRP for one item/location
+    - **APICS mode (apics_mode=True):** Multi-level MRP with BOM explosion, forecast consumption
     """
+    
+    # Resolve scenario_id (default baseline)
+    scenario_uuid = _resolve_scenario_uuid(db, body.scenario_id)
+    
+    if body.apics_mode:
+        # Delegate to APICS engine
+        return await _run_apics_mrp(body, db, scenario_uuid)
+    else:
+        # Use simple single-level MRP
+        return await _run_simple_mrp(body, db, scenario_uuid)
 
+
+async def _run_simple_mrp(
+    body: MrpRunRequest,
+    db: psycopg.Connection,
+    scenario_uuid: UUID,
+) -> MrpRunResponse:
+    """Execute simple single-level MRP (legacy behavior)."""
+    
     # 1. Resolve item/location UUIDs
     item_uuid = _resolve_item_uuid(db, body.item_id)
     if item_uuid is None:
@@ -250,16 +304,13 @@ async def run_mrp(
             detail=f"Location '{body.location_id}' not found",
         )
 
-    # 2. Resolve scenario_id (default baseline)
-    scenario_uuid = _resolve_scenario_uuid(db, body.scenario_id)
-
-    # 3. Get planning params (lead_time, min_order_qty, safety_stock_qty)
+    # 2. Get planning params (lead_time, min_order_qty, safety_stock_qty)
     params = _get_planning_params(db, item_uuid, location_uuid)
     lead_time_days: int = params["lead_time_total_days"]
     min_order_qty: Decimal | None = params["min_order_qty"]
     safety_stock_qty: Decimal | None = params["safety_stock_qty"]
 
-    # 4. Get PI nodes in horizon
+    # 3. Get PI nodes in horizon
     pi_nodes = _get_pi_nodes_in_horizon(db, item_uuid, location_uuid, scenario_uuid, body.horizon_days)
 
     if not pi_nodes:
@@ -276,7 +327,7 @@ async def run_mrp(
             message="No projected inventory buckets found in horizon. No planned orders created.",
         )
 
-    # 5. If clear_existing: soft-delete existing PlannedSupply nodes + edges
+    # 4. If clear_existing: soft-delete existing PlannedSupply nodes + edges
     if body.clear_existing:
         _clear_existing_planned_supply(db, item_uuid, location_uuid, scenario_uuid)
         logger.info(
@@ -284,7 +335,7 @@ async def run_mrp(
             body.item_id, body.location_id, scenario_uuid,
         )
 
-    # 6. Iterate PI nodes and create PlannedSupply nodes for shortages
+    # 5. Iterate PI nodes and create PlannedSupply nodes for shortages
     today = date.today()
     planned_orders: list[PlannedOrderOut] = []
 
@@ -387,3 +438,91 @@ async def run_mrp(
             f"over {body.horizon_days}-day horizon."
         ),
     )
+
+
+async def _run_apics_mrp(
+    body: MrpRunRequest,
+    db: psycopg.Connection,
+    scenario_uuid: UUID,
+) -> MrpRunResponseApics:
+    """Execute full APICS multi-level MRP."""
+    from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
+    
+    start_time = time.monotonic()
+    
+    try:
+        # Resolve location UUID
+        location_uuid = _resolve_location_uuid(db, body.location_id)
+        if location_uuid is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Location '{body.location_id}' not found",
+            )
+        
+        # Resolve item IDs if provided
+        item_ids = None
+        if body.item_id:
+            item_uuid = _resolve_item_uuid(db, body.item_id)
+            if item_uuid is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Item '{body.item_id}' not found",
+                )
+            item_ids = [item_uuid]
+        
+        config = MrpRunConfig(
+            scenario_id=scenario_uuid,
+            location_id=location_uuid,
+            item_ids=item_ids,
+            horizon_days=body.horizon_days,
+            bucket_grain=body.bucket_grain,
+            start_date=date.today(),
+            recalculate_llc=body.recalculate_llc,
+            forecast_strategy=body.forecast_strategy,
+            consumption_window_days=body.consumption_window_days,
+        )
+        
+        engine = MrpApicsEngine(db)
+        result = engine.run(config)
+        
+        db.commit()
+        
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        
+        logger.info(
+            "mrp.run.apics scenario=%s items=%d records=%d nodes=%d edges=%d elapsed=%.2fms",
+            scenario_uuid, result.items_processed, result.total_records,
+            result.nodes_created, result.edges_created, elapsed_ms,
+        )
+        
+        return MrpRunResponseApics(
+            run_id=str(result.run_id),
+            scenario_id=str(result.scenario_id),
+            status=result.status,
+            items_processed=result.items_processed,
+            total_records=result.total_records,
+            action_messages=result.action_messages,
+            nodes_created=result.nodes_created,
+            edges_created=result.edges_created,
+            elapsed_ms=elapsed_ms,
+            errors=result.errors,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("MRP APICS run failed: %s", e)
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        return MrpRunResponseApics(
+            run_id=str(uuid4()),
+            scenario_id=str(scenario_uuid),
+            status="failed",
+            items_processed=0,
+            total_records=0,
+            action_messages=0,
+            nodes_created=0,
+            edges_created=0,
+            elapsed_ms=elapsed_ms,
+            errors=[str(e)],
+        )
