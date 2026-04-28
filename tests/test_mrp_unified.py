@@ -22,6 +22,14 @@ def client():
         yield c
 
 
+# Shared test token matching .env configuration
+TEST_TOKEN = "dev-token"
+
+# Test data IDs matching seed_demo_data.py output
+TEST_ITEM_ID = "PUMP-01"  # Main assembly item
+TEST_LOCATION_ID = "DC-ATL"  # Primary distribution center
+
+
 class TestMrpRunSimpleMode:
     """Test simple single-level MRP (apics_mode=False)."""
     
@@ -30,11 +38,11 @@ class TestMrpRunSimpleMode:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "horizon_days": 90,
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -47,12 +55,12 @@ class TestMrpRunSimpleMode:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": False,
                 "clear_existing": True,
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -68,14 +76,14 @@ class TestMrpRunApicsMode:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": True,
                 "horizon_days": 90,
                 "bucket_grain": "week",
                 "forecast_strategy": "MAX",
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -91,13 +99,13 @@ class TestMrpRunApicsMode:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": True,
                 "recalculate_llc": True,
                 "horizon_days": 180,
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 200
 
@@ -110,12 +118,12 @@ class TestMrpRunValidation:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": True,
                 "bucket_grain": "invalid",  # Must be day|week|month
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 422
     
@@ -124,12 +132,12 @@ class TestMrpRunValidation:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": True,
                 "forecast_strategy": "INVALID",
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 422
     
@@ -138,12 +146,12 @@ class TestMrpRunValidation:
         response = client.post(
             "/v1/mrp/run",
             json={
-                "item_id": "ITEM-001",
-                "location_id": "LOC-001",
+                "item_id": TEST_ITEM_ID,
+                "location_id": TEST_LOCATION_ID,
                 "apics_mode": True,
                 "consumption_window_days": 0,  # Too low
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         assert response.status_code == 422
 
@@ -159,7 +167,7 @@ class TestDeprecatedEndpoint:
                 "location_id": str(uuid4()),
                 "horizon_days": 90,
             },
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
         )
         # Should still work (backward compatibility)
         assert response.status_code in [200, 404, 500]  # 404/500 OK if no data

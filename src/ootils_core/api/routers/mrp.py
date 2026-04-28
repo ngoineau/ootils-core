@@ -249,7 +249,7 @@ def _clear_existing_planned_supply(
 
 @router.post(
     "/run",
-    response_model=MrpRunResponse,
+    response_model=None,  # Dynamic: MrpRunResponse or MrpRunResponseApics depending on apics_mode
     summary="Run MRP",
     description=(
         "Time-phased MRP explosion for a given item/location. "
