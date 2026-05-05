@@ -15,14 +15,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from datetime import date, timedelta
-from decimal import Decimal
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 SEED_SCRIPT = Path(__file__).parents[2] / "scripts" / "seed_demo_data.py"
 
