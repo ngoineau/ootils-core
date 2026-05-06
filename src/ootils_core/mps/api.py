@@ -7,12 +7,13 @@ Endpoints:
   GET  /v1/mps/nodes/{mps_id}    — Get specific MPS node
   POST /v1/mps/capacity-check    — Check capacity feasibility for MPS nodes
   GET  /v1/mps/{id}/suggest-adjustments — Get adjustment suggestions
+  POST /v1/mps/{id}/approve        — Approve an MPS node for release
   POST /v1/mps/{id}/promote-to-mrp — Promote MPS to MRP and trigger BOM explosion
 """
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -760,6 +761,137 @@ async def suggest_adjustments(
     ]
     
     return suggestions_out
+
+
+# ─────────────────────────────────────────────────────────────
+# POST /v1/mps/{mps_id}/approve
+# ─────────────────────────────────────────────────────────────
+
+class ApproveMPSRequest(BaseModel):
+    """Request to approve an MPS node for release to MRP."""
+    reviewed_by: Optional[str] = Field(default=None, description="Reviewer identifier; defaults to approver/token")
+    approved_by: Optional[str] = Field(default=None, description="Approver identifier; defaults to auth token")
+    notes: Optional[str] = Field(default=None, description="Optional approval notes")
+
+
+class ApproveMPSResponse(BaseModel):
+    """Response from approve endpoint."""
+    mps_id: UUID
+    previous_status: str
+    status: str
+    reviewed_by: Optional[str]
+    approved_by: Optional[str]
+    reviewed_at: Optional[datetime]
+    approved_at: Optional[datetime]
+    notes: Optional[str]
+
+
+@router.post(
+    "/{mps_id}/approve",
+    response_model=ApproveMPSResponse,
+    summary="Approve MPS node",
+    description=(
+        "Approve an MPS node so it can be promoted to MRP.\\n\\n"
+        "Freshly aggregated MPS nodes are created as DRAFT. This endpoint performs "
+        "the operational approval step required before `/promote-to-mrp`. If the node "
+        "is DRAFT, it records both review and approval audit fields in one call; if it "
+        "is REVIEWED, it records approval only. APPROVED is idempotent. RELEASED is terminal."
+    ),
+)
+async def approve_mps_node(
+    mps_id: UUID,
+    body: ApproveMPSRequest,
+    db: psycopg.Connection = Depends(get_db),
+    token: str = Depends(require_auth),
+) -> ApproveMPSResponse:
+    """Approve an MPS node for MRP promotion."""
+    row = db.execute(
+        """
+        SELECT mps_id, status, reviewed_by, approved_by, reviewed_at, approved_at, notes
+        FROM mps_nodes
+        WHERE mps_id = %s AND active = TRUE
+        """,
+        (mps_id,),
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"MPS node '{mps_id}' not found or inactive",
+        )
+
+    previous_status = row["status"]
+    if previous_status == "RELEASED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Released MPS nodes cannot be approved again",
+        )
+
+    if previous_status not in {"DRAFT", "REVIEWED", "APPROVED"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"MPS node cannot be approved from status {previous_status}",
+        )
+
+    approver = body.approved_by or token
+    reviewer = body.reviewed_by or row["reviewed_by"] or approver
+    now = datetime.now(timezone.utc)
+    notes = body.notes if body.notes is not None else row["notes"]
+
+    if previous_status == "APPROVED":
+        if body.notes is not None:
+            db.execute(
+                "UPDATE mps_nodes SET notes = %s, updated_at = %s WHERE mps_id = %s",
+                (notes, now, mps_id),
+            )
+        return ApproveMPSResponse(
+            mps_id=mps_id,
+            previous_status=previous_status,
+            status="APPROVED",
+            reviewed_by=row["reviewed_by"],
+            approved_by=row["approved_by"],
+            reviewed_at=row["reviewed_at"],
+            approved_at=row["approved_at"],
+            notes=notes,
+        )
+
+    reviewed_by = reviewer if previous_status == "DRAFT" else row["reviewed_by"]
+    reviewed_at = now if previous_status == "DRAFT" else row["reviewed_at"]
+
+    db.execute(
+        """
+        UPDATE mps_nodes
+        SET status = %s,
+            reviewed_by = %s,
+            reviewed_at = %s,
+            approved_by = %s,
+            approved_at = %s,
+            notes = %s,
+            updated_at = %s
+        WHERE mps_id = %s
+        """,
+        (
+            "APPROVED",
+            reviewed_by,
+            reviewed_at,
+            approver,
+            now,
+            notes,
+            now,
+            mps_id,
+        ),
+    )
+
+    return ApproveMPSResponse(
+        mps_id=mps_id,
+        previous_status=previous_status,
+        status="APPROVED",
+        reviewed_by=reviewed_by,
+        approved_by=approver,
+        reviewed_at=reviewed_at,
+        approved_at=now,
+        notes=notes,
+    )
 
 
 # ─────────────────────────────────────────────────────────────

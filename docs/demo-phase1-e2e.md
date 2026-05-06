@@ -5,11 +5,12 @@ This demo proves the user-facing Phase 1 planning chain through real FastAPI rou
 1. Seed deterministic finished-good, plant, historical demand, work-center, routing, and operation data.
 2. Generate statistical demand forecast: `POST /v1/demand/forecast/generate`.
 3. Aggregate forecast into MPS: `POST /v1/mps/aggregate-demand`.
-4. Approve the MPS node for deterministic demo setup, then promote to MRP planned supply: `POST /v1/mps/{mps_id}/promote-to-mrp`.
-5. Calculate CRP load from released planned supply: `POST /v1/crp/calculate`.
-6. Check ATP for a customer quantity/date request: `POST /v1/atp/check`.
+4. Approve the MPS node: `POST /v1/mps/{mps_id}/approve`.
+5. Promote to MRP planned supply: `POST /v1/mps/{mps_id}/promote-to-mrp`.
+6. Calculate CRP load from released planned supply: `POST /v1/crp/calculate`.
+7. Check ATP for a customer quantity/date request: `POST /v1/atp/check`.
 
-The approval step is currently SQL-driven because an approval workflow endpoint is outside the current scope. All planning calculations still go through the real API routers.
+All planning workflow steps run through real API routers.
 
 ## Run on VM 201 with disposable DB
 
@@ -43,6 +44,10 @@ Use `--json` for compact machine-readable output.
     "mps_nodes_created": 3,
     "total_demand": "...",
     "first_mps_id": "..."
+  },
+  "approval": {
+    "previous_status": "DRAFT",
+    "status": "APPROVED"
   },
   "mrp_promotion": {
     "status": "RELEASED",
