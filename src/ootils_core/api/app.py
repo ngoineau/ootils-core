@@ -19,8 +19,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ootils_core.api.auth import _expected_token
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import bom, calc, calendars, dq, events, explain, ghosts, graph, ingest, issues, mrp, mrp_apics, planning_params, projection, rccp, scenarios, simulate
+from ootils_core.api.routers import bom, calc, calendars, dq, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, planning_params, projection, rccp, scenarios, simulate
 from ootils_core.api.routers.graph import nodes_router
+from ootils_core.mps import router as mps_router
+from ootils_core.atp import atp_router
+from ootils_core.crp import crp_router
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +235,10 @@ def create_app() -> FastAPI:
     application.include_router(calc.router)
     application.include_router(mrp.router)
     application.include_router(mrp_apics.router)
+    application.include_router(forecasting.router)
+    application.include_router(mps_router)
+    application.include_router(atp_router)
+    application.include_router(crp_router)
 
     @application.exception_handler(Exception)
     async def generic_exception_handler(request, exc: Exception) -> JSONResponse:
