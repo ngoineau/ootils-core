@@ -146,14 +146,15 @@ def test_phase1_forecast_mps_crp_atp_rest_e2e(api_client, auth, seeded_db):
     assert Decimal(str(mps["total_demand"])) > 0
     mps_id = mps["mps_node_ids"][0]
 
-    # Promotion requires an approved MPS node; approval workflow endpoint is not
-    # part of the current scope, so use direct SQL setup for deterministic E2E.
-    with psycopg.connect(seeded_db, row_factory=dict_row) as conn:
-        conn.execute(
-            "UPDATE mps_nodes SET status = 'APPROVED', approved_at = now() WHERE mps_id = %s",
-            (mps_id,),
-        )
-        conn.commit()
+    approve_resp = api_client.post(
+        f"/v1/mps/{mps_id}/approve",
+        headers=auth,
+        json={"approved_by": "integration-test", "notes": "Phase 1 E2E approval"},
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+    approved = approve_resp.json()
+    assert approved["previous_status"] == "DRAFT"
+    assert approved["status"] == "APPROVED"
 
     promote_resp = api_client.post(
         f"/v1/mps/{mps_id}/promote-to-mrp",

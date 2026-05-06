@@ -160,12 +160,10 @@ def run_demo() -> dict:
         })
         mps_id = mps["mps_node_ids"][0]
 
-        with psycopg.connect(database_url, row_factory=dict_row) as conn:
-            conn.execute(
-                "UPDATE mps_nodes SET status = 'APPROVED', approved_at = now() WHERE mps_id = %s",
-                (mps_id,),
-            )
-            conn.commit()
+        approval = _post(client, f"/v1/mps/{mps_id}/approve", auth, {
+            "approved_by": "phase1-demo",
+            "notes": "Approved by Phase 1 demo flow",
+        })
 
         promoted = _post(client, f"/v1/mps/{mps_id}/promote-to-mrp", auth, {
             "explode_components": False,
@@ -205,6 +203,10 @@ def run_demo() -> dict:
             "mps_nodes_created": mps["mps_nodes_created"],
             "total_demand": mps["total_demand"],
             "first_mps_id": mps_id,
+        },
+        "approval": {
+            "previous_status": approval["previous_status"],
+            "status": approval["status"],
         },
         "mrp_promotion": {
             "status": promoted["status"],
