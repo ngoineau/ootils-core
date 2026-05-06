@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import List, Optional
 from uuid import UUID
 
@@ -146,6 +147,216 @@ class NodeTypeTemporalPolicy:
     active: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# Forecasting models (FORECAST-001)
+# ---------------------------------------------------------------------------
+
+
+class ForecastMethod:
+    """Enumeration of supported statistical forecasting methods."""
+    MA = "MA"  # Moving Average
+    EXP_SMOOTHING = "EXP_SMOOTHING"  # Exponential Smoothing
+    CROSTON = "CROSTON"  # Croston's method for intermittent demand
+    SEASONAL = "SEASONAL"  # Seasonal decomposition
+
+
+@dataclass
+class Forecast:
+    """
+    A statistical forecast for a specific item/location over a time horizon.
+    Groups multiple ForecastValue records at different granularities.
+    """
+    forecast_id: UUID
+    item_id: UUID
+    location_id: UUID
+    scenario_id: UUID
+    horizon_start: date
+    horizon_end: date
+    granularity: str  # 'daily' | 'weekly' | 'monthly'
+    method: str  # ForecastMethod enum value
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class ForecastValue:
+    """
+    A single forecasted quantity for a specific date within a Forecast.
+    Represents one bucket of the forecast horizon.
+    """
+    value_id: UUID
+    forecast_id: UUID
+    date: date
+    quantity: Decimal
+    method: str  # ForecastMethod used for this value
+    confidence_interval_lower: Optional[Decimal] = None
+    confidence_interval_upper: Optional[Decimal] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class ForecastAdjustment:
+    """
+    A manual or programmatic adjustment applied to a forecast.
+    Used to capture overrides for promotions, seasonality, or expert judgment.
+    """
+    adjustment_id: UUID
+    forecast_id: UUID
+    adjustment_type: str  # 'manual' | 'promotion' | 'seasonality' | 'event'
+    delta: Decimal  # Absolute adjustment (positive or negative)
+    value_id: Optional[UUID] = None  # NULL if adjustment applies to entire forecast
+    delta_percent: Optional[Decimal] = None  # Optional percentage adjustment
+    reason: Optional[str] = None
+    user_id: Optional[str] = None
+    applied_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# MPS models (MPS-001)
+# ---------------------------------------------------------------------------
+
+
+class MPSStatus(str, Enum):
+    """Status of an MPS node in the approval workflow."""
+    DRAFT = "DRAFT"           # Initially created, can be modified
+    REVIEWED = "REVIEWED"     # Under review, modifications require justification
+    APPROVED = "APPROVED"     # Approved for execution
+    RELEASED = "RELEASED"     # Released to MRP for supply planning
+
+
+@dataclass
+class MPSNode:
+    """
+    Master Production Schedule node.
+    
+    Represents the consolidated demand plan for a finished good at a specific
+    location and time bucket. Serves as the bridge between demand forecasting
+    and supply planning (MRP).
+    """
+    mps_id: UUID
+    item_id: UUID
+    location_id: UUID
+    scenario_id: UUID
+    time_bucket: str
+    time_bucket_start: date
+    time_bucket_end: date
+    time_grain: str = "weekly"  # 'daily' | 'weekly' | 'monthly'
+    
+    # Source demand quantities
+    forecast_quantity: Decimal = Decimal("0")
+    sales_orders_quantity: Decimal = Decimal("0")
+    total_demand: Decimal = Decimal("0")
+    
+    # Planning output
+    planned_quantity: Decimal = Decimal("0")
+    status: MPSStatus = MPSStatus.DRAFT
+    
+    # Audit trail
+    created_by: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    released_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    released_at: Optional[datetime] = None
+    
+    # Metadata
+    notes: Optional[str] = None
+    active: bool = True
+    
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    def compute_total_demand(self) -> Decimal:
+        """Compute total demand from forecast and sales orders."""
+        self.total_demand = self.forecast_quantity + self.sales_orders_quantity
+        return self.total_demand
+    
+    def can_transition_to(self, new_status: MPSStatus) -> tuple[bool, str]:
+        """
+        Validate status transition.
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        transitions = {
+            MPSStatus.DRAFT: {MPSStatus.REVIEWED, MPSStatus.DRAFT},
+            MPSStatus.REVIEWED: {MPSStatus.APPROVED, MPSStatus.DRAFT},
+            MPSStatus.APPROVED: {MPSStatus.RELEASED, MPSStatus.REVIEWED},
+            MPSStatus.RELEASED: set(),  # Terminal state
+        }
+        
+        if new_status not in transitions.get(self.status, set()):
+            return False, f"Cannot transition from {self.status.value} to {new_status.value}"
+        
+        return True, ""
+    
+    def transition_to(self, new_status: MPSStatus, user: str) -> tuple[bool, str]:
+        """
+        Transition to a new status with audit trail.
+        
+        Args:
+            new_status: The target status
+            user: The user performing the transition
+            
+        Returns:
+            Tuple of (success, error_message)
+        """
+        is_valid, error = self.can_transition_to(new_status)
+        if not is_valid:
+            return False, error
+        
+        now = datetime.now(timezone.utc)
+        
+        if new_status == MPSStatus.REVIEWED:
+            self.reviewed_by = user
+            self.reviewed_at = now
+        elif new_status == MPSStatus.APPROVED:
+            self.approved_by = user
+            self.approved_at = now
+        elif new_status == MPSStatus.RELEASED:
+            self.released_by = user
+            self.released_at = now
+        
+        self.status = new_status
+        self.updated_at = now
+        return True, ""
+
+
+@dataclass
+class MPSPlannedForEdge:
+    """
+    Edge linking MPSNode to Item.
+    
+    Represents the 'mps_planned_for' relationship: an MPS node plans
+    production/distribution for a specific item.
+    """
+    edge_id: UUID
+    mps_node_id: UUID
+    item_id: UUID
+    scenario_id: UUID
+    active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class MPSSuppliesEdge:
+    """
+    Edge linking MPSNode to PlannedSupply (future MRP output).
+    
+    Represents the 'mps_supplies' relationship: when MRP creates planned
+    supplies, they are pegged to the MPS node that triggered them.
+    """
+    edge_id: UUID
+    mps_node_id: UUID
+    planned_supply_node_id: UUID
+    scenario_id: UUID
+    quantity_pegged: Decimal = Decimal("0")
+    active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
