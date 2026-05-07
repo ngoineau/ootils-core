@@ -53,6 +53,18 @@ def run_phase1_demo(database_url: str, token: str) -> dict:
     operation_id = uuid4()
 
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        # Keep repeated live demo runs deterministic for CRP metrics. Previous
+        # demo supplies are not business data, so exclude them from future CRP
+        # calculations before seeding the next unique item/location pair.
+        conn.execute(
+            """
+            UPDATE planned_supply ps
+            SET status = 'CANCELLED', active = false
+            FROM items i
+            WHERE ps.item_id = i.item_id
+              AND i.external_id LIKE 'DEMO-FG-%'
+            """
+        )
         conn.execute(
             """
             INSERT INTO items (item_id, name, item_type, uom, status, external_id)
@@ -160,6 +172,7 @@ def run_phase1_demo(database_url: str, token: str) -> dict:
 
         crp = _post(client, "/v1/crp/calculate", auth, {
             "horizon_days": 30,
+            "work_center_ids": [str(work_center_id)],
             "scenario_id": BASELINE_SCENARIO_ID,
         })
 
