@@ -187,6 +187,29 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
 
     app.dependency_overrides.clear()
 
+    requested_qty = Decimal(str(atp["requested_quantity"]))
+    available_qty = Decimal(str(atp["quantity_available"]))
+    is_promiseable = available_qty >= requested_qty
+    risk_flags: list[str] = []
+    if approval["status"] != "APPROVED":
+        risk_flags.append("mps_not_approved")
+    if promoted["status"] != "RELEASED":
+        risk_flags.append("supply_not_released")
+    if len(crp["load_profiles"]) < 1:
+        risk_flags.append("capacity_not_proven")
+    if not is_promiseable:
+        risk_flags.append("atp_shortfall")
+
+    confidence = "high" if is_promiseable and not risk_flags else "medium" if is_promiseable else "low"
+    promise_status = "promise_available" if is_promiseable else "shortage"
+    recommended_action = "Promise 5 EA on requested date" if is_promiseable else "Do not promise; run shortage recovery"
+    executive_summary = (
+        "Customer request can be promised: forecast demand was converted to approved MPS, "
+        "released planned supply exists, capacity is represented in CRP, and ATP covers the requested quantity."
+        if is_promiseable
+        else "Customer request cannot be fully promised from current ATP; planner should review supply and capacity recovery options."
+    )
+
     return {
         "status": "ok",
         "item_external_id": item_external_id,
@@ -218,6 +241,13 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
             "requested_quantity": atp["requested_quantity"],
             "quantity_available": atp["quantity_available"],
             "buckets": len(atp["buckets"]),
+        },
+        "decision": {
+            "promise_status": promise_status,
+            "recommended_action": recommended_action,
+            "confidence": confidence,
+            "risk_flags": risk_flags,
+            "executive_summary": executive_summary,
         },
         "trace": {
             "item_id": str(item_id),
