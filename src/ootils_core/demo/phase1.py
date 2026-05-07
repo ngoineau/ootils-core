@@ -219,6 +219,28 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
             "quantity_available": atp["quantity_available"],
             "buckets": len(atp["buckets"]),
         },
+        "trace": {
+            "item_id": str(item_id),
+            "location_id": str(location_id),
+            "work_center_id": str(work_center_id),
+            "routing_id": str(routing_id),
+            "operation_id": str(operation_id),
+            "mps_id": mps_id,
+            "planned_supply_id": promoted.get("summary", {}).get("planned_supply_id"),
+            "crp_calculation_id": crp.get("calculation_id"),
+            "customer_request": {
+                "quantity": "5",
+                "requested_date": horizon_start.isoformat(),
+            },
+            "decision_path": [
+                {"step": "Forecast", "evidence": f"{len(forecast['values'])} buckets / {forecast['total_quantity']} EA"},
+                {"step": "MPS", "evidence": f"{mps['mps_nodes_created']} nodes / first MPS {mps_id}"},
+                {"step": "Approval", "evidence": f"{approval['previous_status']} -> {approval['status']}"},
+                {"step": "MRP", "evidence": f"planned supply {promoted.get('summary', {}).get('planned_supply_id')} released"},
+                {"step": "CRP", "evidence": f"{len(crp['load_profiles'])} load profile / calculation {crp.get('calculation_id')}"},
+                {"step": "ATP", "evidence": f"{atp['quantity_available']} available vs {atp['requested_quantity']} requested"},
+            ],
+        },
     }
 
 
