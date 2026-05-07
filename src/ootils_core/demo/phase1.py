@@ -7,6 +7,7 @@ flow can be triggered repeatedly from the demo UI.
 from __future__ import annotations
 
 import os
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -21,7 +22,7 @@ def _post(client, path: str, auth: dict[str, str], payload: dict) -> dict:
     return response.json()
 
 
-def run_phase1_demo(database_url: str, token: str) -> dict:
+def _execute_phase1_demo(database_url: str, token: str) -> dict:
     """Run the Phase 1 demo chain and return compact proof metrics."""
     import psycopg
     from fastapi.testclient import TestClient
@@ -219,6 +220,83 @@ def run_phase1_demo(database_url: str, token: str) -> dict:
             "buckets": len(atp["buckets"]),
         },
     }
+
+
+def _record_demo_run(database_url: str, result: dict, duration_ms: int, error: str | None = None) -> None:
+    """Best-effort persistence for demo run history."""
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        from psycopg.types.json import Jsonb
+
+        forecast = result.get("forecast", {})
+        mps = result.get("mps", {})
+        approval = result.get("approval", {})
+        mrp = result.get("mrp_promotion", {})
+        crp = result.get("crp", {})
+        atp = result.get("atp", {})
+
+        with psycopg.connect(database_url, row_factory=dict_row) as conn:
+            conn.execute(
+                """
+                INSERT INTO demo_runs (
+                    demo_name, status, item_external_id, location_external_id,
+                    forecast_total, forecast_buckets, mps_nodes_created, mps_total_demand,
+                    approval_status, mrp_status, planned_supplies_created,
+                    crp_planned_orders_count, crp_work_centers_count, crp_load_profiles,
+                    atp_requested_quantity, atp_quantity_available, atp_buckets,
+                    duration_ms, error, artifact
+                ) VALUES (
+                    'phase1', %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s
+                )
+                """,
+                (
+                    result.get("status", "error"),
+                    result.get("item_external_id"),
+                    result.get("location_external_id"),
+                    forecast.get("total_quantity"),
+                    forecast.get("buckets"),
+                    mps.get("mps_nodes_created"),
+                    mps.get("total_demand"),
+                    approval.get("status"),
+                    mrp.get("status"),
+                    mrp.get("planned_supplies_created"),
+                    crp.get("planned_orders_count"),
+                    crp.get("work_centers_count"),
+                    crp.get("load_profiles"),
+                    atp.get("requested_quantity"),
+                    atp.get("quantity_available"),
+                    atp.get("buckets"),
+                    duration_ms,
+                    error,
+                    Jsonb(result),
+                ),
+            )
+            conn.commit()
+    except Exception:
+        # Demo history must never break the executable demo itself.
+        return
+
+
+def run_phase1_demo(database_url: str, token: str) -> dict:
+    """Run the Phase 1 demo chain, persist history, and return proof metrics."""
+    started = time.perf_counter()
+    try:
+        result = _execute_phase1_demo(database_url, token)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        result["duration_ms"] = duration_ms
+        _record_demo_run(database_url, result, duration_ms)
+        return result
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        error_result = {"status": "error", "duration_ms": duration_ms, "error": str(exc)}
+        _record_demo_run(database_url, error_result, duration_ms, str(exc))
+        raise
 
 
 def run_phase1_demo_from_env() -> dict:
