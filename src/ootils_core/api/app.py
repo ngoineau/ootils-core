@@ -18,6 +18,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# slowapi is an optional dependency — used only when rate limiting is opted in
+# via OOTILS_RATE_LIMIT_PER_MIN. Importing inline keeps `pip install` minimal
+# for users who don't need it.
+try:
+    from slowapi import Limiter
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.util import get_remote_address
+    _SLOWAPI_AVAILABLE = True
+except ImportError:
+    _SLOWAPI_AVAILABLE = False
+
 from ootils_core.api.auth import _expected_token
 from ootils_core.api.dependencies import _get_ootils_db, get_db
 from ootils_core.api.routers import bom, calc, calendars, demo, dq, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, planning_params, projection, rccp, scenarios, simulate
@@ -69,6 +80,21 @@ def _cors_allowed_origins() -> list[str]:
     if not raw:
         return []
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _rate_limit_config() -> str | None:
+    """Return the slowapi rate-limit string from OOTILS_RATE_LIMIT_PER_MIN.
+
+    Accepts an integer (interpreted as "<N>/minute") or a raw slowapi limit
+    string like "60/minute;1000/hour". Returns None if unset → rate limiting
+    is disabled.
+    """
+    raw = os.environ.get("OOTILS_RATE_LIMIT_PER_MIN", "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return f"{raw}/minute"
+    return raw
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -205,6 +231,29 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if _api_docs_enabled() else None,
         lifespan=lifespan,
     )
+
+    # Rate limiting — disabled by default. Opt in with OOTILS_RATE_LIMIT_PER_MIN
+    # (e.g. "60" or "60/minute;1000/hour"). Per-IP via X-Forwarded-For when
+    # present, otherwise via direct client address.
+    # slowapi's SlowAPIMiddleware emits 429 responses itself; we keep its
+    # default body since a custom exception_handler is not invoked when
+    # the middleware short-circuits the request.
+    rate_limit = _rate_limit_config()
+    if rate_limit and _SLOWAPI_AVAILABLE:
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=[rate_limit],
+            headers_enabled=True,
+        )
+        application.state.limiter = limiter
+        application.add_middleware(SlowAPIMiddleware)
+        logger.info("rate_limit.enabled config=%s", rate_limit)
+    elif rate_limit and not _SLOWAPI_AVAILABLE:
+        logger.warning(
+            "OOTILS_RATE_LIMIT_PER_MIN=%s set but slowapi is not installed; "
+            "install with `pip install slowapi` to enable rate limiting.",
+            rate_limit,
+        )
 
     # CORS — disabled by default. Configure with OOTILS_CORS_ALLOWED_ORIGINS.
     cors_origins = _cors_allowed_origins()

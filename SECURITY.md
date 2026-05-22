@@ -30,12 +30,13 @@ We will acknowledge receipt within 72 hours and provide a timeline for resolutio
 - **CORS.** Disabled by default. Configure with `OOTILS_CORS_ALLOWED_ORIGINS=https://example.com,https://app.example.com`. Wildcard is intentionally not the default.
 - **Container.** The Docker runtime image runs as a non-root user (`ootils`); no secrets in image layers.
 - **Dependencies.** Pinned to known-good `major.minor` ranges (`~=` PEP 440). Dependabot proposes weekly updates for `pip`, `github-actions`, and `docker` ecosystems.
+- **Rate limiting.** Disabled by default. Enable with `OOTILS_RATE_LIMIT_PER_MIN=60` (or any [slowapi limit string](https://github.com/laurents/slowapi)). Per-IP, headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) emitted on every response; 429 on burst.
 
 ## Known Gaps (alpha)
 
-- **Rate limiting.** Not implemented. Tracked as part of REVIEW-2026-05 R3 and roadmap Phase 3 (`docs/REVIEW-2026-05.md`, issue #200).
 - **Multi-tenancy.** Single-tenant only. RLS deferred to V2 (`docs/REVIEW-2026-05.md`, issue #195).
 - **Audit log endpoints.** API request audit is written to `api_request_log` but not yet exposed.
+- **Distributed rate-limit backend.** The slowapi limiter uses in-memory storage; behind a multi-replica deployment it counts per replica. A shared Redis backend is on the Phase 3 list.
 
 ## Security Considerations for a Planning Engine
 
