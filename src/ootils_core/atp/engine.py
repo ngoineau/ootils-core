@@ -177,8 +177,10 @@ class ATPEngine:
         Returns:
             List of ATPSupply records, sorted by available_date
         """
+        # Private helper — only invoked after check_atp() has validated _conn.
+        assert self._conn is not None, "engine.connection must be set before _fetch_supplies"
         supplies: List[ATPSupply] = []
-        
+
         with self._conn.cursor() as cur:
             # Fetch OnHandSupply (snapshot at start_date)
             # OnHand is treated as available at start_date with highest priority
@@ -276,8 +278,10 @@ class ATPEngine:
         Returns:
             List of ATPDemand records, sorted by demand_date
         """
+        # Private helper — only invoked after check_atp() has validated _conn.
+        assert self._conn is not None, "engine.connection must be set before _fetch_demands"
         demands: List[ATPDemand] = []
-        
+
         with self._conn.cursor() as cur:
             # Fetch CustomerOrderDemand (committed orders)
             cur.execute("""

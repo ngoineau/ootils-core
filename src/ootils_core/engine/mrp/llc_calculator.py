@@ -136,13 +136,11 @@ def compute_llc_pure(
 
                 if colour.get(child, WHITE) == GRAY:
                     # ── Cycle found! Reconstruct path ─────────
-                    cycle = [child]
-                    cur = node
-                    while cur != child:
+                    cycle: list = [child]
+                    cur: UUID | None = node
+                    while cur is not None and cur != child:
                         cycle.append(cur)
                         cur = parent_of.get(cur)
-                        if cur is None:
-                            break
                     cycle.append(child)
                     cycle.reverse()
                     raise CycleDetectedError(cycle)
