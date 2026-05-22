@@ -103,8 +103,13 @@ def _create_batch(db, entity_type: str, rows: list[dict], status: str = "process
 
 
 def _mark_batch_validated(db, batch_id: str) -> None:
+    # The agent temporal/stat rules look up previous batches via the workflow
+    # `status` column (see _get_previous_batch_id in temporal_rules.py — it
+    # filters on status IN ('validated', 'rejected', 'imported', 'partial')).
+    # `dq_status` is a separate column tracking DQ-specific state. Set both
+    # so the previous-batch lookup actually finds this batch.
     db.execute(
-        "UPDATE ingest_batches SET dq_status = 'validated' WHERE batch_id = %s",
+        "UPDATE ingest_batches SET status = 'validated', dq_status = 'validated' WHERE batch_id = %s",
         (batch_id,),
     )
     db.commit()
