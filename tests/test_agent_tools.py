@@ -15,8 +15,6 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import pytest
-
 from ootils_core.models import Scenario, ShortageRecord
 from ootils_core.tools.agent_tools import (
     get_active_issues,
