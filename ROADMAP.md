@@ -4,55 +4,54 @@
 
 ---
 
-## Current Status: Early Build Phase
+## Current Status: V1 Alpha — Hardening
 
-The architecture is documented, and the first executable implementation slice is now emerging in the repository.
+All seven V1 milestones (M1–M7) are implemented and shipping in the runtime. The repository contains a working `ootils-core` service: 32 SQL migrations, ~50 `/v1/*` REST endpoints, an LLM agent tool surface, and live Phase 1 demo endpoints. The current focus is hardening (security headers, observability, scalability against the breaking points in `docs/SCALABILITY.md`) and the items tracked in [REVIEW-2026-05](docs/REVIEW-2026-05.md).
 
-We are building in public — architectural decisions are being made openly in GitHub Discussions while the initial implementation takes shape.
+We are still building in public — architectural decisions go through ADRs (see [`docs/INDEX.md`](docs/INDEX.md) for the ADR map).
 
 ---
 
-## V1 — Core Engine (Target: 2026 Q3/Q4)
+## V1 — Core Engine (Shipping)
 
 **Goal:** Prove the architectural thesis. A minimal but technically rigorous engine that demonstrates graph-based, incremental, explainable supply chain planning — consumable by an AI agent.
 
 ### Milestones
 
-- [ ] **M1 — Data Model** (weeks 1–2)
-  - SQL schema: nodes, edges, events, scenarios, explanations
-  - Node/edge type registry
-  - Basic ingestion from flat files (CSV/JSON)
+- [x] **M1 — Data Model**
+  - SQL schema: nodes, edges, events, scenarios, explanations (32 migrations)
+  - Node/edge type registry (`docs/node-dictionary.md`, `docs/edge-dictionary.md`)
+  - Ingestion from flat files (CSV/JSON) via `/v1/ingest/*`
 
-- [ ] **M2 — Core Engine** (weeks 3–6)
-  - Temporal Bridge (elastic time reconciliation)
-  - Projected inventory calculation (single item/location)
-  - Incremental propagation (dirty flag + subgraph expansion)
-  - Allocation engine (priority-based, deterministic)
+- [x] **M2 — Core Engine**
+  - Temporal Bridge (`engine/kernel/temporal/bridge.py`)
+  - Projected inventory calculation (`engine/kernel/calc/projection.py`)
+  - Incremental propagation, dirty-flag + subgraph expansion (`engine/orchestration/propagator.py`)
+  - Allocation engine (`engine/kernel/allocation/engine.py`)
 
-- [ ] **M3 — Explainability** (weeks 5–7)
-  - Root cause chain generation (inline during calculation)
-  - Structured explanation storage
-  - Explanation API endpoint
+- [x] **M3 — Explainability**
+  - Root cause chain generation (`engine/kernel/explanation/builder.py`)
+  - Structured explanation storage (`explanations` and `causal_steps` tables)
+  - Explanation API endpoint (`/v1/explain/*`)
 
-- [ ] **M4 — Shortage Detection** (weeks 6–8)
-  - Shortage node generation
-  - Severity scoring (qty × days × $ impact)
+- [x] **M4 — Shortage Detection**
+  - Shortage node generation (`engine/kernel/shortage/detector.py`)
+  - Severity scoring (qty × days × cost proxy)
   - Shortage → explanation linkage
 
-- [ ] **M5 — Scenarios** (weeks 7–9)
-  - Override mechanism (lightweight delta)
-  - Simulation endpoint
-  - Baseline vs scenario diff
+- [x] **M5 — Scenarios**
+  - Override mechanism via `scenario_overrides` table
+  - Simulation endpoint (`/v1/simulate`)
+  - Baseline vs scenario diff (`/v1/scenarios/diff`)
 
-- [ ] **M6 — API** (weeks 8–10)
-  - REST API: /events, /projection, /issues, /explain, /simulate, /graph
-  - OpenAPI spec
-  - Basic auth
+- [x] **M6 — API**
+  - REST API: ~50 endpoints (`/v1/events`, `/v1/projection`, `/v1/issues`, `/v1/explain`, `/v1/simulate`, `/v1/graph`, `/v1/ingest`, …)
+  - OpenAPI spec (`docs/openapi.json`)
+  - Bearer-token auth with `hmac.compare_digest` (`api/auth.py`)
 
-- [ ] **M7 — AI Agent Demo** (weeks 10–12)
-  - Python agent that: queries issues → gets explanation → runs simulation → recommends action
-  - Documented example in repo
-  - This is the V1 proof
+- [x] **M7 — AI Agent Demo**
+  - Three agent tools: `get_active_issues`, `simulate_override`, `trigger_recalculation` (`tools/agent_tools.py`)
+  - Phase 1 end-to-end demo (`demo/phase1.py`, `tests/integration/test_phase1_e2e.py`)
 
 ### V1 Out of Scope
 - UI (any UI)
@@ -102,4 +101,4 @@ Not based on: feature requests without justification, vendor pressure, or hype c
 
 ---
 
-*Last updated: 2026-03-29*
+*Last updated: 2026-05-22 — V1 alpha hardening pass.*
