@@ -104,5 +104,9 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run Phase 1 REST E2E
-        run: python -m pytest tests/integration/test_phase1_e2e.py -q --tb=short
+      - name: Run integration suite
+        # Previously only test_phase1_e2e.py ran here, masking ~21 test
+        # failures across the other 13 integration files. R11 of
+        # REVIEW-2026-05 closed that gap by fixing the failures and
+        # widening the scope.
+        run: python -m pytest tests/integration/ -q --tb=short

@@ -109,8 +109,10 @@ def test_32_get_events_record_fields(api_client, auth):
     """Each event record contains all required fields."""
     # First create an event so we have at least one record
     payload = {
+        # `source` is constrained to ('api','ingestion','engine','user','test')
+        # by the events_source_check defined in migration 002.
         "event_type": "test_event",
-        "source": "integration-test",
+        "source": "test",
         "scenario_id": "baseline",
     }
     post_resp = api_client.post("/v1/events", json=payload, headers=auth)

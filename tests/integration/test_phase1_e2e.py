@@ -12,6 +12,13 @@ from uuid import uuid4
 
 
 from .conftest import requires_db
+# Re-export the api_client / auth / seeded_db fixtures defined in test_api_db.py
+# so this module sees them via pytest's fixture resolution. Without this import
+# (or moving the fixtures into conftest.py), pytest errors with
+# "fixture 'api_client' not found" when this file is collected on its own —
+# which is exactly how CI invokes it. F401 is intentional: the imports are
+# the side effect we want.
+from .test_api_db import api_client, auth, seeded_db  # noqa: F401
 
 BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
 

@@ -317,11 +317,16 @@ def test_24_simulate_creates_scenario_and_overrides(api_client, auth, seeded_db)
         assert scen_row is not None, f"Scenario {scenario_id} not found in DB"
         assert scen_row["name"] == scenario_name
 
-        # Verify override exists
+        # Verify the override was persisted. We can't filter by the
+        # baseline node_id because ScenarioManager.apply_override resolves it
+        # to the scenario's deep-copied node before writing — so the
+        # scenario_overrides row references the *copy*, not the original.
+        # Asserting by scenario_id + field_name is enough to prove
+        # persistence for this test.
         override_row = conn.execute(
-            """SELECT override_id FROM scenario_overrides
-               WHERE scenario_id = %s::UUID AND node_id = %s::UUID""",
-            (scenario_id, node_id)
+            """SELECT override_id, node_id FROM scenario_overrides
+               WHERE scenario_id = %s::UUID AND field_name = 'quantity'""",
+            (scenario_id,)
         ).fetchone()
         assert override_row is not None, "Override not persisted in DB"
 
