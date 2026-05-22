@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 from datetime import date, timedelta
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest

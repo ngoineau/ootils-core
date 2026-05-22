@@ -5,7 +5,7 @@ Tests the POST /v1/mps/{id}/promote-to-mrp endpoint and related engine methods.
 Uses mock database connections following the pattern from test_mps_capacity_check.py.
 """
 import pytest
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import MagicMock

@@ -8,9 +8,8 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 from unittest.mock import MagicMock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("OOTILS_API_TOKEN", "test-token")

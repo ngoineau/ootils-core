@@ -13,15 +13,13 @@ import os
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 
 from ootils_core.engine.kernel.temporal.bridge import (
-    AggregatedBucket,
     TemporalBridge,
-    _bucket_key_for_grain,
     _bucket_end_for_grain,
     _grain_rank,
     _week_start,
@@ -885,7 +883,6 @@ def test_temporal_bridge_aggregate_integration():
     import psycopg
     from psycopg.rows import dict_row
 
-    from ootils_core.engine.kernel.graph.store import GraphStore
 
     item_id = uuid4()
     location_id = uuid4()

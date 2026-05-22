@@ -26,7 +26,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 
 # ─────────────────────────────────────────────────────────────
@@ -431,7 +431,6 @@ def test_llm_fallback_when_api_unavailable(agent_db_conn, migrated_db):
     """LLM fallback generates a structured report when OPENAI_API_KEY is not set."""
     from ootils_core.engine.dq.agent.llm_reporter import generate_llm_report
     from ootils_core.engine.dq.agent.stat_rules import AgentIssue
-    import psycopg as _psycopg
 
     # Temporarily remove API key
     original_key = os.environ.pop("OPENAI_API_KEY", None)

@@ -6,12 +6,11 @@ Covers GET /v1/graph and GET /v1/nodes (the nodes_router).
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("OOTILS_API_TOKEN", "test-token")

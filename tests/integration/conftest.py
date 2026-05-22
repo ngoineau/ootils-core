@@ -10,8 +10,6 @@ Set DATABASE_URL to a *test* database before running:
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 
 import pytest
 

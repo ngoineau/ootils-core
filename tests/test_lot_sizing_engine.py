@@ -15,11 +15,10 @@ Plus integration tests:
 - Edge cases and boundary conditions
 """
 
-import pytest
 from decimal import Decimal
 from datetime import date, timedelta
 from uuid import uuid4
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import types
 import sys
 
@@ -30,7 +29,7 @@ psycopg_mock = types.ModuleType('psycopg')
 sys.modules['psycopg'] = psycopg_mock
 
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine, LotSizeRule
-from ootils_core.engine.mrp.gross_to_net import BucketRecord, TimeBucket
+from ootils_core.engine.mrp.gross_to_net import BucketRecord
 
 if _psycopg_original is not None:
     sys.modules['psycopg'] = _psycopg_original

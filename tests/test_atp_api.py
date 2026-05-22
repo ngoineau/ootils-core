@@ -13,9 +13,8 @@ All DB calls are mocked via FastAPI dependency_overrides.
 import os
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any
 from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi import status

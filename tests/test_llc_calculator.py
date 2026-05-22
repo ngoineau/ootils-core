@@ -16,11 +16,9 @@ Reference: APICS CPIM Part 2, Module 3 — BOM Structure & Low-Level Code
 from __future__ import annotations
 
 import time
-from collections import defaultdict
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from typing import List
+from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -30,7 +28,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from ootils_core.engine.mrp.llc_calculator import (
-    LLCResult,
     LLCCalculator,
     CycleDetectedError,
     compute_llc_pure,

@@ -8,11 +8,10 @@ Skip all tests if DATABASE_URL is not configured.
 """
 from __future__ import annotations
 
-import os
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +217,6 @@ def test_07_migration_002_deferrable_fk_on_nodes_projection_series(conn):
     to verify the happy path works end-to-end.
     """
     import uuid
-    import psycopg
 
     scenario_id = "00000000-0000-0000-0000-000000000001"
     item_id = str(uuid.uuid4())

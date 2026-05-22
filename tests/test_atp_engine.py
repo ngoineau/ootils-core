@@ -13,10 +13,9 @@ import unittest
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, Mock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from ootils_core.atp.engine import ATPEngine
-from ootils_core.atp.models import ATPBucket, ATPConfig, ATPSupply, ATPDemand
 
 
 class TestATPEngineCalculate(unittest.TestCase):

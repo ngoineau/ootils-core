@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import MagicMock, patch, PropertyMock
-from uuid import UUID, uuid4
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
-import pytest
 
 from ootils_core.engine.dq.agent.llm_reporter import (
     generate_llm_report,

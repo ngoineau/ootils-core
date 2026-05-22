@@ -19,7 +19,7 @@ from __future__ import annotations
 import unittest
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 from ootils_core.engine.mrp.gross_to_net import (

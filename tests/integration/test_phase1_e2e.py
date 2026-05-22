@@ -6,15 +6,12 @@ Forecast → MPS aggregate → approve/promote to planned supply → CRP → ATP
 """
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
 
 from .conftest import requires_db
-from .test_api_db import auth, api_client, seeded_db  # re-use real DB/TestClient fixtures
 
 BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
 

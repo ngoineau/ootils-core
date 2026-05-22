@@ -11,14 +11,12 @@ Architecture: Tests hit ForecastConsumerCore (pure logic, no DB).
 The DB-backed ForecastConsumer is a thin wrapper tested via integration tests.
 """
 
-import pytest
 from datetime import date, timedelta
 from decimal import Decimal
 
 from ootils_core.engine.mrp.forecast_consumer import (
     ForecastConsumerCore,
     ConsumptionStrategy,
-    ConsumedBucket,
 )
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────────

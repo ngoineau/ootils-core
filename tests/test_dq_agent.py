@@ -6,10 +6,9 @@ _get_entity_type, _persist_agent_run, _persist_new_issues, _enrich_existing_issu
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, call
-from uuid import UUID, uuid4
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 

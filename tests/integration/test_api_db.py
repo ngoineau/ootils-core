@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 SEED_SCRIPT = Path(__file__).parents[2] / "scripts" / "seed_demo_data.py"
 

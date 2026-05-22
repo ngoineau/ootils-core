@@ -6,7 +6,6 @@ aggregate/disaggregate, and all internal helpers.
 """
 from __future__ import annotations
 
-import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch

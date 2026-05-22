@@ -11,10 +11,9 @@ Covers every method and branch:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import pytest
 
 from ootils_core.engine.orchestration.calc_run import CalcRunManager, _row_to_calc_run
 from ootils_core.models import CalcRun, Scenario

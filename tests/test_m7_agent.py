@@ -17,13 +17,11 @@ Coverage:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List
-from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import httpx
-import pytest
 
 from ootils_core.agent.demo_agent import OotilsAgent, _find_supply_root_cause, _contains_delay
 from ootils_core.models import AgentReport, AgentRecommendation

@@ -8,18 +8,17 @@ Sections:
 from __future__ import annotations
 
 import os
-import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 
 from ootils_core.engine.kernel.calc.projection import ProjectionKernel
 from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
-from ootils_core.models import CalcRun, Node, Edge, Scenario, PlanningEvent
+from ootils_core.models import Node
 
 
 # ===========================================================================
@@ -369,8 +368,6 @@ def test_po_date_change_propagates_to_pi():
     from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
     from ootils_core.engine.orchestration.calc_run import CalcRunManager
     from ootils_core.engine.orchestration.propagator import PropagationEngine
-    from ootils_core.models import Node, Edge
-    from datetime import datetime, timezone
 
     today = date.today()
 

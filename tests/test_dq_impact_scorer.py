@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import json
 import math
-from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from unittest.mock import MagicMock
+from uuid import uuid4
 
-import pytest
 
 from ootils_core.engine.dq.agent.impact_scorer import (
     score_issues,
@@ -20,7 +19,6 @@ from ootils_core.engine.dq.agent.impact_scorer import (
     _get_active_shortages_for_items,
     _get_finished_goods_via_bom,
     SEVERITY_WEIGHTS,
-    IssueImpact,
 )
 from ootils_core.engine.dq.agent.stat_rules import AgentIssue
 

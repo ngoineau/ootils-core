@@ -6,9 +6,8 @@ capacity overload detection, phase transition inconsistency alerts, and dispatch
 """
 from __future__ import annotations
 
-import math
-from datetime import date, timedelta
-from unittest.mock import MagicMock, patch, call
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -22,7 +21,6 @@ from ootils_core.engine.ghost.phase_transition import (
     compute_weight,
     run_phase_transition,
     _get_projected_inventory,
-    INCONSISTENCY_THRESHOLD,
 )
 
 

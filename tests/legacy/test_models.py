@@ -6,7 +6,7 @@ pytestmark = pytest.mark.skip(reason="Legacy pre-graph API — InventoryState re
 
 import pytest
 
-from ootils_core.models import InventoryState, OrderRecommendation, Product, Supplier
+from ootils_core.models import InventoryState, Product, Supplier
 
 
 class TestProduct:
