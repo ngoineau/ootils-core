@@ -8,7 +8,8 @@ Resolves R9 of [REVIEW-2026-05.md](REVIEW-2026-05.md).
 
 ## Start here
 
-- [`../README.md`](../README.md) — Quick start, capabilities, API surface.
+- [`QUICKSTART.md`](QUICKSTART.md) — Clone → run → first API call in 5 minutes.
+- [`../README.md`](../README.md) — Full capability surface and architecture diagram.
 - [`../CLAUDE.md`](../CLAUDE.md) — Context for Claude Code sessions: conventions, commands, architecture map.
 - [`../ROADMAP.md`](../ROADMAP.md) — V1 milestones.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — How to contribute.
