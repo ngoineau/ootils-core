@@ -596,7 +596,7 @@ class TestApplyToRecords:
     def _make_weekly_records(self, gross_reqs, start_date=date(2025, 1, 6)):
         """Create a sequence of BucketRecords from gross requirement list."""
         records = []
-        on_hand = Decimal("0")
+        Decimal("0")
         for i, gr in enumerate(gross_reqs):
             gr = Decimal(str(gr))
             rec = make_record(

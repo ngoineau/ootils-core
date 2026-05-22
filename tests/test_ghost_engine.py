@@ -186,7 +186,7 @@ class TestComputeWeight:
     def test_total_days_zero_returns_end(self):
         # start == end effectively, but t is between them (same day)
         # total_days = 0 -> return weight_at_end
-        d = date(2024, 3, 1)
+        date(2024, 3, 1)
         # We need t > start and t < end, with start < end but total_days=0 is impossible
         # with dates. Instead test when start == end - 0 days conceptually.
         # Actually total_days = (end - start).days; if start == date(2024,3,1) and

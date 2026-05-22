@@ -310,7 +310,7 @@ class TestCalcRunManagerLock:
         def mock_execute(sql, params=None):
             call_count[0] += 1
             mock_result = MagicMock()
-            sql_stripped = sql.strip()
+            sql.strip()
 
             if "pg_try_advisory_lock" in sql:
                 mock_result.fetchone.return_value = {"locked": True}
@@ -372,7 +372,7 @@ def test_po_date_change_propagates_to_pi():
     today = date.today()
 
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
+        with conn.cursor():
             # ----------------------------------------------------------------
             # Setup fixtures
             # ----------------------------------------------------------------

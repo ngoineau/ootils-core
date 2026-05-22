@@ -158,7 +158,7 @@ class TestFallbackReport:
         issues = [_make_issue(severity="error", rule_code=f"R{i}") for i in range(10)]
         report = _fallback_report(issues, "items")
         # Count bullet points in narrative
-        critical_lines = [l for l in report.narrative.split("\n") if l.startswith("- **")]
+        critical_lines = [line for line in report.narrative.split("\n") if line.startswith("- **")]
         assert len(critical_lines) == 5
 
 
@@ -298,7 +298,7 @@ class TestGenerateLlmReport:
 
         with patch("openai.OpenAI", return_value=mock_client):
             issue = _make_issue()
-            report = generate_llm_report([issue], "items", uuid4(), 10)
+            generate_llm_report([issue], "items", uuid4(), 10)
 
         assert issue.llm_explanation is None
         assert issue.llm_suggestion is None

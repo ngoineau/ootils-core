@@ -61,7 +61,7 @@ def migrated_db():
 
     try:
         from ootils_core.db.connection import OotilsDB
-        db = OotilsDB(TEST_DB_URL)
+        OotilsDB(TEST_DB_URL)
     except Exception as exc:
         pytest.skip(f"Failed to apply migrations: {exc}")
 

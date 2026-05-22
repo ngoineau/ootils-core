@@ -270,7 +270,7 @@ def test_08_bootstrap_rerun_is_idempotent(migrated_db):
     from ootils_core.db.connection import OotilsDB
 
     # Second instantiation — should be a no-op (IF NOT EXISTS throughout)
-    db2 = OotilsDB(migrated_db)
+    OotilsDB(migrated_db)
 
     with psycopg.connect(migrated_db, row_factory=dict_row) as conn:
         tables = _tables(conn)

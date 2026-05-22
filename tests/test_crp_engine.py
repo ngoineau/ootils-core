@@ -1071,7 +1071,7 @@ class TestCRPEdgeCases:
         ]
         
         engine = CRPEngine(db_conn=conn)
-        result = engine.calculate(horizon_days=30)
+        engine.calculate(horizon_days=30)
         
         # Inactive operations should be filtered out during scheduling
         # The operation won't be added to load buckets

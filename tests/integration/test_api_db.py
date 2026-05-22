@@ -146,7 +146,7 @@ def test_20_issues_filters(api_client, auth, seeded_db):
         pytest.skip("No items in DB to filter on")
 
     item_id = str(item_row["item_id"])
-    location_id = str(loc_row["location_id"]) if loc_row else None
+    str(loc_row["location_id"]) if loc_row else None
 
     # Severity filter
     for sev in ("low", "medium", "high", "all"):

@@ -70,7 +70,7 @@ class TestATPCheckEndpoint:
         """ATP check requires authentication (verified via middleware)."""
         # Auth is enforced by require_auth dependency which is always active
         # This test verifies the endpoint exists and auth dependency is configured
-        app = create_app()
+        create_app()
         # Check that require_auth is used in the endpoint
         from ootils_core.atp import routers
         # Verify router has auth dependency configured
@@ -182,7 +182,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
+                    assert data["available"]
                     # quantity_available is returned as string (Decimal serialization)
                     assert data["quantity_available"] in [100.0, "100", 100]
                     assert data["requested_quantity"] in [100.0, "100", 100]
@@ -220,7 +220,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == False
+                    assert not data["available"]
                     assert data["quantity_available"] in [50.0, "50", 50]
                     assert data["backorder_quantity"] in [50.0, "50", 50]
 
@@ -254,7 +254,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == False
+                    assert not data["available"]
                     assert data["quantity_available"] in [75.0, "75", 75]
                     assert data["backorder_quantity"] in [25.0, "25", 25]
 
@@ -325,8 +325,8 @@ class TestCTPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
-                    assert data["capacity_feasible"] == True
+                    assert data["available"]
+                    assert data["capacity_feasible"]
                     assert data["violations"] == []
                     assert "critical_resources" in data
 
@@ -374,8 +374,8 @@ class TestCTPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
-                    assert data["capacity_feasible"] == False
+                    assert data["available"]
+                    assert not data["capacity_feasible"]
                     assert len(data["violations"]) == 1
                     assert data["violations"][0]["resource_name"] == "CNC Machine 1"
                     assert data["violations"][0]["overload_pct"] == 150.0

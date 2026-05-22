@@ -176,7 +176,7 @@ def test_01b_migration_009_columns(conn):
 def test_02_ingest_resource_insert(conn):
     """Ingest resource crée une entrée dans resources ET un nœud Resource dans nodes."""
     ext_id = f"RES-INSERT-{uuid4().hex[:6]}"
-    ids = _insert_resource(conn, ext_id, capacity_per_day=8.0, resource_type="line")
+    _insert_resource(conn, ext_id, capacity_per_day=8.0, resource_type="line")
 
     # Vérifier resource créée
     row = conn.execute(

@@ -149,7 +149,7 @@ class TestCreateScenario:
         ]
 
         manager = ScenarioManager()
-        scenario = manager.create_scenario(
+        manager.create_scenario(
             name="S1",
             parent_scenario_id=parent_id,
             db=db,
