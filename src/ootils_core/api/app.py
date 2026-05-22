@@ -14,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -50,6 +51,24 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 def _api_docs_enabled() -> bool:
     return os.environ.get("OOTILS_ENABLE_API_DOCS", "0").strip().lower() in _TRUTHY
+
+
+def _security_headers_enabled() -> bool:
+    # Default ON. Opt-out only with an explicit truthy flag, so accidental
+    # misconfiguration keeps the safer behavior.
+    return os.environ.get("OOTILS_DISABLE_SECURITY_HEADERS", "0").strip().lower() not in _TRUTHY
+
+
+def _cors_allowed_origins() -> list[str]:
+    """Parse OOTILS_CORS_ALLOWED_ORIGINS (comma-separated list).
+
+    Default is empty — no cross-origin requests allowed. Wildcard "*" is
+    intentionally NOT a default: opt-in only.
+    """
+    raw = os.environ.get("OOTILS_CORS_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -187,6 +206,18 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS — disabled by default. Configure with OOTILS_CORS_ALLOWED_ORIGINS.
+    cors_origins = _cors_allowed_origins()
+    if cors_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
+            max_age=600,
+        )
+
     # Payload size limit middleware for ingest routes
     application.add_middleware(IngestPayloadSizeLimitMiddleware)
 
@@ -208,6 +239,39 @@ def create_app() -> FastAPI:
         latency_ms = int((time.perf_counter() - started) * 1000)
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-API-Version"] = API_VERSION
+
+        if _security_headers_enabled():
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            # HSTS only on HTTPS — sending it over plain HTTP is harmless but
+            # can trip strict scanners. Honor X-Forwarded-Proto for proxies.
+            scheme = (
+                request.headers.get("X-Forwarded-Proto")
+                or request.url.scheme
+            )
+            if scheme == "https":
+                response.headers.setdefault(
+                    "Strict-Transport-Security",
+                    "max-age=31536000; includeSubDomains",
+                )
+            # CSP: relax on /docs and /redoc (Swagger needs inline scripts +
+            # the swagger CDN). Strict default elsewhere.
+            path = request.url.path
+            if path in ("/docs", "/redoc") or path.startswith("/docs/") or path.startswith("/redoc/"):
+                response.headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'self' https://cdn.jsdelivr.net; "
+                    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                    "img-src 'self' data: https://fastapi.tiangolo.com",
+                )
+            else:
+                response.headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'none'; frame-ancestors 'none'",
+                )
+
         _log_api_request(request, response.status_code, latency_ms)
         return response
 
