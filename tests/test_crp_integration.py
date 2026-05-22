@@ -13,10 +13,10 @@ import pytest
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock
 
-from ootils_core.crp.engine import CRPEngine, CRPResult, LoadProfile, Overload, LoadBucket
-from ootils_core.crp.models import WorkCenter, Routing, Operation
+from ootils_core.crp.engine import CRPEngine, CRPResult, LoadProfile, LoadBucket
+from ootils_core.crp.models import WorkCenter
 from ootils_core.mps.api import PromoteToMRPRequest, PromoteToMRPResponse
 
 
@@ -323,7 +323,7 @@ class TestCRPResponseModels:
     
     def test_crp_calculate_response(self, sample_work_center):
         """Test CRPCalculateResponse model."""
-        from ootils_core.crp.routers import CRPCalculateResponse, LoadProfileOut, LoadBucketOut
+        from ootils_core.crp.routers import CRPCalculateResponse
         
         response = CRPCalculateResponse(
             calculation_id="calc-001",

@@ -9,19 +9,16 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import pytest
 
 from ootils_core.engine.kernel.allocation.engine import (
     AllocationEngine,
     _priority_key,
     _ZERO,
-    _SENTINEL_DATE,
-    _DEMAND_TYPES,
 )
 from ootils_core.models import AllocationResult, Edge, Node
 

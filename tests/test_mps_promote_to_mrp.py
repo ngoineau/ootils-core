@@ -5,7 +5,7 @@ Tests the POST /v1/mps/{id}/promote-to-mrp endpoint and related engine methods.
 Uses mock database connections following the pattern from test_mps_capacity_check.py.
 """
 import pytest
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import MagicMock
@@ -73,16 +73,16 @@ class TestPromoteToMRPRequestValidation:
         from ootils_core.mps.api import PromoteToMRPRequest
         
         req = PromoteToMRPRequest()
-        assert req.explode_components == True
-        assert req.dry_run == False
+        assert req.explode_components
+        assert not req.dry_run
     
     def test_promote_request_custom_values(self):
         """Test custom values for promote request."""
         from ootils_core.mps.api import PromoteToMRPRequest
         
         req = PromoteToMRPRequest(explode_components=False, dry_run=True)
-        assert req.explode_components == False
-        assert req.dry_run == True
+        assert not req.explode_components
+        assert req.dry_run
 
 
 # ─────────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ class TestPromoteToMRPEngineMethod:
         assert result.status == "RELEASED"
         assert result.planned_supplies_created == 0
         assert result.components_exploded == 0
-        assert result.summary["dry_run"] == True
+        assert result.summary["dry_run"]
     
     def test_promote_mps_not_found(self):
         """Test error when MPS node doesn't exist."""
@@ -277,8 +277,8 @@ class TestPromoteToMRPEndpoint:
         from ootils_core.mps.api import PromoteToMRPRequest
         
         req = PromoteToMRPRequest(explode_components=True, dry_run=False)
-        assert req.explode_components == True
-        assert req.dry_run == False
+        assert req.explode_components
+        assert not req.dry_run
 
 
 # ─────────────────────────────────────────────────────────────

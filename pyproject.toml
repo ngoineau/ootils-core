@@ -31,6 +31,7 @@ dependencies = [
     "psycopg-pool ~= 3.3",
     "pydantic ~= 2.12",
     "openai ~= 2.15",
+    "slowapi ~= 0.1",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +52,28 @@ markers = [
     "critical: marks tests as critical path",
     "requires_db: marks tests that require a live DB connection",
 ]
+
+[tool.coverage.run]
+source = ["src/ootils_core"]
+branch = true
+omit = [
+    "src/ootils_core/demo/*",  # demo scripts — covered by e2e tests, not unit
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+# Permissive baseline — every module should pass today's checks. We intentionally
+# do NOT enable strict mode yet because the codebase has untyped boundaries
+# (psycopg row dicts, dynamic SQL helpers). Tighten one rule at a time.
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true

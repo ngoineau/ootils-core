@@ -16,11 +16,9 @@ Reference: APICS CPIM Part 2, Module 3 — BOM Structure & Low-Level Code
 from __future__ import annotations
 
 import time
-from collections import defaultdict
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from typing import List
+from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -30,7 +28,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from ootils_core.engine.mrp.llc_calculator import (
-    LLCResult,
     LLCCalculator,
     CycleDetectedError,
     compute_llc_pure,
@@ -438,11 +435,16 @@ class TestPerformance:
         # Level 3: 3000 sub-components
         # Level 4: 3500 raw materials
         idx = 0
-        roots = items[idx:idx + 500]; idx += 500
-        level1 = items[idx:idx + 1000]; idx += 1000
-        level2 = items[idx:idx + 2000]; idx += 2000
-        level3 = items[idx:idx + 3000]; idx += 3000
-        level4 = items[idx:idx + 3500]; idx += 3500
+        roots = items[idx:idx + 500]
+        idx += 500
+        level1 = items[idx:idx + 1000]
+        idx += 1000
+        level2 = items[idx:idx + 2000]
+        idx += 2000
+        level3 = items[idx:idx + 3000]
+        idx += 3000
+        level4 = items[idx:idx + 3500]
+        idx += 3500
 
         # Each root → 2 level1 items
         for i, root in enumerate(roots):
@@ -503,7 +505,7 @@ class TestPerformance:
 
 _psycopg_available = False
 try:
-    import psycopg
+    import psycopg  # noqa: F401
     _psycopg_available = True
 except ImportError:
     pass

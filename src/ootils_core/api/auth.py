@@ -33,7 +33,7 @@ def _expected_token() -> str:
 
 async def require_auth(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]  # FastAPI injects; Union confuses dep resolver
 ) -> str:
     """
     FastAPI dependency — validates Bearer token.

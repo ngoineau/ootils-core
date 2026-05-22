@@ -13,6 +13,8 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
+import psycopg
+
 from ootils_core.models import CalcRun, Node, Scenario
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.engine.kernel.graph.traversal import GraphTraversal
@@ -56,7 +58,7 @@ class PropagationEngine:
         self,
         event_id: UUID,
         scenario_id: UUID,
-        db,
+        db: psycopg.Connection,
     ) -> Optional[CalcRun]:
         """
         Main entry point. Acquires advisory lock, expands dirty subgraph, propagates.
@@ -169,7 +171,7 @@ class PropagationEngine:
             self._calc_run_mgr.fail_calc_run(calc_run, str(exc), db)
             raise
 
-    def _finish_run(self, calc_run: CalcRun, scenario_id: UUID, db) -> None:
+    def _finish_run(self, calc_run: CalcRun, scenario_id: UUID, db: psycopg.Connection) -> None:
         """Load scenario and complete the calc run."""
         scenario_row = db.execute(
             "SELECT * FROM scenarios WHERE scenario_id = %s",
@@ -230,7 +232,7 @@ class PropagationEngine:
         self,
         calc_run: CalcRun,
         dirty_nodes: set[UUID],
-        db,
+        db: psycopg.Connection,
     ) -> None:
         """
         Topological sort over dirty nodes, then compute each one in order.
@@ -282,7 +284,7 @@ class PropagationEngine:
         node_id: UUID,
         scenario_id: UUID,
         calc_run_id: UUID,
-        db,
+        db: psycopg.Connection,
     ) -> bool:
         """
         Recompute a single PI node.
@@ -481,7 +483,7 @@ class PropagationEngine:
 
         return changed
 
-    def _get_safety_stock(self, node: Node, db) -> Optional[Decimal]:
+    def _get_safety_stock(self, node: Node, db: psycopg.Connection) -> Optional[Decimal]:
         """Fetch safety_stock_qty from item_planning_params for this node's item/location."""
         if node.item_id is None:
             return None

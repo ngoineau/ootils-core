@@ -3,7 +3,7 @@ Unit tests for MPS (Master Production Schedule) models.
 MPS-001: MPS Node Model and Time Buckets
 """
 import pytest
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 

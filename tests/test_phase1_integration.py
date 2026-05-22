@@ -20,30 +20,20 @@ from __future__ import annotations
 import time
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import List
-from uuid import UUID, uuid4
-from unittest.mock import Mock, MagicMock, patch
+from uuid import uuid4
+from unittest.mock import Mock, patch
 
 import pytest
 
 from ootils_core.forecasting.engine import ForecastingEngine, ForecastMethod, ForecastResult
-from ootils_core.forecasting.algorithms import (
-    MovingAverageForecaster,
-    ExponentialSmoothingForecaster,
-    CrostonForecaster,
-)
-from ootils_core.mps.engine import AggregateDemandEngine, AggregateDemandRequest, AggregateDemandResult
+from ootils_core.mps.engine import AggregateDemandEngine, AggregateDemandResult
 from ootils_core.mps.models import MPSNode, MPSStatus
 from ootils_core.crp.engine import CRPEngine, CRPResult
-from ootils_core.crp.models import WorkCenter, Routing, Operation
 from ootils_core.atp.engine import ATPEngine
-from ootils_core.atp.models import ATPRequest, ATPResult, ATPConfig
+from ootils_core.atp.models import ATPResult, ATPConfig
 
 from tests.fixtures.forecast_data import (
     ForecastDatasets,
-    BOMDatasets,
-    RoutingDatasets,
-    ForecastFixture,
 )
 
 
@@ -426,7 +416,7 @@ class TestEndToEndFlow:
     def test_mps_to_crp_flow(self, mock_db_connection):
         """Test flow from MPS approval to CRP check."""
         # Step 1: Create approved MPS node
-        mps_node = MPSNode(
+        MPSNode(
             mps_id=uuid4(),
             item_id=uuid4(),
             location_id=uuid4(),

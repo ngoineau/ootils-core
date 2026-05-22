@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Generator
 from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("OOTILS_API_TOKEN", "test-token")

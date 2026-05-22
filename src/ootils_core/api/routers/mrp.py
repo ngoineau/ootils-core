@@ -119,7 +119,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
         return UUID(scenario_id_str)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid scenario_id '{scenario_id_str}' — must be a valid UUID or 'baseline'",
         )
 

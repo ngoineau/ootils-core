@@ -3,10 +3,9 @@ Unit tests for DRP (Distribution Requirements Planning) models.
 
 Tests DistributionLink, TransportationLane, and edge models.
 """
-import pytest
 from decimal import Decimal
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ootils_core.drp.models import (
     DistributionLink,

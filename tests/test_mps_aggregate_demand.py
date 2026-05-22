@@ -11,20 +11,15 @@ Couverture:
 """
 
 import pytest
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
-import psycopg
 
 from ootils_core.mps.engine import (
     AggregateDemandEngine,
     DemandSource,
-    TimeBucketDemand,
-    AggregateDemandRequest,
-    AggregateDemandResult,
 )
-from ootils_core.mps.models import MPSStatus
 
 
 class TestGenerateTimeBuckets:

@@ -22,7 +22,7 @@
 │  │   propagation (dirty-flag pattern)        │
 │  ├── Shortage detection + severity scoring   │
 │  ├── MRP explosion (BOM + lead times)        │
-│  ├── Scenario branching (copy-on-write)      │
+│  ├── Scenario branching (deep-copy fork)     │
 │  ├── RCCP (rough-cut capacity planning)      │
 │  ├── Ghost engine (virtual supply nodes)     │
 │  └── DQ agent (data quality pipeline)       │
@@ -183,7 +183,7 @@ src/ootils_core/
 ├── engine/
 │   ├── propagator.py       # Incremental graph propagation
 │   ├── shortage/           # Shortage detection + severity scoring
-│   ├── scenario/           # Scenario branching + copy-on-write
+│   ├── scenario/           # Scenario branching (deep-copy fork)
 │   ├── dq/                 # Data quality pipeline + DQ agent
 │   └── ghosts/             # Ghost node engine
 └── models/                 # Pydantic request/response schemas

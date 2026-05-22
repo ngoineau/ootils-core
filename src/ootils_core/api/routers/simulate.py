@@ -128,7 +128,7 @@ async def create_simulation(
     # If all overrides failed, return 422 with details instead of 500
     if body.overrides and applied == 0 and failed_overrides:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "message": "All overrides failed validation — no changes applied.",
                 "failed_overrides": failed_overrides,

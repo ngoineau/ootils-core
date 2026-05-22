@@ -3,10 +3,9 @@ Unit tests for CRP (Capacity Requirements Planning) models.
 
 Tests WorkCenter, Routing, Operation, and edge models.
 """
-import pytest
 from decimal import Decimal
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ootils_core.crp.models import (
     WorkCenter,

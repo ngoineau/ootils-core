@@ -14,9 +14,8 @@ from __future__ import annotations
 import pytest
 from datetime import date, timedelta
 from decimal import Decimal
-from uuid import uuid4, UUID
-from unittest.mock import Mock, MagicMock, patch
-from typing import List, Dict, Any
+from uuid import uuid4
+from unittest.mock import Mock
 
 from ootils_core.crp.engine import (
     CRPEngine,
@@ -1072,7 +1071,7 @@ class TestCRPEdgeCases:
         ]
         
         engine = CRPEngine(db_conn=conn)
-        result = engine.calculate(horizon_days=30)
+        engine.calculate(horizon_days=30)
         
         # Inactive operations should be filtered out during scheduling
         # The operation won't be added to load buckets

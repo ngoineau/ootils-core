@@ -17,13 +17,12 @@ Skip all tests si DATABASE_URL non configuré.
 """
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -177,7 +176,7 @@ def test_01b_migration_009_columns(conn):
 def test_02_ingest_resource_insert(conn):
     """Ingest resource crée une entrée dans resources ET un nœud Resource dans nodes."""
     ext_id = f"RES-INSERT-{uuid4().hex[:6]}"
-    ids = _insert_resource(conn, ext_id, capacity_per_day=8.0, resource_type="line")
+    _insert_resource(conn, ext_id, capacity_per_day=8.0, resource_type="line")
 
     # Vérifier resource créée
     row = conn.execute(
@@ -428,7 +427,7 @@ def test_08_rccp_grain_week_vs_day(conn):
     Grain=week → une semaine est un bucket.
     Vérifie que les buckets sont générés correctement.
     """
-    from ootils_core.api.routers.rccp import _generate_buckets, _bucket_start
+    from ootils_core.api.routers.rccp import _generate_buckets
 
     # Grain=day : 7 jours → 7 buckets
     from_date = date(2026, 8, 3)  # lundi

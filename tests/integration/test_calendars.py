@@ -13,12 +13,11 @@ Set DATABASE_URL before running:
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures

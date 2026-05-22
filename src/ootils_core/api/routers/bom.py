@@ -328,7 +328,7 @@ async def ingest_bom(
     parent_item_id = _resolve_item_id(db, body.parent_external_id)
     if parent_item_id is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{"field": "parent_external_id", "error": f"Item '{body.parent_external_id}' not found"}],
         )
 
@@ -348,14 +348,14 @@ async def ingest_bom(
 
     if errors:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=errors,
         )
 
     # 3. Cycle detection
     if _detect_cycle(db, parent_item_id, component_ids):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{"error": "BOM cycle detected — a component is an ancestor of the parent item"}],
         )
 
@@ -525,7 +525,7 @@ async def explode_bom(
         ).fetchone()
         if loc_row is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Location '{body.location_external_id}' not found",
             )
         location_id = loc_row["location_id"]

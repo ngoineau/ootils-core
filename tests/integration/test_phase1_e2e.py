@@ -6,15 +6,19 @@ Forecast → MPS aggregate → approve/promote to planned supply → CRP → ATP
 """
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
 
 from .conftest import requires_db
-from .test_api_db import auth, api_client, seeded_db  # re-use real DB/TestClient fixtures
+# Re-export the api_client / auth / seeded_db fixtures defined in test_api_db.py
+# so this module sees them via pytest's fixture resolution. Without this import
+# (or moving the fixtures into conftest.py), pytest errors with
+# "fixture 'api_client' not found" when this file is collected on its own —
+# which is exactly how CI invokes it. F401 is intentional: the imports are
+# the side effect we want.
+from .test_api_db import api_client, auth, seeded_db  # noqa: F401
 
 BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
 

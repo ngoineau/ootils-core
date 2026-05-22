@@ -10,7 +10,7 @@ Couverture:
 """
 
 import pytest
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import MagicMock

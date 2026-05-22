@@ -10,8 +10,6 @@ Set DATABASE_URL to a *test* database before running:
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 
 import pytest
 
@@ -63,7 +61,7 @@ def migrated_db():
 
     try:
         from ootils_core.db.connection import OotilsDB
-        db = OotilsDB(TEST_DB_URL)
+        OotilsDB(TEST_DB_URL)
     except Exception as exc:
         pytest.skip(f"Failed to apply migrations: {exc}")
 

@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 SEED_SCRIPT = Path(__file__).parents[2] / "scripts" / "seed_demo_data.py"
 
@@ -146,7 +146,7 @@ def test_20_issues_filters(api_client, auth, seeded_db):
         pytest.skip("No items in DB to filter on")
 
     item_id = str(item_row["item_id"])
-    location_id = str(loc_row["location_id"]) if loc_row else None
+    str(loc_row["location_id"]) if loc_row else None
 
     # Severity filter
     for sev in ("low", "medium", "high", "all"):
@@ -317,11 +317,16 @@ def test_24_simulate_creates_scenario_and_overrides(api_client, auth, seeded_db)
         assert scen_row is not None, f"Scenario {scenario_id} not found in DB"
         assert scen_row["name"] == scenario_name
 
-        # Verify override exists
+        # Verify the override was persisted. We can't filter by the
+        # baseline node_id because ScenarioManager.apply_override resolves it
+        # to the scenario's deep-copied node before writing — so the
+        # scenario_overrides row references the *copy*, not the original.
+        # Asserting by scenario_id + field_name is enough to prove
+        # persistence for this test.
         override_row = conn.execute(
-            """SELECT override_id FROM scenario_overrides
-               WHERE scenario_id = %s::UUID AND node_id = %s::UUID""",
-            (scenario_id, node_id)
+            """SELECT override_id, node_id FROM scenario_overrides
+               WHERE scenario_id = %s::UUID AND field_name = 'quantity'""",
+            (scenario_id,)
         ).fetchone()
         assert override_row is not None, "Override not persisted in DB"
 

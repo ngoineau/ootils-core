@@ -187,7 +187,7 @@ async def get_rccp(
     # Validate grain
     if grain not in VALID_GRAINS:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"grain '{grain}' invalid; valid: {sorted(VALID_GRAINS)}",
         )
 
@@ -200,7 +200,7 @@ async def get_rccp(
 
     if to_date < from_date:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="to_date must be >= from_date",
         )
 

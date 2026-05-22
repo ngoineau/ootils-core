@@ -14,8 +14,20 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+
+# slowapi is an optional dependency — used only when rate limiting is opted in
+# via OOTILS_RATE_LIMIT_PER_MIN. Importing inline keeps `pip install` minimal
+# for users who don't need it.
+try:
+    from slowapi import Limiter
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.util import get_remote_address
+    _SLOWAPI_AVAILABLE = True
+except ImportError:
+    _SLOWAPI_AVAILABLE = False
 
 from ootils_core.api.auth import _expected_token
 from ootils_core.api.dependencies import _get_ootils_db, get_db
@@ -50,6 +62,39 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 def _api_docs_enabled() -> bool:
     return os.environ.get("OOTILS_ENABLE_API_DOCS", "0").strip().lower() in _TRUTHY
+
+
+def _security_headers_enabled() -> bool:
+    # Default ON. Opt-out only with an explicit truthy flag, so accidental
+    # misconfiguration keeps the safer behavior.
+    return os.environ.get("OOTILS_DISABLE_SECURITY_HEADERS", "0").strip().lower() not in _TRUTHY
+
+
+def _cors_allowed_origins() -> list[str]:
+    """Parse OOTILS_CORS_ALLOWED_ORIGINS (comma-separated list).
+
+    Default is empty — no cross-origin requests allowed. Wildcard "*" is
+    intentionally NOT a default: opt-in only.
+    """
+    raw = os.environ.get("OOTILS_CORS_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _rate_limit_config() -> str | None:
+    """Return the slowapi rate-limit string from OOTILS_RATE_LIMIT_PER_MIN.
+
+    Accepts an integer (interpreted as "<N>/minute") or a raw slowapi limit
+    string like "60/minute;1000/hour". Returns None if unset → rate limiting
+    is disabled.
+    """
+    raw = os.environ.get("OOTILS_RATE_LIMIT_PER_MIN", "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return f"{raw}/minute"
+    return raw
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -187,6 +232,41 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Rate limiting — disabled by default. Opt in with OOTILS_RATE_LIMIT_PER_MIN
+    # (e.g. "60" or "60/minute;1000/hour"). Per-IP via X-Forwarded-For when
+    # present, otherwise via direct client address.
+    # slowapi's SlowAPIMiddleware emits 429 responses itself; we keep its
+    # default body since a custom exception_handler is not invoked when
+    # the middleware short-circuits the request.
+    rate_limit = _rate_limit_config()
+    if rate_limit and _SLOWAPI_AVAILABLE:
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=[rate_limit],
+            headers_enabled=True,
+        )
+        application.state.limiter = limiter
+        application.add_middleware(SlowAPIMiddleware)
+        logger.info("rate_limit.enabled config=%s", rate_limit)
+    elif rate_limit and not _SLOWAPI_AVAILABLE:
+        logger.warning(
+            "OOTILS_RATE_LIMIT_PER_MIN=%s set but slowapi is not installed; "
+            "install with `pip install slowapi` to enable rate limiting.",
+            rate_limit,
+        )
+
+    # CORS — disabled by default. Configure with OOTILS_CORS_ALLOWED_ORIGINS.
+    cors_origins = _cors_allowed_origins()
+    if cors_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
+            max_age=600,
+        )
+
     # Payload size limit middleware for ingest routes
     application.add_middleware(IngestPayloadSizeLimitMiddleware)
 
@@ -208,6 +288,39 @@ def create_app() -> FastAPI:
         latency_ms = int((time.perf_counter() - started) * 1000)
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-API-Version"] = API_VERSION
+
+        if _security_headers_enabled():
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            # HSTS only on HTTPS — sending it over plain HTTP is harmless but
+            # can trip strict scanners. Honor X-Forwarded-Proto for proxies.
+            scheme = (
+                request.headers.get("X-Forwarded-Proto")
+                or request.url.scheme
+            )
+            if scheme == "https":
+                response.headers.setdefault(
+                    "Strict-Transport-Security",
+                    "max-age=31536000; includeSubDomains",
+                )
+            # CSP: relax on /docs and /redoc (Swagger needs inline scripts +
+            # the swagger CDN). Strict default elsewhere.
+            path = request.url.path
+            if path in ("/docs", "/redoc") or path.startswith("/docs/") or path.startswith("/redoc/"):
+                response.headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'self' https://cdn.jsdelivr.net; "
+                    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                    "img-src 'self' data: https://fastapi.tiangolo.com",
+                )
+            else:
+                response.headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'none'; frame-ancestors 'none'",
+                )
+
         _log_api_request(request, response.status_code, latency_ms)
         return response
 

@@ -21,11 +21,13 @@ __all__: list = []
 # FastAPI resolves string annotations at runtime. Some psycopg builds do not
 # expose Connection at the top level, which breaks route import/collection.
 try:
-    import psycopg  # type: ignore
+    import psycopg
 
     if not hasattr(psycopg, "Connection"):
         from psycopg.connection import Connection as _PsycopgConnection
 
-        psycopg.Connection = _PsycopgConnection
+        # Attach Connection lazily on the module; the type-stub-vs-runtime
+        # mismatch here is intentional, so silence mypy on this single line.
+        psycopg.Connection = _PsycopgConnection  # type: ignore[misc]
 except Exception:
     pass

@@ -149,6 +149,8 @@ def generate_llm_report(
             )
 
             content = response.choices[0].message.content
+            if not content:
+                raise ValueError("LLM returned empty response content")
             data = json.loads(content)
 
             report = LLMReport(

@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures

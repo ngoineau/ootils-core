@@ -10,11 +10,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 SEED_SCRIPT = Path(__file__).parents[2] / "scripts" / "seed_demo_data.py"
 BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
@@ -110,8 +109,10 @@ def test_32_get_events_record_fields(api_client, auth):
     """Each event record contains all required fields."""
     # First create an event so we have at least one record
     payload = {
+        # `source` is constrained to ('api','ingestion','engine','user','test')
+        # by the events_source_check defined in migration 002.
         "event_type": "test_event",
-        "source": "integration-test",
+        "source": "test",
         "scenario_id": "baseline",
     }
     post_resp = api_client.post("/v1/events", json=payload, headers=auth)
@@ -243,7 +244,7 @@ def test_36_get_events_filter_processed(api_client, auth):
     data = resp.json()
     for event in data["events"]:
         assert event["processed"] is False, (
-            f"Processed event returned for processed=false filter"
+            "Processed event returned for processed=false filter"
         )
 
     # processed=true — should return 200 (list may be empty)

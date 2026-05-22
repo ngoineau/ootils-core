@@ -219,7 +219,11 @@ class TestCheckLeadTimeSpike:
         issues = _check_lead_time_spike(batch_id, current_rows, history)
         assert issues == []
 
-    def test_skips_zero_stdev(self):
+    def test_constant_history_flags_any_deviation(self):
+        # Historical baseline is perfectly constant (stdev=0). Z-score is
+        # undefined, but the rule's contract is "deviation from historical
+        # baseline" — so any value != mean must produce a spike issue.
+        # See REVIEW-2026-05 follow-up, cycle 7.
         batch_id = uuid4()
         history = [
             {"item_external_id": "ITEM-1", "lead_time_days": 10},
@@ -229,6 +233,22 @@ class TestCheckLeadTimeSpike:
         ]
         current_rows = [
             (uuid4(), 1, {"item_external_id": "ITEM-1", "lead_time_days": 100}),
+        ]
+        issues = _check_lead_time_spike(batch_id, current_rows, history)
+        assert len(issues) == 1
+        assert issues[0].rule_code == "STAT_LEAD_TIME_SPIKE"
+
+    def test_constant_history_skips_equal_value(self):
+        # No deviation from a zero-variance baseline → no issue.
+        batch_id = uuid4()
+        history = [
+            {"item_external_id": "ITEM-1", "lead_time_days": 10},
+            {"item_external_id": "ITEM-1", "lead_time_days": 10},
+            {"item_external_id": "ITEM-1", "lead_time_days": 10},
+            {"item_external_id": "ITEM-1", "lead_time_days": 10},
+        ]
+        current_rows = [
+            (uuid4(), 1, {"item_external_id": "ITEM-1", "lead_time_days": 10}),
         ]
         issues = _check_lead_time_spike(batch_id, current_rows, history)
         assert issues == []

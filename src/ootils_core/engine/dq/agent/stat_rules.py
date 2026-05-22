@@ -157,7 +157,30 @@ def _check_lead_time_spike(
 
         mean = statistics.mean(hist)
         stdev = statistics.stdev(hist)
+
         if stdev == 0:
+            # Historical baseline is perfectly constant — z-score is undefined.
+            # Treat any deviation from the constant as a spike (the contract
+            # is "lead_time_days deviates from the historical baseline"; with
+            # a zero-variance history, every deviation crosses the implicit
+            # detection floor).
+            if lt == mean:
+                continue
+            issues.append(AgentIssue(
+                issue_id=uuid4(),
+                batch_id=batch_id,
+                row_id=row_id,
+                row_number=row_number,
+                dq_level=3,
+                rule_code="STAT_LEAD_TIME_SPIKE",
+                severity=SEVERITY_ERROR,
+                field_name="lead_time_days",
+                raw_value=str(lt_raw),
+                message=(
+                    f"lead_time_days={lt} dévie d'un historique constant "
+                    f"(μ={mean:.1f}, σ=0)"
+                ),
+            ))
             continue
 
         z_score = abs(lt - mean) / stdev

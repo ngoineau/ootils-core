@@ -13,9 +13,8 @@ All DB calls are mocked via FastAPI dependency_overrides.
 import os
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any
 from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi import status
@@ -71,7 +70,7 @@ class TestATPCheckEndpoint:
         """ATP check requires authentication (verified via middleware)."""
         # Auth is enforced by require_auth dependency which is always active
         # This test verifies the endpoint exists and auth dependency is configured
-        app = create_app()
+        create_app()
         # Check that require_auth is used in the endpoint
         from ootils_core.atp import routers
         # Verify router has auth dependency configured
@@ -122,7 +121,7 @@ class TestATPCheckEndpoint:
             "requested_date": date.today().isoformat(),
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_validation_quantity_negative(self):
         """ATP check validates quantity > 0."""
@@ -135,7 +134,7 @@ class TestATPCheckEndpoint:
             "requested_date": date.today().isoformat(),
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_validation_horizon_days(self):
         """ATP check validates horizon_days range (1-730)."""
@@ -149,7 +148,7 @@ class TestATPCheckEndpoint:
             "horizon_days": 1000,  # Exceeds max 730
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_success_basic(self):
         """ATP check succeeds with valid input."""
@@ -183,7 +182,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
+                    assert data["available"]
                     # quantity_available is returned as string (Decimal serialization)
                     assert data["quantity_available"] in [100.0, "100", 100]
                     assert data["requested_quantity"] in [100.0, "100", 100]
@@ -221,7 +220,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == False
+                    assert not data["available"]
                     assert data["quantity_available"] in [50.0, "50", 50]
                     assert data["backorder_quantity"] in [50.0, "50", 50]
 
@@ -255,7 +254,7 @@ class TestATPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == False
+                    assert not data["available"]
                     assert data["quantity_available"] in [75.0, "75", 75]
                     assert data["backorder_quantity"] in [25.0, "25", 25]
 
@@ -326,8 +325,8 @@ class TestCTPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
-                    assert data["capacity_feasible"] == True
+                    assert data["available"]
+                    assert data["capacity_feasible"]
                     assert data["violations"] == []
                     assert "critical_resources" in data
 
@@ -375,8 +374,8 @@ class TestCTPCheckEndpoint:
                     assert response.status_code == status.HTTP_200_OK
 
                     data = response.json()
-                    assert data["available"] == True
-                    assert data["capacity_feasible"] == False
+                    assert data["available"]
+                    assert not data["capacity_feasible"]
                     assert len(data["violations"]) == 1
                     assert data["violations"][0]["resource_name"] == "CNC Machine 1"
                     assert data["violations"][0]["overload_pct"] == 150.0
@@ -522,7 +521,7 @@ class TestCTPSimulateEndpoint:
             "max_days": 100,  # Exceeds max 90
         }
         response = client.post("/v1/ctp/simulate", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 # ─────────────────────────────────────────────────────────────

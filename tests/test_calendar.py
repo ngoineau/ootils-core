@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest

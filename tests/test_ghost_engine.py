@@ -6,9 +6,8 @@ capacity overload detection, phase transition inconsistency alerts, and dispatch
 """
 from __future__ import annotations
 
-import math
-from datetime import date, timedelta
-from unittest.mock import MagicMock, patch, call
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -22,7 +21,6 @@ from ootils_core.engine.ghost.phase_transition import (
     compute_weight,
     run_phase_transition,
     _get_projected_inventory,
-    INCONSISTENCY_THRESHOLD,
 )
 
 
@@ -188,7 +186,7 @@ class TestComputeWeight:
     def test_total_days_zero_returns_end(self):
         # start == end effectively, but t is between them (same day)
         # total_days = 0 -> return weight_at_end
-        d = date(2024, 3, 1)
+        date(2024, 3, 1)
         # We need t > start and t < end, with start < end but total_days=0 is impossible
         # with dates. Instead test when start == end - 0 days conceptually.
         # Actually total_days = (end - start).days; if start == date(2024,3,1) and

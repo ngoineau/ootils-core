@@ -28,7 +28,7 @@ import pytest
 import psycopg
 from psycopg.rows import dict_row
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures

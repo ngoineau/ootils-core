@@ -30,6 +30,14 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid5
 
+# Ensure stdout/stderr can carry the UTF-8 emojis used in the progress log,
+# even when invoked from a Windows shell where the default code page is
+# cp1252 (e.g. via subprocess.run in tests/integration/test_seed.py).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 

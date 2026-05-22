@@ -13,11 +13,9 @@ All tests use mocks — no real DB required.
 """
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime, timezone
-from decimal import Decimal
-from typing import Any, Optional
-from unittest.mock import MagicMock, call, patch
+from typing import Optional
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -151,7 +149,7 @@ class TestCreateScenario:
         ]
 
         manager = ScenarioManager()
-        scenario = manager.create_scenario(
+        manager.create_scenario(
             name="S1",
             parent_scenario_id=parent_id,
             db=db,

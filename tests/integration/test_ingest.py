@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures
@@ -734,9 +734,13 @@ def test_ingest_forecast_demand_invalid_grain(ingest_client, auth):
 
 @requires_db
 def test_ingest_forecast_demand_dry_run(ingest_client, auth):
+    # The endpoint contract says: "validation runs (including FK), but no DB
+    # writes". Hence FK errors fire even in dry_run — sending unknown
+    # item/location external IDs must produce 422, not status="dry_run".
     resp = ingest_client.post(
         "/v1/ingest/forecast-demand",
         json={"forecasts": [{"item_external_id": "X", "location_external_id": "Y", "quantity": 1.0, "bucket_date": "2026-04-14", "time_grain": "week"}], "dry_run": True},
         headers=auth,
     )
-    assert resp.json()["status"] == "dry_run"
+    assert resp.status_code == 422, resp.text
+    assert isinstance(resp.json()["detail"], list)

@@ -13,9 +13,8 @@ import os
 from datetime import date, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 
 # Must set token BEFORE importing the app

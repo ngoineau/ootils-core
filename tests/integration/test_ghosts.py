@@ -32,7 +32,7 @@ from uuid import uuid4
 
 import pytest
 
-from .conftest import requires_db, DB_AVAILABLE, TEST_DB_URL
+from .conftest import requires_db, TEST_DB_URL
 
 # FastAPI test client
 try:
@@ -40,10 +40,22 @@ try:
     from ootils_core.api.app import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    AUTH_HEADERS = {"Authorization": "Bearer dev-token"}
     APP_AVAILABLE = True
 except Exception:
     APP_AVAILABLE = False
+
+
+def _auth_headers() -> dict[str, str]:
+    """Build auth headers from the *current* OOTILS_API_TOKEN value.
+
+    Read at call time (not import time): other fixtures in this test run
+    may mutate the env var (e.g. test_api_db sets it to
+    "integration-test-token"), and the server-side require_auth reads it
+    fresh on every request. A frozen module-level constant would lock in
+    whatever value the env held during collection and then 401 once the
+    env shifts.
+    """
+    return {"Authorization": f"Bearer {os.environ.get('OOTILS_API_TOKEN', 'dev-token')}"}
 
 requires_app = pytest.mark.skipif(not APP_AVAILABLE, reason="App not importable")
 
@@ -167,7 +179,7 @@ def test_ingest_ghost_phase_transition_valid(migrated_db, conn):
                 },
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -193,7 +205,7 @@ def test_ingest_ghost_phase_transition_violation_two_incoming(migrated_db, conn)
                 {"item_id": item_b, "role": "incoming"},
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert resp.status_code == 422, resp.text
 
@@ -211,7 +223,7 @@ def test_ingest_ghost_phase_transition_violation_one_member(migrated_db, conn):
             "ghost_type": "phase_transition",
             "members": [{"item_id": item_a, "role": "outgoing"}],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert resp.status_code == 422, resp.text
 
@@ -235,7 +247,7 @@ def test_ingest_ghost_capacity_aggregate(migrated_db, conn):
                 {"item_id": item_b, "role": "member"},
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -251,7 +263,7 @@ def test_ingest_ghost_capacity_aggregate(migrated_db, conn):
 @requires_app
 def test_list_ghosts(migrated_db, conn):
     """GET /v1/ghosts returns list."""
-    resp = client.get("/v1/ghosts", headers=AUTH_HEADERS)
+    resp = client.get("/v1/ghosts", headers=_auth_headers())
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "ghosts" in data
@@ -276,12 +288,12 @@ def test_get_ghost_detail(migrated_db, conn):
                 {"item_id": item_b, "role": "incoming", "weight_at_start": 0.0, "weight_at_end": 1.0},
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert create.status_code == 201
     ghost_id = create.json()["ghost_id"]
 
-    resp = client.get(f"/v1/ghosts/{ghost_id}", headers=AUTH_HEADERS)
+    resp = client.get(f"/v1/ghosts/{ghost_id}", headers=_auth_headers())
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["ghost_id"] == ghost_id
@@ -295,7 +307,7 @@ def test_get_ghost_detail(migrated_db, conn):
 @requires_app
 def test_get_ghost_not_found(migrated_db):
     """GET /v1/ghosts/{ghost_id} → 404 for unknown id."""
-    resp = client.get(f"/v1/ghosts/{uuid4()}", headers=AUTH_HEADERS)
+    resp = client.get(f"/v1/ghosts/{uuid4()}", headers=_auth_headers())
     assert resp.status_code == 404
 
 
@@ -390,7 +402,7 @@ def test_run_ghost_phase_transition(migrated_db, conn):
                 },
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert create.status_code == 201
     ghost_id = create.json()["ghost_id"]
@@ -402,7 +414,7 @@ def test_run_ghost_phase_transition(migrated_db, conn):
             "from_date": "2026-06-01",
             "to_date": "2026-06-07",
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert run.status_code == 200, run.text
     data = run.json()
@@ -430,7 +442,7 @@ def test_run_ghost_capacity_aggregate(migrated_db, conn):
                 {"item_id": item_b, "role": "member"},
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert create.status_code == 201
     ghost_id = create.json()["ghost_id"]
@@ -442,7 +454,7 @@ def test_run_ghost_capacity_aggregate(migrated_db, conn):
             "from_date": "2026-06-01",
             "to_date": "2026-06-03",
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert run.status_code == 200, run.text
     data = run.json()
@@ -588,7 +600,7 @@ def test_ghost_node_in_nodes_table(migrated_db, conn):
                 {"item_id": item_b, "role": "incoming", "weight_at_start": 0.0, "weight_at_end": 1.0},
             ],
         },
-        headers=AUTH_HEADERS,
+        headers=_auth_headers(),
     )
     assert create.status_code == 201, create.text
     node_id = create.json().get("node_id")
