@@ -8,6 +8,7 @@ Skip all tests if DATABASE_URL is not configured.
 """
 from __future__ import annotations
 
+from datetime import date
 
 import pytest
 
@@ -166,6 +167,9 @@ def test_04_shortages_table_and_indexes(conn):
 @requires_db
 def test_05_critical_indexes_present(conn):
     """Key indexes from migrations 002-006 are present for engine performance."""
+    # idx_projection_series_lookup was created by migration 002 then dropped
+    # by migration 014 (the (item_id, location_id, scenario_id) UNIQUE
+    # constraint covers the same access pattern). Do not assert it here.
     critical = [
         ("nodes", "idx_nodes_scenario_type"),
         ("nodes", "idx_nodes_item_location_scenario"),
@@ -173,7 +177,6 @@ def test_05_critical_indexes_present(conn):
         ("edges", "idx_edges_from"),
         ("edges", "idx_edges_to"),
         ("events", "idx_events_unprocessed"),
-        ("projection_series", "idx_projection_series_lookup"),
     ]
     for table, idx_name in critical:
         idx = _indexes(conn, table)
@@ -242,11 +245,15 @@ def test_07_migration_002_deferrable_fk_on_nodes_projection_series(conn):
         VALUES (%s, 'ProjectedInventory', %s::UUID, %s::UUID, %s::UUID, %s::UUID)
     """, (node_id, scenario_id, item_id, location_id, series_id))
 
-    # Now insert the projection_series to satisfy the deferred FK before commit
+    # Now insert the projection_series to satisfy the deferred FK before commit.
+    # Note: the `grain` column was removed from projection_series before this
+    # test was last updated — current schema is (series_id, item_id, location_id,
+    # scenario_id, horizon_start, horizon_end, ...).
+    today = date.today()
     conn.execute("""
-        INSERT INTO projection_series (series_id, scenario_id, item_id, location_id, grain)
-        VALUES (%s::UUID, %s::UUID, %s::UUID, %s::UUID, 'Day')
-    """, (series_id, scenario_id, item_id, location_id))
+        INSERT INTO projection_series (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end)
+        VALUES (%s::UUID, %s::UUID, %s::UUID, %s::UUID, %s, %s)
+    """, (series_id, item_id, location_id, scenario_id, today, today))
 
     # Commit — the deferred FK is validated HERE, not at insert time.
     # If DEFERRABLE INITIALLY DEFERRED is not set correctly, this raises.
@@ -315,11 +322,14 @@ def test_09_critical_fks_are_active(conn):
     conn.rollback()
 
     # FK: projection_series.scenario_id → scenarios.scenario_id
+    # (current schema has no `grain` column — see migration 002 for the
+    # canonical column list.)
+    today = date.today()
     with pytest.raises(Exception, match=r"(foreign key|violates)"):
         conn.execute("""
-            INSERT INTO projection_series (series_id, scenario_id, item_id, location_id, grain)
-            VALUES (%s::UUID, %s::UUID, %s::UUID, %s::UUID, 'Day')
-        """, (str(uuid.uuid4()), bad_uuid, str(uuid.uuid4()), str(uuid.uuid4())))
+            INSERT INTO projection_series (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end)
+            VALUES (%s::UUID, %s::UUID, %s::UUID, %s::UUID, %s, %s)
+        """, (str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), bad_uuid, today, today))
         conn.commit()
 
     conn.rollback()
