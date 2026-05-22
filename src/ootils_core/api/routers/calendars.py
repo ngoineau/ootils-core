@@ -135,7 +135,7 @@ async def ingest_calendars(
     location_id = _resolve_location(db, body.location_external_id)
     if location_id is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{
                 "field": "location_external_id",
                 "error": f"Location '{body.location_external_id}' not found in DB",
@@ -307,7 +307,7 @@ async def compute_working_days(
     location_id = _resolve_location(db, body.location_external_id)
     if location_id is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{
                 "field": "location_external_id",
                 "error": f"Location '{body.location_external_id}' not found",

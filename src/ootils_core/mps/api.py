@@ -237,7 +237,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
         return UUID(scenario_id_str)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid scenario_id '{scenario_id_str}' - must be a valid UUID or 'baseline'",
         )
 
@@ -302,13 +302,13 @@ async def aggregate_demand(
         horizon_end = date.fromisoformat(body.horizon_end)
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid date format: {e}",
         )
 
     if horizon_end < horizon_start:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"horizon_end ({horizon_end}) cannot be before horizon_start ({horizon_start})",
         )
 
@@ -329,7 +329,7 @@ async def aggregate_demand(
         )
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(e),
         )
     except Exception as e:
@@ -637,7 +637,7 @@ async def capacity_check(
         mps_uuids = [UUID(mps_id) for mps_id in body.mps_node_ids]
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid MPS node ID format: {e}",
         )
     

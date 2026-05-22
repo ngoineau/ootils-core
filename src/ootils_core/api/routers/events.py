@@ -119,7 +119,7 @@ async def create_event(
     """Submit a planning event that triggers recalculation."""
     if body.event_type not in VALID_EVENT_TYPES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown event_type '{body.event_type}'. Valid: {sorted(VALID_EVENT_TYPES)}",
         )
 
@@ -206,7 +206,7 @@ async def list_events(
     # Validate event_type filter if provided
     if event_type is not None and event_type not in VALID_EVENT_TYPES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown event_type '{event_type}'. Valid: {sorted(VALID_EVENT_TYPES)}",
         )
 
@@ -217,7 +217,7 @@ async def list_events(
             effective_scenario_id = UUID(scenario_id)
         except ValueError:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Invalid scenario_id UUID: '{scenario_id}'",
             )
 

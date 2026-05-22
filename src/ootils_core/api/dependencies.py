@@ -60,6 +60,6 @@ def resolve_scenario_id(
         return UUID(raw)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid scenario_id '{raw}' — must be a valid UUID or 'baseline'",
         )

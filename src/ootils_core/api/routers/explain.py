@@ -48,7 +48,7 @@ async def get_explanation(
         node_uuid = UUID(node_id)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"node_id '{node_id}' is not a valid UUID",
         )
 

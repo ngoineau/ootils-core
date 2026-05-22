@@ -74,7 +74,7 @@ class TestGenerateForecast:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_generate_forecast_invalid_granularity(self, app, auth_headers):
         """Test forecast generation with invalid granularity."""
@@ -94,7 +94,7 @@ class TestGenerateForecast:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_generate_forecast_invalid_method(self, app, auth_headers):
         """Test forecast generation with invalid method."""
@@ -114,7 +114,7 @@ class TestGenerateForecast:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_generate_forecast_valid_methods(self, app, auth_headers):
         """Test forecast generation with all valid methods."""
@@ -372,7 +372,7 @@ class TestListForecasts:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 # ─────────────────────────────────────────────────────────────
@@ -420,7 +420,7 @@ class TestAdjustForecast:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_adjust_forecast_delta_only(self, app, auth_headers):
         """Test adjustment with delta only."""
@@ -507,7 +507,7 @@ class TestAdjustForecast:
                 headers=auth_headers,
             )
         app.dependency_overrides.clear()
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 # ─────────────────────────────────────────────────────────────

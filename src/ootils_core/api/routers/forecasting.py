@@ -188,7 +188,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
         return UUID(scenario_id_str)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid scenario_id '{scenario_id_str}' — must be a valid UUID or 'baseline'",
         )
 
@@ -751,7 +751,7 @@ async def adjust_forecast(
             value_uuid = UUID(body.value_id)
         except ValueError:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Invalid value_id '{body.value_id}' — must be a valid UUID",
             )
 
@@ -770,7 +770,7 @@ async def adjust_forecast(
     # 3. Validate delta/delta_percent
     if body.delta is None and body.delta_percent is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one of delta or delta_percent must be provided",
         )
 

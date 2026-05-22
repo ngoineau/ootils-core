@@ -121,7 +121,7 @@ class TestATPCheckEndpoint:
             "requested_date": date.today().isoformat(),
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_validation_quantity_negative(self):
         """ATP check validates quantity > 0."""
@@ -134,7 +134,7 @@ class TestATPCheckEndpoint:
             "requested_date": date.today().isoformat(),
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_validation_horizon_days(self):
         """ATP check validates horizon_days range (1-730)."""
@@ -148,7 +148,7 @@ class TestATPCheckEndpoint:
             "horizon_days": 1000,  # Exceeds max 730
         }
         response = client.post("/v1/atp/check", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_atp_check_success_basic(self):
         """ATP check succeeds with valid input."""
@@ -521,7 +521,7 @@ class TestCTPSimulateEndpoint:
             "max_days": 100,  # Exceeds max 90
         }
         response = client.post("/v1/ctp/simulate", json=payload, headers=AUTH_HEADERS)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 # ─────────────────────────────────────────────────────────────

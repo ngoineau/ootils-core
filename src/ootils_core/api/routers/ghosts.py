@@ -167,7 +167,7 @@ async def ingest_ghost(
         errors = _validate_membership(body.ghost_type, body.members)
         if errors:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=errors,
             )
 
@@ -182,7 +182,7 @@ async def ingest_ghost(
         missing = [iid for iid in item_ids if iid not in found_ids]
         if missing:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=[f"item_id not found: {iid}" for iid in missing],
             )
 
@@ -194,7 +194,7 @@ async def ingest_ghost(
         ).fetchone()
         if res_row is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=[f"resource_id not found: {body.resource_id}"],
             )
 
