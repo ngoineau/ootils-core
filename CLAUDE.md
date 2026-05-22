@@ -6,7 +6,7 @@ Target-architecture notes may appear below. Verify runtime reality before treati
 
 ## Project
 
-`ootils-core` — a graph-based supply chain decision engine. FastAPI REST API on top of a Python kernel that models supply chains as typed nodes + edges, persisted in PostgreSQL 16. Core capabilities: incremental propagation, shortage detection, MRP explosion, scenario branching (copy-on-write), RCCP, a ghost/virtual-supply engine, and a data quality (DQ) pipeline.
+`ootils-core` — a graph-based supply chain decision engine. FastAPI REST API on top of a Python kernel that models supply chains as typed nodes + edges, persisted in PostgreSQL 16. Core capabilities: incremental propagation, shortage detection, MRP explosion, scenario branching (deep-copy fork — historically labelled "copy-on-write"; see [REVIEW-2026-05 R10](docs/REVIEW-2026-05.md)), RCCP, a ghost/virtual-supply engine, and a data quality (DQ) pipeline.
 
 ## Commands
 
@@ -52,12 +52,12 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 - `kernel/calc/` — `projection` (ProjectionKernel), `calendar`.
 - `kernel/shortage/`, `kernel/explanation/`, `kernel/allocation/`, `kernel/temporal/` — specialized kernels.
 - `orchestration/propagator.py` — `PropagationEngine.process_event()` is the main entry point: acquires advisory lock → expands dirty subgraph → topo sort → compute → persist → cascade. Pairs with `orchestration/calc_run.py` which tracks run status.
-- `scenario/manager.py` — copy-on-write scenario branching.
+- `scenario/manager.py` — scenario forking via deep-copy (the original CoW vocabulary doesn't match the implementation; see REVIEW-2026-05 R10).
 - `dq/`, `ghost/`, `mrp/` — capability modules; the `dq/agent/` subtree is an LLM-driven remediation agent.
 
 ### Storage
 - PostgreSQL 16 via `psycopg[binary]` 3.x — **not** SQLite (ADR-005 proposes SQLite but the project has moved past the proof stage).
-- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB**. Typed columns, 21 numbered SQL migrations under `src/ootils_core/db/migrations/`.
+- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data (diagnostic / staging only — see REVIEW-2026-05 R7). Typed columns, 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
 - Migrations auto-apply on `OotilsDB()` construction (i.e. at API startup), serialized by a PG advisory lock (`_LOCK_KEY = 8_037_421_901`), tracked in `schema_migrations`. A migration that fails with an "already exists"-family error is recorded as applied rather than re-run — so new migrations must be idempotent in that sense.
 
 ### Auth
