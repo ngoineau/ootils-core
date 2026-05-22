@@ -237,6 +237,12 @@ class PropagationEngine:
         """
         Topological sort over dirty nodes, then compute each one in order.
         After each computation, cascade to dependents if the result changed.
+
+        Performance contract: pre-loads the dirty set's nodes + incoming
+        edges + edge-source nodes in 4 batch queries up front (was ~10
+        queries/node before — see REVIEW-2026-05 R2 / SCALABILITY.md BP#1).
+        Per-node compute then reads from `cache` dictionaries instead of
+        the store.
         """
         if not dirty_nodes:
             return
@@ -246,6 +252,62 @@ class PropagationEngine:
         # Topological sort of dirty set
         ordered = self._traversal.topological_sort(dirty_nodes, scenario_id)
 
+        # ------------------------------------------------------------------
+        # PRE-LOAD: 4 batch queries instead of ~10 per node.
+        # ------------------------------------------------------------------
+        dirty_list = list(dirty_nodes)
+        # 1. All dirty nodes themselves.
+        nodes_cache: dict[UUID, Optional[Node]] = dict(
+            self._store.get_nodes_by_ids(dirty_list, scenario_id)
+        )
+        # 2. All incoming edges for the dirty set (feeds_forward, replenishes, consumes).
+        edges_by_target: dict[UUID, dict[str, list]] = {nid: {} for nid in dirty_list}
+        all_incoming = self._store.get_edges_to_nodes(
+            dirty_list, scenario_id,
+            edge_types=["feeds_forward", "replenishes", "consumes"],
+        )
+        for target_id, edges in all_incoming.items():
+            for edge in edges:
+                edges_by_target.setdefault(target_id, {}).setdefault(edge.edge_type, []).append(edge)
+        # 3. All source nodes referenced by those edges.
+        source_node_ids = {
+            edge.from_node_id
+            for edges in all_incoming.values()
+            for edge in edges
+        }
+        # Some predecessors may already be in nodes_cache (e.g. PI[t-1] when both
+        # buckets are dirty). Skip those to avoid a redundant query.
+        missing_source_ids = [nid for nid in source_node_ids if nid not in nodes_cache]
+        if missing_source_ids:
+            nodes_cache.update(self._store.get_nodes_by_ids(missing_source_ids, scenario_id))
+
+        # 4. Pre-load all safety-stock parameters for the (item, location) pairs
+        # touched by the dirty PI set — drops `_get_safety_stock` from "1 query
+        # per PI" to "0 queries per PI" in the common case.
+        safety_stock_cache: dict[tuple[UUID, Optional[UUID]], Decimal] = {}
+        if self._shortage_detector is not None:
+            pi_pairs = {
+                (n.item_id, n.location_id)
+                for n in nodes_cache.values()
+                if n is not None and n.node_type == "ProjectedInventory" and n.item_id is not None
+            }
+            if pi_pairs:
+                item_ids = list({pair[0] for pair in pi_pairs})
+                rows = db.execute(
+                    """
+                    SELECT item_id, location_id, safety_stock_qty
+                    FROM item_planning_params
+                    WHERE item_id = ANY(%s)
+                      AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
+                    """,
+                    (item_ids,),
+                ).fetchall()
+                for r in rows:
+                    if r["safety_stock_qty"] is None:
+                        continue
+                    key = (UUID(str(r["item_id"])), UUID(str(r["location_id"])) if r["location_id"] else None)
+                    safety_stock_cache[key] = Decimal(str(r["safety_stock_qty"]))
+
         # Remaining dirty set (may shrink as we process)
         remaining_dirty = set(dirty_nodes)
 
@@ -253,8 +315,7 @@ class PropagationEngine:
             if node_id not in remaining_dirty:
                 continue  # Already cleared (e.g., cascaded out of window)
 
-            # Load node to determine type
-            node = self._store.get_node(node_id, scenario_id)
+            node = nodes_cache.get(node_id)
             if node is None:
                 self._dirty.clear_dirty(node_id, scenario_id, calc_run.calc_run_id, db)
                 remaining_dirty.discard(node_id)
@@ -266,6 +327,9 @@ class PropagationEngine:
                     scenario_id=scenario_id,
                     calc_run_id=calc_run.calc_run_id,
                     db=db,
+                    nodes_cache=nodes_cache,
+                    edges_by_target=edges_by_target,
+                    safety_stock_cache=safety_stock_cache,
                 )
                 if changed:
                     calc_run.nodes_recalculated += 1
@@ -285,6 +349,9 @@ class PropagationEngine:
         scenario_id: UUID,
         calc_run_id: UUID,
         db: psycopg.Connection,
+        nodes_cache: Optional[dict[UUID, Optional[Node]]] = None,
+        edges_by_target: Optional[dict[UUID, dict[str, list]]] = None,
+        safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
     ) -> bool:
         """
         Recompute a single PI node.
@@ -296,8 +363,26 @@ class PropagationEngine:
         Calls kernel.compute_pi_node, persists the result.
 
         Returns True if the result changed (triggers cascade), False if unchanged.
+
+        When called from `_propagate`, `nodes_cache` and `edges_by_target` are
+        the batch-loaded dicts; reads then hit memory instead of the DB. When
+        called standalone (e.g. tests), the parameters default to None and we
+        fall back to per-call store lookups — fully backwards compatible.
         """
-        node = self._store.get_node(node_id, scenario_id)
+        # ------------------------------------------------------------------
+        # Helpers: resolve node and incoming edges via cache when available.
+        # ------------------------------------------------------------------
+        def _get_node(nid: UUID) -> Optional[Node]:
+            if nodes_cache is not None and nid in nodes_cache:
+                return nodes_cache[nid]
+            return self._store.get_node(nid, scenario_id)
+
+        def _get_edges_to(nid: UUID, edge_type: str) -> list:
+            if edges_by_target is not None:
+                return list(edges_by_target.get(nid, {}).get(edge_type, []))
+            return self._store.get_edges_to(nid, scenario_id, edge_type=edge_type)
+
+        node = _get_node(node_id)
         if node is None or node.node_type != "ProjectedInventory":
             return False
 
@@ -316,18 +401,18 @@ class PropagationEngine:
         opening_stock = Decimal("0")
 
         # Find predecessor via 'feeds_forward' edge (to_node_id = this node)
-        pred_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="feeds_forward")
+        pred_edges = _get_edges_to(node_id, "feeds_forward")
         if pred_edges:
-            pred_node = self._store.get_node(pred_edges[0].from_node_id, scenario_id)
+            pred_node = _get_node(pred_edges[0].from_node_id)
             if pred_node and pred_node.closing_stock is not None:
                 opening_stock = pred_node.closing_stock
         else:
             # First bucket — find on-hand supply nodes for this item/location
             # OnHandSupply nodes connect via 'replenishes' edge too, but at bucket 0
             # Check for any on-hand node feeding into this PI node
-            oh_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="replenishes")
+            oh_edges = _get_edges_to(node_id, "replenishes")
             for edge in oh_edges:
-                src_node = self._store.get_node(edge.from_node_id, scenario_id)
+                src_node = _get_node(edge.from_node_id)
                 if src_node and src_node.node_type == "OnHandSupply":
                     opening_stock += src_node.quantity or Decimal("0")
 
@@ -338,9 +423,9 @@ class PropagationEngine:
         # as both opening_stock AND an inflow, producing incorrect projections.
         # ------------------------------------------------------------------
         supply_events: list = []
-        replenish_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="replenishes")
+        replenish_edges = _get_edges_to(node_id, "replenishes")
         for edge in replenish_edges:
-            src_node = self._store.get_node(edge.from_node_id, scenario_id)
+            src_node = _get_node(edge.from_node_id)
             if src_node is None:
                 continue
             if src_node.node_type in ("PurchaseOrderSupply", "WorkOrderSupply",
@@ -354,9 +439,9 @@ class PropagationEngine:
         # 3. Demand events: nodes connected via 'consumes' to this PI node
         # ------------------------------------------------------------------
         demand_events: list = []
-        consume_edges = self._store.get_edges_to(node_id, scenario_id, edge_type="consumes")
+        consume_edges = _get_edges_to(node_id, "consumes")
         for edge in consume_edges:
-            src_node = self._store.get_node(edge.from_node_id, scenario_id)
+            src_node = _get_node(edge.from_node_id)
             if src_node is None:
                 continue
             if src_node.node_type in ("ForecastDemand", "CustomerOrderDemand",
@@ -460,19 +545,32 @@ class PropagationEngine:
         # ------------------------------------------------------------------
         if self._shortage_detector is not None:
             try:
-                # Reload node to get freshly persisted state
-                fresh_node = self._store.get_node(node_id, scenario_id)
-                if fresh_node is not None:
-                    safety_stock = self._get_safety_stock(fresh_node, db)
-                    shortage = self._shortage_detector.detect_with_params(
-                        pi_node=fresh_node,
-                        calc_run_id=calc_run_id,
-                        scenario_id=scenario_id,
-                        db=db,
-                        safety_stock_qty=safety_stock,
+                # The persisted state mirrors `result` for the computed PI fields.
+                # Mutate the in-memory node with those values instead of reloading
+                # from the DB (saves one query per PI node — see REVIEW-2026-05 R2).
+                node.opening_stock = result["opening_stock"]
+                node.inflows = result["inflows"]
+                node.outflows = result["outflows"]
+                node.closing_stock = result["closing_stock"]
+                node.has_shortage = result["has_shortage"]
+                node.shortage_qty = result["shortage_qty"]
+
+                if safety_stock_cache is not None and node.item_id is not None:
+                    safety_stock = (
+                        safety_stock_cache.get((node.item_id, node.location_id))
+                        or safety_stock_cache.get((node.item_id, None))
                     )
-                    if shortage is not None:
-                        self._shortage_detector.persist(shortage, db)
+                else:
+                    safety_stock = self._get_safety_stock(node, db)
+                shortage = self._shortage_detector.detect_with_params(
+                    pi_node=node,
+                    calc_run_id=calc_run_id,
+                    scenario_id=scenario_id,
+                    db=db,
+                    safety_stock_qty=safety_stock,
+                )
+                if shortage is not None:
+                    self._shortage_detector.persist(shortage, db)
             except Exception as exc:  # noqa: BLE001
                 # Shortage detection failure must never break the propagation pipeline
                 logger.warning(

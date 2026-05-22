@@ -18,9 +18,11 @@
 
 ## Breaking points
 
-### Breaking point #1: Propagation — O(N × 10–20 queries per PI node)
+### Breaking point #1: Propagation — O(N × 10–20 queries per PI node) — **FIXED**
 
-`propagator.py _recompute_pi_node` executes 10–20 SQL queries per PI node:
+**Status:** Resolved 2026-05-23 (REVIEW-2026-05 R2). See PR for the refactor.
+
+Before the fix, `propagator.py _recompute_pi_node` executed 10–20 SQL queries per PI node:
 
 - 1× `get_node` (load PI node)
 - 1× `get_edges_to` (feeds_forward for predecessor)
@@ -29,17 +31,42 @@
 - 1× `get_edges_to` (consumes)
 - 1× `update_pi_result`
 - 2× `get_node` (fresh reload for explanation + shortage)
+- 1× safety-stock query
 
-Additionally, `topological_sort` does **1 query per node** (`get_edges_to` in loop) before computation starts.
+The fix pre-loads everything `_propagate` needs in **4 batch queries** before the per-node loop:
+
+1. `get_nodes_by_ids(dirty_list)` — all dirty nodes
+2. `get_edges_to_nodes(dirty_list, edge_types=[feeds_forward, replenishes, consumes])` — all incoming edges
+3. `get_nodes_by_ids(source_ids)` — all edge sources (skips ids already in the cache)
+4. `SELECT … FROM item_planning_params` — all safety stocks for the touched (item, location) pairs
+
+Per-node work then reads from the in-memory caches and shrinks to **2 queries/node** (`clear_dirty` + `update_pi_result`).
+
+#### Measured impact (`scripts/bench_propagation.py`)
+
+| Scale | Dirty PI nodes | Before — queries / wall | After — queries / wall | Speedup |
+|-------|---------------|--------------------------|------------------------|---------|
+| Demo (10 items × 14 buckets) | 140 | 1,421 / 5.8s | 285 / 1.2s | **4.8×** |
+| Pilot (50 items × 30 buckets) | 1,500 | 15,101 / 61.8s | 3,005 / 12.0s | **5.1×** |
+
+Throughput climbs from ~24 nodes/sec to ~125 nodes/sec, with `queries/node` dropping from 10.07 to 2.0. Scaling stays linear in nodes (no quadratic blow-up).
+
+#### Re-bench projection (post-fix)
 
 | Scale | Dirty PI nodes | Queries/node | Total queries | Est. time @ 1ms/query |
 |-------|---------------|-------------|---------------|-----------------------|
-| Demo | 90 | 15 | 1,350 | 1.3s |
-| Pilot | 500 | 15 | 7,500 | 7.5s |
-| SMB | 5,000 | 15 | 75,000 | **75s** |
-| Mid-market | 50,000 | 15 | 750,000 | **12+ min** |
+| Demo | 90 | 2.0 | 184 | <1s |
+| Pilot | 500 | 2.0 | 1,004 | ~1s |
+| SMB | 5,000 | 2.0 | 10,004 | **~40s** (was 75s+) |
+| Mid-market | 50,000 | 2.0 | 100,004 | **~100s** (was 12+ min) |
 
-**Fix (Tier 1):** Batch-load all edges and nodes for the dirty subgraph in 2 queries before propagation begins, then process in-memory.
+The SMB tier no longer breaks; the mid-market tier becomes viable for batch runs even before further investment.
+
+#### Remaining levers (Tier 2 — not in scope of R2)
+
+- Batch the `update_pi_result` writes (one `UPDATE … FROM (VALUES …)` instead of N executions).
+- Cap `clear_dirty` to a single `DELETE … WHERE node_id = ANY(%s)` at the end of the loop.
+- Push the kernel compute into a Rust extension (issue #197).
 
 ---
 

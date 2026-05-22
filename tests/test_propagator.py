@@ -691,7 +691,11 @@ class TestPropagate:
 
         store = MagicMock()
         pi_node = _make_node(node_id=node_id, scenario_id=scenario_id, node_type="ProjectedInventory")
-        store.get_node.return_value = pi_node
+        # _propagate now batch-loads via get_nodes_by_ids; preserve a sensible
+        # default for get_edges_to_nodes (no edges) so the source-node fetch
+        # doesn't barf.
+        store.get_nodes_by_ids.return_value = {node_id: pi_node}
+        store.get_edges_to_nodes.return_value = {}
 
         traversal = MagicMock()
         traversal.topological_sort.return_value = [node_id]
@@ -715,7 +719,8 @@ class TestPropagate:
 
         store = MagicMock()
         pi_node = _make_node(node_id=node_id, scenario_id=scenario_id, node_type="ProjectedInventory")
-        store.get_node.return_value = pi_node
+        store.get_nodes_by_ids.return_value = {node_id: pi_node}
+        store.get_edges_to_nodes.return_value = {}
 
         traversal = MagicMock()
         traversal.topological_sort.return_value = [node_id]
@@ -734,7 +739,8 @@ class TestPropagate:
 
         store = MagicMock()
         node = _make_node(node_id=node_id, scenario_id=scenario_id, node_type="ForecastDemand")
-        store.get_node.return_value = node
+        store.get_nodes_by_ids.return_value = {node_id: node}
+        store.get_edges_to_nodes.return_value = {}
 
         traversal = MagicMock()
         traversal.topological_sort.return_value = [node_id]
@@ -751,7 +757,9 @@ class TestPropagate:
         run = _make_calc_run(scenario_id=scenario_id)
 
         store = MagicMock()
-        store.get_node.return_value = None
+        # No node found in the batch pre-load → dirty flag is cleared anyway.
+        store.get_nodes_by_ids.return_value = {}
+        store.get_edges_to_nodes.return_value = {}
 
         traversal = MagicMock()
         traversal.topological_sort.return_value = [node_id]
@@ -766,9 +774,13 @@ class TestPropagate:
         scenario_id = uuid4()
         node_a = uuid4()
         node_b = uuid4()
+        node_a_obj = _make_node(node_id=node_a, scenario_id=scenario_id, node_type="ForecastDemand")
         run = _make_calc_run(scenario_id=scenario_id)
 
         store = MagicMock()
+        # Only node_a is in the dirty set, so the pre-load only contains it.
+        store.get_nodes_by_ids.return_value = {node_a: node_a_obj}
+        store.get_edges_to_nodes.return_value = {}
         traversal = MagicMock()
         # topo sort returns both, but only node_a is in dirty set
         traversal.topological_sort.return_value = [node_a, node_b]
@@ -777,8 +789,8 @@ class TestPropagate:
         engine = _make_engine(store=store, traversal=traversal, dirty=dirty)
 
         engine._propagate(run, {node_a}, _mock_db())
-        # node_b should be skipped; get_node called only for node_a
-        assert store.get_node.call_count == 1
+        # node_b should be skipped; clear_dirty called only for node_a
+        assert dirty.clear_dirty.call_count == 1
 
 
 # ===========================================================================
@@ -1802,7 +1814,12 @@ class TestRecomputePiNode:
         # Should NOT raise
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
-    def test_shortage_detector_fresh_node_none_skips(self):
+    def test_shortage_detector_receives_computed_result_values(self):
+        """After REVIEW-2026-05 R2, the shortage detector reads the in-memory
+        node mutated with the just-computed result instead of reloading it
+        from the store. Confirm the detector sees the new closing_stock,
+        not the pre-compute value.
+        """
         scenario_id = uuid4()
         node_id = uuid4()
 
@@ -1812,21 +1829,21 @@ class TestRecomputePiNode:
             node_type="ProjectedInventory",
             time_span_start=date(2025, 1, 1),
             time_span_end=date(2025, 1, 7),
+            closing_stock=Decimal("0"),  # pre-compute baseline
         )
 
         store = MagicMock()
-        # First get_node returns pi_node, then None for fresh reload
-        store.get_node.side_effect = [pi_node, None]
+        store.get_node.return_value = pi_node
         store.get_edges_to.return_value = []
 
         kernel = MagicMock()
         kernel.compute_pi_node.return_value = {
             "opening_stock": Decimal("0"),
             "inflows": Decimal("0"),
-            "outflows": Decimal("0"),
-            "closing_stock": Decimal("0"),
-            "has_shortage": False,
-            "shortage_qty": Decimal("0"),
+            "outflows": Decimal("100"),
+            "closing_stock": Decimal("-100"),
+            "has_shortage": True,
+            "shortage_qty": Decimal("100"),
         }
 
         shortage_detector = MagicMock()
@@ -1834,7 +1851,13 @@ class TestRecomputePiNode:
             store=store, kernel=kernel, shortage_detector=shortage_detector,
         )
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
-        shortage_detector.detect_with_params.assert_not_called()
+
+        # Detector must have been called with the freshly-mutated pi_node
+        shortage_detector.detect_with_params.assert_called_once()
+        call_node = shortage_detector.detect_with_params.call_args.kwargs["pi_node"]
+        assert call_node.closing_stock == Decimal("-100")
+        assert call_node.has_shortage is True
+        assert call_node.shortage_qty == Decimal("100")
 
     def test_demand_uses_time_span_start_when_time_ref_none(self):
         """demand_date = src_node.time_ref or src_node.time_span_start"""

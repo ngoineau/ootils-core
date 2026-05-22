@@ -173,6 +173,67 @@ class GraphStore:
             ).fetchall()
         return [_row_to_edge(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Batch reads — used by propagator to amortise the per-node query cost.
+    # See REVIEW-2026-05 R2 / docs/SCALABILITY.md breaking point #1.
+    # ------------------------------------------------------------------
+
+    def get_nodes_by_ids(
+        self,
+        node_ids: list[UUID],
+        scenario_id: UUID,
+    ) -> dict[UUID, Node]:
+        """Batch-load active nodes by id within a scenario. Returns id → Node."""
+        if not node_ids:
+            return {}
+        rows = self._conn.execute(
+            """
+            SELECT * FROM nodes
+            WHERE node_id = ANY(%s) AND scenario_id = %s AND active = TRUE
+            """,
+            (node_ids, scenario_id),
+        ).fetchall()
+        return {UUID(str(r["node_id"])): _row_to_node(r) for r in rows}
+
+    def get_edges_to_nodes(
+        self,
+        node_ids: list[UUID],
+        scenario_id: UUID,
+        edge_types: Optional[list[str]] = None,
+    ) -> dict[UUID, list[Edge]]:
+        """Batch-load incoming edges for many target nodes. Returns to_node_id → [Edge].
+
+        When `edge_types` is provided, only edges of those types are returned.
+        Empty buckets for un-referenced node_ids are not included — caller
+        should default to `[]` when the key is missing.
+        """
+        if not node_ids:
+            return {}
+        if edge_types:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM edges
+                WHERE to_node_id = ANY(%s) AND scenario_id = %s
+                  AND edge_type = ANY(%s) AND active = TRUE
+                ORDER BY priority ASC, edge_id ASC
+                """,
+                (node_ids, scenario_id, edge_types),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM edges
+                WHERE to_node_id = ANY(%s) AND scenario_id = %s AND active = TRUE
+                ORDER BY priority ASC, edge_id ASC
+                """,
+                (node_ids, scenario_id),
+            ).fetchall()
+        bucket: dict[UUID, list[Edge]] = {}
+        for r in rows:
+            key = UUID(str(r["to_node_id"]))
+            bucket.setdefault(key, []).append(_row_to_edge(r))
+        return bucket
+
     def get_all_edges(self, scenario_id: UUID) -> list[Edge]:
         """Return all active edges for a scenario (used by traversal)."""
         rows = self._conn.execute(
