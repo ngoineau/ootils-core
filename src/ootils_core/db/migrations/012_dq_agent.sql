@@ -1,6 +1,16 @@
 -- ============================================================
 -- Migration 012: DQ Agent V1 — agent runs + enriched issues
 -- ============================================================
+-- JSONB carve-out (see REVIEW-2026-05 R7):
+--   `dq_agent_runs.summary` stores the agent's per-run diagnostic payload:
+--   counts (total_rows, issues_count, critical_count, warning_count,
+--   stat_issues, temporal_issues, affected_items_count), the LLM
+--   availability flag, and an unbounded list of priority actions emitted
+--   by the LLM. The "no JSONB for business data" rule in CLAUDE.md
+--   explicitly carves out diagnostic / staging payloads. This column is
+--   the canonical diagnostic case the rule was designed for and is the
+--   only acceptable JSONB use in the dq_agent subsystem.
+-- ============================================================
 
 -- Table tracking each DQ Agent execution
 CREATE TABLE IF NOT EXISTS dq_agent_runs (
@@ -10,7 +20,7 @@ CREATE TABLE IF NOT EXISTS dq_agent_runs (
     model_used      TEXT,
     started_at      TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ,
-    summary         JSONB,
+    summary         JSONB,  -- diagnostic payload (see header comment + REVIEW-2026-05 R7)
     llm_narrative   TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

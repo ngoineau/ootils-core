@@ -57,7 +57,7 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 
 ### Storage
 - PostgreSQL 16 via `psycopg[binary]` 3.x — **not** SQLite (ADR-005 proposes SQLite but the project has moved past the proof stage).
-- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data (diagnostic / staging only — see REVIEW-2026-05 R7). Typed columns, 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
+- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data. Diagnostic / staging payloads are the explicit carve-out: `dq_agent_runs.summary` (per-run agent diagnostic, see header of `db/migrations/012_dq_agent.sql`), `mrp_runs.errors`/`mrp_runs.warnings`, and `demo_runs.artifact` are the only acceptable cases — every other column uses typed columns. 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
 - Migrations auto-apply on `OotilsDB()` construction (i.e. at API startup), serialized by a PG advisory lock (`_LOCK_KEY = 8_037_421_901`), tracked in `schema_migrations`. A migration that fails with an "already exists"-family error is recorded as applied rather than re-run — so new migrations must be idempotent in that sense.
 
 ### Auth
