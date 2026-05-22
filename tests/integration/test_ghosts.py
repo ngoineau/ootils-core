@@ -26,6 +26,7 @@ Covers:
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -39,7 +40,12 @@ try:
     from ootils_core.api.app import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    AUTH_HEADERS = {"Authorization": "Bearer dev-token"}
+    # Track the token the server was started with. Falls back to "dev-token"
+    # when OOTILS_API_TOKEN is unset (developer environment); in CI the env
+    # var is "test-token-ci" and the auth header follows automatically.
+    AUTH_HEADERS = {
+        "Authorization": f"Bearer {os.environ.get('OOTILS_API_TOKEN', 'dev-token')}"
+    }
     APP_AVAILABLE = True
 except Exception:
     APP_AVAILABLE = False

@@ -198,15 +198,19 @@ async def ingest_ghost(
                 detail=[f"resource_id not found: {body.resource_id}"],
             )
 
-    # 4. Upsert ghost_node: keyed by (name, ghost_type, scenario_id)
+    # 4. Upsert ghost_node: keyed by (name, ghost_type, scenario_id).
+    # Default an absent scenario_id to baseline so the query has a concrete
+    # type and ghost_nodes rows are never written with NULL (which would
+    # confuse the unique index and trip psycopg's IndeterminateDatatype
+    # on the INSERT path below).
+    scenario_id_for_node = body.scenario_id if body.scenario_id else BASELINE_SCENARIO_ID
     existing_ghost = db.execute(
         """
         SELECT ghost_id, node_id FROM ghost_nodes
-        WHERE name = %s AND ghost_type = %s
-          AND (scenario_id = %s OR (scenario_id IS NULL AND %s IS NULL))
+        WHERE name = %s AND ghost_type = %s AND scenario_id = %s
         LIMIT 1
         """,
-        (body.name, body.ghost_type, body.scenario_id, body.scenario_id),
+        (body.name, body.ghost_type, scenario_id_for_node),
     ).fetchone()
 
     if existing_ghost:
@@ -223,9 +227,9 @@ async def ingest_ghost(
         action = "updated"
     else:
         ghost_id = uuid4()
-        # Create the Ghost node in the graph first
+        # Create the Ghost node in the graph first (scenario_id_for_node is
+        # already resolved above so the INSERT below never receives NULL).
         node_id = uuid4()
-        scenario_id_for_node = body.scenario_id if body.scenario_id else BASELINE_SCENARIO_ID
         db.execute(
             """
             INSERT INTO nodes (node_id, node_type, scenario_id, active)
@@ -240,7 +244,7 @@ async def ingest_ghost(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                ghost_id, body.name, body.ghost_type, body.scenario_id,
+                ghost_id, body.name, body.ghost_type, scenario_id_for_node,
                 body.resource_id, node_id, body.status, body.description,
             ),
         )
