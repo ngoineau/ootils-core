@@ -636,10 +636,13 @@ async def ingest_locations(
 
     for loc in body.locations:
         if loc.external_id in existing:
+            # `locations` table has no `updated_at` column (see migration 002:
+            # only `created_at`). Older code copy-pasted the `items` UPDATE
+            # template and crashed with UndefinedColumn at runtime.
             db.execute(
                 """
                 UPDATE locations
-                SET name = %s, location_type = %s, country = %s, timezone = %s, updated_at = now()
+                SET name = %s, location_type = %s, country = %s, timezone = %s
                 WHERE external_id = %s
                 """,
                 (loc.name, loc.location_type, loc.country, loc.timezone, loc.external_id),
