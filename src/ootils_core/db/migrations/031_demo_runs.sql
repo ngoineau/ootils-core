@@ -1,4 +1,15 @@
 -- Demo run audit/history
+--
+-- JSONB carve-out (see CLAUDE.md "no JSONB for business data — explicit
+-- carve-outs for diagnostic/staging payloads"):
+--   `demo_runs.artifact` captures the full per-step output payload of a
+--   demo execution (e.g. forecast snapshot, MPS draft, ATP probe). The
+--   shape changes between demo flows and demo evolutions; the table is a
+--   forensic audit trail, never queried as business data. Typed columns
+--   above cover everything that is queried (status, counts, durations).
+--   This is one of the three documented carve-outs alongside
+--   `dq_agent_runs.summary` (mig 012) and `mrp_runs.errors`/`warnings`
+--   (mig 021).
 
 CREATE TABLE IF NOT EXISTS demo_runs (
     demo_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
