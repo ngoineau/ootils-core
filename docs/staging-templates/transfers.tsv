@@ -1,0 +1,4 @@
+external_id	item_external_id	from_location_external_id	to_location_external_id	quantity	expected_arrival_date	status
+WMS-TR-2026-001	SAP-FG-00001	SAP-PL-MUC	SAP-DC-EU-Central	100	2026-06-03	in_transit
+WMS-TR-2026-002	SAP-FG-00001	SAP-PL-MUC	SAP-DC-USA-East	150	2026-06-15	in_transit
+WMS-TR-2026-003	SAP-FG-00002	SAP-PL-SHA	SAP-DC-USA-East	80	2026-07-10	in_transit
