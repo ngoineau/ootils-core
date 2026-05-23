@@ -64,12 +64,13 @@ async def get_graph(
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> GraphResponse:
     """Return nodes and edges for the planning graph at (item, location, scenario)."""
-    # Resolve item UUID
+    # Resolve item UUID — accept UUID, name, or external_id (aligned with projection.py)
     try:
         item_uuid = UUID(item_id)
     except ValueError:
         row = db.execute(
-            "SELECT item_id FROM items WHERE name = %s LIMIT 1", (item_id,)
+            "SELECT item_id FROM items WHERE name = %s OR external_id = %s LIMIT 1",
+            (item_id, item_id),
         ).fetchone()
         if row is None:
             raise HTTPException(
@@ -77,12 +78,13 @@ async def get_graph(
             )
         item_uuid = UUID(str(row["item_id"]))
 
-    # Resolve location UUID
+    # Resolve location UUID — accept UUID, name, or external_id
     try:
         location_uuid = UUID(location_id)
     except ValueError:
         row = db.execute(
-            "SELECT location_id FROM locations WHERE name = %s LIMIT 1", (location_id,)
+            "SELECT location_id FROM locations WHERE name = %s OR external_id = %s LIMIT 1",
+            (location_id, location_id),
         ).fetchone()
         if row is None:
             raise HTTPException(

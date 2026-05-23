@@ -148,7 +148,9 @@ def _count_working_days(
             """,
             (location_id, start, end),
         ).fetchone()
-        if row and row["cnt"] > 0:
+        # SELECT COUNT(*) always returns one row; cnt == 0 means the calendar
+        # has no working_day entries for this range → fall through to Mon-Fri.
+        if row["cnt"] > 0:
             return int(row["cnt"])
 
     # Fallback: count Mon–Fri in [start, end]
