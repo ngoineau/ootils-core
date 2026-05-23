@@ -89,7 +89,7 @@ def test_upload_tsv_items(staging_client, auth, migrated_db: str) -> None:
             (body["upload_id"],),
         ).fetchone()
         assert up is not None
-        assert up["batch_id"] == body["batch_id"]
+        assert str(up["batch_id"]) == body["batch_id"]
         assert up["sha256"] == body["sha256"]
         assert up["filename"] == "items.tsv"
 
