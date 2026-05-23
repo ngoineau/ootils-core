@@ -37,7 +37,9 @@ from bench_propagation import (  # type: ignore[import-not-found]
     _mark_all_pi_dirty,
     BASELINE_SCENARIO_ID,
 )
-from spike_sql_propagate import PROPAGATE_SQL, CLEAR_DIRTY_SQL, SHORTAGES_SQL, RESOLVE_STALE_SQL  # type: ignore[import-not-found]
+from ootils_core.engine.orchestration.propagator_sql import (  # type: ignore[import-not-found]
+    SqlPropagationEngine,
+)
 
 
 def _seed_rich(
@@ -575,14 +577,71 @@ def _pick_incremental_subset(conn: psycopg.Connection, buckets: int) -> list[UUI
     return [UUID(str(r["node_id"])) for r in rows]
 
 
+def _build_sql_engine(conn: psycopg.Connection) -> SqlPropagationEngine:
+    """Build a SqlPropagationEngine using the same wiring as _build_propagation_engine."""
+    from ootils_core.engine.kernel.graph.store import GraphStore
+    from ootils_core.engine.kernel.graph.traversal import GraphTraversal
+    from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+    from ootils_core.engine.orchestration.calc_run import CalcRunManager
+    from ootils_core.engine.kernel.calc.projection import ProjectionKernel
+    from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
+    from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+
+    store = GraphStore(conn)
+    return SqlPropagationEngine(
+        store=store,
+        traversal=GraphTraversal(store),
+        dirty=DirtyFlagManager(),
+        calc_run_mgr=CalcRunManager(),
+        kernel=ProjectionKernel(),
+        explanation_builder=ExplanationBuilder(),
+        shortage_detector=ShortageDetector(),
+    )
+
+
 def _run_sql_propagation(conn: psycopg.Connection, calc_run_id: UUID) -> float:
-    """Run the SQL window spike + shortage detection. Returns wall_seconds."""
-    params = {"scenario_id": BASELINE_SCENARIO_ID, "calc_run_id": calc_run_id}
+    """Run SqlPropagationEngine._propagate + shortage_detector.resolve_stale.
+
+    Mirrors what the Python harness does: skips _finish_run (which would also
+    do scenario-level bookkeeping the harness doesn't need), but calls
+    resolve_stale explicitly to match the production end-of-run contract.
+    """
+    from ootils_core.models import CalcRun
+
+    sql_engine = _build_sql_engine(conn)
+    row = conn.execute(
+        "SELECT * FROM calc_runs WHERE calc_run_id = %s",
+        (calc_run_id,),
+    ).fetchone()
+    calc_run = CalcRun(
+        calc_run_id=UUID(str(row["calc_run_id"])),
+        scenario_id=UUID(str(row["scenario_id"])),
+        triggered_by_event_ids=[UUID(str(e)) for e in (row.get("triggered_by_event_ids") or [])],
+        is_full_recompute=bool(row.get("is_full_recompute", False)),
+        dirty_node_count=row.get("dirty_node_count"),
+        nodes_recalculated=int(row.get("nodes_recalculated", 0)),
+        nodes_unchanged=int(row.get("nodes_unchanged", 0)),
+        status=row.get("status", "running"),
+        started_at=row.get("started_at"),
+        completed_at=row.get("completed_at"),
+        error_message=row.get("error_message"),
+    )
+    # Load the current dirty set from the persisted dirty_nodes table so the
+    # engine sees the same set the production caller would pass in.
+    dirty_rows = conn.execute(
+        "SELECT node_id FROM dirty_nodes WHERE calc_run_id = %s AND scenario_id = %s",
+        (calc_run_id, BASELINE_SCENARIO_ID),
+    ).fetchall()
+    dirty = {UUID(str(r["node_id"])) for r in dirty_rows}
+
     started = time.perf_counter()
-    conn.execute(PROPAGATE_SQL, params)
-    conn.execute(SHORTAGES_SQL, params)
-    conn.execute(RESOLVE_STALE_SQL, params)
-    conn.execute(CLEAR_DIRTY_SQL, params)
+    sql_engine._propagate(calc_run, dirty, conn)
+    if sql_engine._shortage_detector is not None:
+        sql_engine._shortage_detector.resolve_stale(
+            scenario_id=BASELINE_SCENARIO_ID,
+            calc_run_id=calc_run_id,
+            db=conn,
+        )
     conn.commit()
     return time.perf_counter() - started
 
