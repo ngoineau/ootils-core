@@ -153,7 +153,7 @@ def test_approve_pure_insert_creates_canonical_rows(
 
     # Verify canonical tables now hold the rows
     rows = conn.execute(
-        "SELECT external_id, name FROM items WHERE external_id LIKE 'APP-INS-%' "
+        "SELECT external_id, name FROM items WHERE external_id LIKE 'APP-INS-%%' "
         "ORDER BY external_id"
     ).fetchall()
     assert len(rows) == 2
@@ -255,7 +255,7 @@ def test_approve_soft_deletes_missing_rows(staging_client, auth, conn) -> None:
     # external_references entries removed for this source
     refs = conn.execute(
         "SELECT external_id FROM external_references "
-        "WHERE source_system = %s AND external_id LIKE 'APP-DEL-%'",
+        "WHERE source_system = %s AND external_id LIKE 'APP-DEL-%%'",
         (src,),
     ).fetchall()
     assert len(refs) == 0
