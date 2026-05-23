@@ -541,6 +541,19 @@ def _build_run_dq_db(batch_id, entity_type, ingest_rows, ref_data=None):
 
     def handler(sql, params=None):
         sql_low = sql.lower().strip()
+        # L4 queries hit ingest_rows / suppliers / items+ipp with specific
+        # filters. Match them BEFORE the generic ingest_rows match below,
+        # otherwise L4's "SELECT col_01 FROM ingest_rows JOIN ingest_batches"
+        # would pick up the test's primary ingest_rows payload and crash
+        # on a missing col_01 key.
+        if "from ingest_rows r" in sql_low and "join ingest_batches" in sql_low:
+            return []  # L4 inter-batch collision: no other batch by default
+        if "from suppliers" in sql_low and "status != 'active'" in sql_low:
+            return []  # L4 supplier-inactive: no blocked suppliers by default
+        if "from items i" in sql_low and "join item_planning_params" in sql_low:
+            # L4 orphan-item query returns items WITHOUT planning_params.
+            # Default empty -> no orphans flagged.
+            return [{"external_id": eid} for eid in ref_data.get("orphan_items", [])]
         if "from ingest_batches" in sql_low and "select" in sql_low:
             return {"batch_id": batch_id, "entity_type": entity_type, "status": "uploaded"}
         if "from ingest_rows" in sql_low and "select" in sql_low:
