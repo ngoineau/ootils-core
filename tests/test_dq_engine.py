@@ -92,7 +92,7 @@ def test_l1_items_clean():
     issues = _check_l1(rid, 1, {
         "external_id": "I1",
         "name": "Widget",
-        "item_type": "RAW",
+        "item_type": "raw_material",
         "uom": "EA",
         "status": "active",
     }, "items")
@@ -108,7 +108,7 @@ def test_l1_missing_mandatory_field():
 def test_l1_empty_string_treated_as_missing():
     rid = uuid4()
     issues = _check_l1(rid, 1, {
-        "external_id": "X", "name": "", "item_type": "RAW", "uom": "EA", "status": "active"
+        "external_id": "X", "name": "", "item_type": "raw_material", "uom": "EA", "status": "active"
     }, "items")
     assert any(i.field_name == "name" and i.rule_code == "L1_MISSING_FIELD" for i in issues)
 
@@ -117,7 +117,7 @@ def test_l1_str_too_long():
     rid = uuid4()
     long = "x" * 300
     issues = _check_l1(rid, 1, {
-        "external_id": long, "name": "n", "item_type": "RAW", "uom": "EA", "status": "active"
+        "external_id": long, "name": "n", "item_type": "raw_material", "uom": "EA", "status": "active"
     }, "items")
     assert any(i.rule_code == "L1_INVALID_FORMAT" and i.field_name == "external_id" for i in issues)
 
@@ -581,7 +581,7 @@ def test_run_dq_items_happy_path():
         "row_id": rid, "row_number": 1,
         "raw_content": json.dumps({
             "external_id": "I1", "name": "Widget",
-            "item_type": "RAW", "uom": "EA", "status": "active",
+            "item_type": "raw_material", "uom": "EA", "status": "active",
         }),
     }]
     db = _build_run_dq_db(bid, "items", rows)
@@ -598,7 +598,7 @@ def test_run_dq_locations_happy_path():
     rows = [{
         "row_id": uuid4(), "row_number": 1,
         "raw_content": json.dumps({
-            "external_id": "L1", "name": "DC", "location_type": "DC",
+            "external_id": "L1", "name": "DC", "location_type": "dc",
         }),
     }]
     db = _build_run_dq_db(bid, "locations", rows)
@@ -761,7 +761,7 @@ def test_run_dq_agent_failure_swallowed():
         "row_id": uuid4(), "row_number": 1,
         "raw_content": json.dumps({
             "external_id": "I1", "name": "Widget",
-            "item_type": "RAW", "uom": "EA", "status": "active",
+            "item_type": "raw_material", "uom": "EA", "status": "active",
         }),
     }]
     db = _build_run_dq_db(bid, "items", rows)
@@ -777,7 +777,7 @@ def test_run_dq_multiple_rows_mixed_status():
             "row_id": uuid4(), "row_number": 1,
             "raw_content": json.dumps({
                 "external_id": "I1", "name": "Good",
-                "item_type": "RAW", "uom": "EA", "status": "active",
+                "item_type": "raw_material", "uom": "EA", "status": "active",
             }),
         },
         {
