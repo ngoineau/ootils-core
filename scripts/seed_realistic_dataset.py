@@ -63,6 +63,8 @@ from ootils_core.seed.demand.order_history import (
     generate_order_history,
     insert_order_history,
 )
+from ootils_core.seed.projection.graph import seed_projection_graph
+from ootils_core.seed.projection.calibration import calibrate
 
 
 def _admin_recreate_db(dsn: str, dbname: str) -> None:
@@ -265,6 +267,48 @@ def _phase5_demand(
         "orders_gen_seconds": round(t_co_gen, 3),
         "forecast_insert_seconds": round(t_fc_ins, 3),
         "orders_insert_seconds": round(t_co_ins, 3),
+    }
+
+
+def _phase7_calibrate(conn, profile: Profile, items, locations) -> dict:
+    """Seed projection graph + propagate + iteratively calibrate OH for shortage target."""
+    t0 = time.perf_counter()
+    graph = seed_projection_graph(conn, items, locations, horizon_days=90)
+    t_graph = time.perf_counter() - t0
+
+    result = calibrate(
+        conn,
+        target_pct=profile.target_shortage_pct,
+        tolerance=0.02,
+        max_iterations=10,
+    )
+
+    return {
+        "horizon_days": (graph.horizon_end - graph.horizon_start).days,
+        "series_count": graph.series_count,
+        "pi_node_count": graph.pi_node_count,
+        "edges_total": graph.edges_total,
+        "feeds_forward": graph.feeds_forward_count,
+        "replenishes_oh": graph.replenishes_from_oh_count,
+        "replenishes_transfer": graph.replenishes_from_transfer_count,
+        "consumes_orders": graph.consumes_from_orders_count,
+        "consumes_forecasts": graph.consumes_from_forecasts_count,
+        "graph_seed_seconds": graph.seconds,
+        "calibration_iterations": [
+            {
+                "i": it.iteration,
+                "oh_scale_next": round(it.oh_scale_applied, 3),
+                "pi_total": it.pi_total,
+                "pi_short": it.pi_with_shortage,
+                "shortage_pct": round(it.shortage_pct * 100, 2),
+                "propagation_s": it.propagation_seconds,
+            }
+            for it in result.iterations
+        ],
+        "converged": result.converged,
+        "final_shortage_pct": round(result.final_shortage_pct * 100, 2),
+        "calibration_seconds": result.total_seconds,
+        "phase7_total_seconds": round(t_graph + result.total_seconds, 2),
     }
 
 
@@ -670,6 +714,7 @@ def main() -> int:
         validation_p5 = _validate_demand(conn)
         stats_p6 = _phase6_history(conn, profile, items_ref, locations_ref)
         validation_p6 = _validate_history(conn)
+        stats_p7 = _phase7_calibrate(conn, profile, items_ref, locations_ref)
 
     print()
     print("=" * 60)
@@ -756,6 +801,22 @@ def main() -> int:
     print("=" * 60)
     for k, v in validation_p6.items():
         print(f"  {k:35s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 7 — projection graph + propagation + OH calibration")
+    print("=" * 60)
+    for k, v in stats_p7.items():
+        if k == "calibration_iterations":
+            print(f"  {k}:")
+            for it in v:
+                scale_disp = "bootstrap-resize" if it["oh_scale_next"] != it["oh_scale_next"] else f"x{it['oh_scale_next']}"
+                label = "boot" if it["i"] == 0 else f"iter {it['i']}"
+                print(f"    {label}: PIs={it['pi_total']}  short={it['pi_short']}  "
+                      f"pct={it['shortage_pct']}%  prop={it['propagation_s']}s  "
+                      f"next OH {scale_disp}")
+        else:
+            print(f"  {k:30s}  {v}")
     return 0
 
 
