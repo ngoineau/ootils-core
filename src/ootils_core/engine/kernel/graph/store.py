@@ -375,6 +375,63 @@ class GraphStore:
                 if neighbour not in visited:
                     stack.append(neighbour)
 
+    def update_pi_results_batch(
+        self,
+        updates: list[tuple],
+    ) -> int:
+        """Batch-persist PI computation results in a single UPDATE…FROM(VALUES…).
+
+        Each tuple in `updates` must be:
+            (node_id, scenario_id, calc_run_id,
+             opening_stock, inflows, outflows, closing_stock,
+             has_shortage, shortage_qty)
+
+        Replaces N round-trips with one. Used by the propagator's batch
+        write path (REVIEW-2026-05 R2 Tier 2 — see ADR-012 follow-up).
+        Returns the number of rows updated.
+        """
+        if not updates:
+            return 0
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        # Append `updated_at` to every tuple; psycopg renders the list-of-tuples
+        # as a VALUES clause natively when bound to %s.
+        rows = [(*u, now) for u in updates]
+        result = self._conn.execute(
+            """
+            UPDATE nodes AS n SET
+                opening_stock    = v.opening_stock,
+                inflows          = v.inflows,
+                outflows         = v.outflows,
+                closing_stock    = v.closing_stock,
+                has_shortage     = v.has_shortage,
+                shortage_qty     = v.shortage_qty,
+                is_dirty         = FALSE,
+                last_calc_run_id = v.calc_run_id,
+                updated_at       = v.updated_at
+            FROM (
+                SELECT *
+                FROM UNNEST(
+                    %s::uuid[],     %s::uuid[],     %s::uuid[],
+                    %s::numeric[],  %s::numeric[],  %s::numeric[],  %s::numeric[],
+                    %s::boolean[],  %s::numeric[],
+                    %s::timestamptz[]
+                ) AS t(
+                    node_id, scenario_id, calc_run_id,
+                    opening_stock, inflows, outflows, closing_stock,
+                    has_shortage, shortage_qty,
+                    updated_at
+                )
+            ) AS v
+            WHERE n.node_id = v.node_id AND n.scenario_id = v.scenario_id
+            """,
+            tuple(
+                [r[i] for r in rows]
+                for i in range(10)
+            ),
+        )
+        return result.rowcount or 0
+
     def update_pi_result(
         self,
         node_id: UUID,
