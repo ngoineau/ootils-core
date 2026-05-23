@@ -50,7 +50,7 @@ from bench_propagation import (  # type: ignore[import-not-found]
 
 
 PROPAGATE_SQL = """
--- Tier 3 spike v0.2: window-function projection instead of recursive CTE.
+-- Tier 3 spike v0.3: window-function projection with demand events.
 -- The inventory chain opening[N] = OH + sum_{k<N}(inflows[k] - outflows[k])
 -- is a running sum, expressible as a single window over each series.
 WITH per_bucket AS (
@@ -73,7 +73,7 @@ WITH per_bucket AS (
               AND oh.node_type = 'OnHandSupply'
               AND oh.active = TRUE
         ), 0)::numeric ELSE 0::numeric END AS oh_seed,
-        -- inflows: supply events (non-OH) anchored in this bucket
+        -- inflows: supply events (non-OH) anchored in this bucket via 'replenishes'
         COALESCE((
             SELECT SUM(s.quantity)
             FROM edges r
@@ -87,7 +87,22 @@ WITH per_bucket AS (
               AND s.time_ref >= pi.time_span_start
               AND s.time_ref <  pi.time_span_end
         ), 0)::numeric AS inflows,
-        0::numeric AS outflows  -- demand path deferred for v0
+        -- outflows: demand events anchored in this bucket via 'consumes' (point-in-time;
+        -- multi-day span prorating is added in v0.4).
+        COALESCE((
+            SELECT SUM(d.quantity)
+            FROM edges c
+            JOIN nodes d ON d.node_id = c.from_node_id
+            WHERE c.to_node_id = pi.node_id
+              AND c.edge_type = 'consumes'
+              AND c.scenario_id = pi.scenario_id
+              AND c.active = TRUE
+              AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
+              AND d.active = TRUE
+              AND d.time_ref IS NOT NULL
+              AND d.time_ref >= pi.time_span_start
+              AND d.time_ref <  pi.time_span_end
+        ), 0)::numeric AS outflows
     FROM nodes pi
     WHERE pi.node_type = 'ProjectedInventory'
       AND pi.scenario_id = %(scenario_id)s
@@ -115,6 +130,16 @@ SET opening_stock = p.opening_stock,
     inflows       = p.inflows,
     outflows      = p.outflows,
     closing_stock = p.opening_stock + p.inflows - p.outflows,
+    -- has_shortage / shortage_qty mirror ProjectionKernel.compute_pi_node:
+    -- a "negative closing stock" shortage. Safety-stock-based shortages
+    -- (item_planning_params) are a separate concern handled in the
+    -- detector pass — added in v0.5.
+    has_shortage  = (p.opening_stock + p.inflows - p.outflows) < 0,
+    shortage_qty  = CASE
+                        WHEN (p.opening_stock + p.inflows - p.outflows) < 0
+                            THEN -(p.opening_stock + p.inflows - p.outflows)
+                        ELSE 0
+                    END,
     is_dirty      = FALSE,
     last_calc_run_id = %(calc_run_id)s,
     updated_at    = now()

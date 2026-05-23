@@ -45,6 +45,7 @@ def _seed_rich(
     items: int,
     buckets: int,
     supplies_per_item: int,
+    demands_per_item: int,
     seed: int,
 ) -> dict:
     """Seed bench scenario plus PO supplies anchored on random dates within the horizon.
@@ -167,6 +168,40 @@ def _seed_rich(
             (BASELINE_SCENARIO_ID, location_id, po_ids, po_item_ids, po_qtys, po_dates),
         )
 
+    # 5b. Demand nodes — point-in-time only (no spans). Alternate types so we
+    # exercise both ForecastDemand and CustomerOrderDemand paths in the engine.
+    dem_ids: list[UUID] = []
+    dem_item_ids: list[UUID] = []
+    dem_qtys: list[Decimal] = []
+    dem_dates: list[date] = []
+    dem_types: list[str] = []
+    for i in range(items):
+        for k in range(demands_per_item):
+            offset = rng.randint(0, buckets - 1)
+            dem_ids.append(uuid4())
+            dem_item_ids.append(item_ids[i])
+            # Smaller qty than supplies so we stay non-negative on average,
+            # but some buckets MAY go negative — that exercises the shortage path.
+            dem_qtys.append(Decimal(rng.choice([5, 10, 20, 40])))
+            dem_dates.append(horizon_start + timedelta(days=offset))
+            dem_types.append("ForecastDemand" if k % 2 == 0 else "CustomerOrderDemand")
+
+    if dem_ids:
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (node_id, node_type, scenario_id, item_id, location_id,
+                 quantity, qty_uom, time_grain, time_ref, is_dirty, active)
+            SELECT
+                d.id, d.tp, %s, d.item_id, %s,
+                d.qty, 'EA', 'exact_date', d.dt, FALSE, TRUE
+            FROM UNNEST(%s::uuid[], %s::text[], %s::uuid[], %s::numeric[], %s::date[])
+                 AS d(id, tp, item_id, qty, dt)
+            """,
+            (BASELINE_SCENARIO_ID, location_id,
+             dem_ids, dem_types, dem_item_ids, dem_qtys, dem_dates),
+        )
+
     # 6. Edges
     edge_ids: list[UUID] = []
     edge_types: list[str] = []
@@ -195,6 +230,16 @@ def _seed_rich(
             edge_from.append(po_id)
             edge_to.append(pi_ids[item_idx * buckets + bucket_idx])
 
+    # Demand → PI bucket whose window contains the demand time_ref (consumes)
+    for dem_id, dem_item_id, dem_date in zip(dem_ids, dem_item_ids, dem_dates):
+        item_idx = item_ids.index(dem_item_id)
+        bucket_idx = (dem_date - horizon_start).days
+        if 0 <= bucket_idx < buckets:
+            edge_ids.append(uuid4())
+            edge_types.append("consumes")
+            edge_from.append(dem_id)
+            edge_to.append(pi_ids[item_idx * buckets + bucket_idx])
+
     conn.execute(
         """
         INSERT INTO edges
@@ -213,6 +258,7 @@ def _seed_rich(
         "pi_nodes": pi_node_count,
         "oh_nodes": items,
         "po_nodes": len(po_ids),
+        "demand_nodes": len(dem_ids),
         "edges": len(edge_ids),
         "seed_seconds": round(time.perf_counter() - started, 2),
     }
@@ -248,10 +294,11 @@ def _run_python_propagation(conn: psycopg.Connection, calc_run_id: UUID, dirty: 
 
 
 def _snapshot_pi_state(conn: psycopg.Connection) -> dict[UUID, dict]:
-    """Return {node_id: {opening, inflows, outflows, closing}} for every PI node."""
+    """Return {node_id: {opening, inflows, outflows, closing, has_shortage, shortage_qty}} for every PI node."""
     rows = conn.execute(
         """
-        SELECT node_id, opening_stock, inflows, outflows, closing_stock
+        SELECT node_id, opening_stock, inflows, outflows, closing_stock,
+               has_shortage, shortage_qty
         FROM nodes
         WHERE node_type = 'ProjectedInventory'
           AND scenario_id = %s
@@ -310,18 +357,19 @@ def _diff_snapshots(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
     common = keys_py & keys_sql
 
     mismatches: list[tuple[UUID, str, object, object]] = []
-    fields = ("opening_stock", "inflows", "outflows", "closing_stock")
+    numeric_fields = ("opening_stock", "inflows", "outflows", "closing_stock", "shortage_qty")
+    bool_fields = ("has_shortage",)
     for nid in common:
-        for f in fields:
+        for f in numeric_fields:
             a = py[nid][f]
             b = sql[nid][f]
-            # Decimal equality across possibly NULL values + normalization
             a_n = None if a is None else Decimal(str(a))
             b_n = None if b is None else Decimal(str(b))
             if a_n != b_n:
                 mismatches.append((nid, f, a, b))
-                if len(mismatches) >= 10:
-                    break
+        for f in bool_fields:
+            if py[nid][f] != sql[nid][f]:
+                mismatches.append((nid, f, py[nid][f], sql[nid][f]))
         if len(mismatches) >= 10:
             break
 
@@ -341,6 +389,8 @@ def main() -> int:
     parser.add_argument("--buckets", type=int, default=30)
     parser.add_argument("--supplies-per-item", type=int, default=3,
                         help="Number of PO supplies per item (default: 3)")
+    parser.add_argument("--demands-per-item", type=int, default=4,
+                        help="Number of demand events per item (default: 4)")
     parser.add_argument("--seed", type=int, default=42,
                         help="RNG seed for reproducible scenarios")
     parser.add_argument("--dbname", default="ootils_test_bench")
@@ -362,6 +412,7 @@ def main() -> int:
             items=args.items,
             buckets=args.buckets,
             supplies_per_item=args.supplies_per_item,
+            demands_per_item=args.demands_per_item,
             seed=args.seed,
         )
         print(f"[seed] {seed_stats}")
