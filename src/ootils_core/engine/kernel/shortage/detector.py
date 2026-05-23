@@ -112,6 +112,10 @@ class ShortageDetector:
 
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
+        # Drive timestamps from the injected clock so the record is fully
+        # deterministic (ADR-003). The dataclass defaults to wall-clock
+        # datetime.now() — overridden here.
+        now = self._clock.now()
         record = ShortageRecord(
             shortage_id=deterministic_uuid(
                 "shortage", scenario_id, calc_run_id, pi_node.node_id,
@@ -127,6 +131,8 @@ class ShortageDetector:
             calc_run_id=calc_run_id,
             status="active",
             severity_class=severity_class,
+            created_at=now,
+            updated_at=now,
         )
 
         logger.debug(
