@@ -51,6 +51,14 @@ from ootils_core.seed.transactional.nodes import (
     generate_transactional,
     insert_transactional,
 )
+from ootils_core.seed.demand.forecasts import (
+    generate_forecasts,
+    insert_forecasts,
+)
+from ootils_core.seed.demand.customer_orders import (
+    generate_customer_orders,
+    insert_customer_orders,
+)
 
 
 def _admin_recreate_db(dsn: str, dbname: str) -> None:
@@ -217,6 +225,95 @@ def _phase4_transactional(
         "total_inserted": n,
         "gen_seconds": round(t_gen, 3),
         "insert_seconds": round(t_ins, 3),
+    }
+
+
+def _phase5_demand(
+    conn: psycopg.Connection,
+    profile: Profile,
+    items,
+    locations,
+) -> dict:
+    """Generate + insert forecasts + open customer orders."""
+    t0 = time.perf_counter()
+    forecasts = generate_forecasts(profile, items, locations)
+    t_fc_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    orders = generate_customer_orders(profile, items, locations)
+    t_co_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n_fc = insert_forecasts(conn, forecasts)
+    t_fc_ins = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n_co = insert_customer_orders(conn, orders)
+    t_co_ins = time.perf_counter() - t0
+    conn.commit()
+
+    return {
+        "forecasts_generated": len(forecasts),
+        "forecasts_inserted": n_fc,
+        "orders_generated": len(orders),
+        "orders_inserted": n_co,
+        "forecast_gen_seconds": round(t_fc_gen, 3),
+        "orders_gen_seconds": round(t_co_gen, 3),
+        "forecast_insert_seconds": round(t_fc_ins, 3),
+        "orders_insert_seconds": round(t_co_ins, 3),
+    }
+
+
+def _validate_demand(conn: psycopg.Connection) -> dict:
+    def _agg(sql: str, key_col: str) -> dict:
+        rows = conn.execute(sql).fetchall()
+        return {r[key_col]: int(r["n"]) for r in rows}
+
+    by_type = _agg(
+        """
+        SELECT node_type, COUNT(*) AS n FROM nodes
+        WHERE node_type IN ('ForecastDemand', 'CustomerOrderDemand')
+        GROUP BY node_type
+        """,
+        "node_type",
+    )
+    # Forecast volume sanity: total annual demand vs total open OH
+    fc_stats = conn.execute(
+        """
+        SELECT
+            ROUND(MIN(quantity)::numeric, 0) AS mn,
+            ROUND(MAX(quantity)::numeric, 0) AS mx,
+            ROUND(AVG(quantity)::numeric, 1) AS avg,
+            COUNT(DISTINCT item_id)          AS items_with_fc,
+            ROUND(SUM(quantity)::numeric, 0) AS total_qty
+        FROM nodes WHERE node_type = 'ForecastDemand'
+        """
+    ).fetchone()
+    # Customer order distribution: how spread across FGs (ABC test)
+    co_top10 = conn.execute(
+        """
+        WITH per_item AS (
+            SELECT item_id, SUM(quantity) AS q
+            FROM nodes WHERE node_type = 'CustomerOrderDemand'
+            GROUP BY item_id
+        )
+        SELECT
+            COUNT(*)                                          AS n_items,
+            ROUND(SUM(q)::numeric, 0)                         AS total_q,
+            ROUND((SELECT SUM(q) FROM (SELECT q FROM per_item ORDER BY q DESC LIMIT 100) t)::numeric, 0) AS top100_q
+        FROM per_item
+        """
+    ).fetchone()
+    return {
+        "demand_nodes_by_type": by_type,
+        "forecast_qty_min_max_avg": (fc_stats["mn"], fc_stats["mx"], fc_stats["avg"]),
+        "forecast_items_covered": int(fc_stats["items_with_fc"]),
+        "forecast_total_volume": int(fc_stats["total_qty"]),
+        "co_items_total_top100_share": (
+            int(co_top10["n_items"]),
+            int(co_top10["total_q"]),
+            int(co_top10["top100_q"]),
+        ),
     }
 
 
@@ -468,6 +565,8 @@ def main() -> int:
         validation_p3 = _validate_network(conn)
         stats_p4 = _phase4_transactional(conn, profile, items_ref, locations_ref, pp_ref)
         validation_p4 = _validate_transactional(conn)
+        stats_p5 = _phase5_demand(conn, profile, items_ref, locations_ref)
+        validation_p5 = _validate_demand(conn)
 
     print()
     print("=" * 60)
@@ -525,6 +624,20 @@ def main() -> int:
     print("PHASE 4 — validation")
     print("=" * 60)
     for k, v in validation_p4.items():
+        print(f"  {k:35s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 5 — demand (forecasts + open orders)")
+    print("=" * 60)
+    for k, v in stats_p5.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 5 — validation")
+    print("=" * 60)
+    for k, v in validation_p5.items():
         print(f"  {k:35s}  {v}")
     return 0
 
