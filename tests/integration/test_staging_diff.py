@@ -83,9 +83,9 @@ def _seed_canonical_item(
     )
     conn.execute(
         """
-        INSERT INTO external_id_mapping
+        INSERT INTO external_references
             (entity_type, external_id, internal_id, source_system)
-        VALUES ('items', %s, %s, %s)
+        VALUES ('item', %s, %s, %s)
         """,
         (external_id, item_id, source_system),
     )

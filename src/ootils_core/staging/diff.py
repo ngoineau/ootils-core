@@ -87,8 +87,12 @@ class _EntitySpec:
     canonical_table: str
     # SQL fields to SELECT (used both for loading + comparison)
     fields: tuple[str, ...]
-    # The canonical PK column name (used by external_id_mapping.internal_id)
+    # The canonical PK column name (used by external_references.internal_id)
     pk_column: str
+    # `external_references.entity_type` uses SINGULAR ('item', 'location', ...)
+    # while `ingest_batches.entity_type` uses PLURAL ('items', 'locations').
+    # This is the singular form for the join.
+    ref_entity_type: str
 
 
 _SPECS: dict[str, _EntitySpec] = {
@@ -96,11 +100,13 @@ _SPECS: dict[str, _EntitySpec] = {
         canonical_table="items",
         fields=("external_id", "name", "item_type", "uom", "status"),
         pk_column="item_id",
+        ref_entity_type="item",
     ),
     "locations": _EntitySpec(
         canonical_table="locations",
         fields=("external_id", "name", "location_type", "country", "timezone"),
         pk_column="location_id",
+        ref_entity_type="location",
     ),
     "suppliers": _EntitySpec(
         canonical_table="suppliers",
@@ -109,6 +115,7 @@ _SPECS: dict[str, _EntitySpec] = {
         fields=("external_id", "name", "country", "lead_time_days",
                 "reliability_score", "status"),
         pk_column="supplier_id",
+        ref_entity_type="supplier",
     ),
 }
 
@@ -163,7 +170,7 @@ def compute_diff(conn: psycopg.Connection, batch_id: UUID) -> DiffResult:
     batch_records = _load_batch_records(conn, batch_id, spec)
 
     # ---------- 3. Load canonical rows scoped to (entity_type, source_system) ----------
-    canonical_records = _load_canonical_records(conn, entity_type, source_system, spec)
+    canonical_records = _load_canonical_records(conn, source_system, spec)
 
     # ---------- 4. Compute deltas ----------
     return _compute_deltas(batch_id, entity_type, source_system, spec,
@@ -209,24 +216,23 @@ def _load_batch_records(
 
 def _load_canonical_records(
     conn: psycopg.Connection,
-    entity_type: str,
     source_system: str,
     spec: _EntitySpec,
 ) -> dict[str, dict]:
     """Load rows from the canonical table that were imported from this
-    (entity_type, source_system) — joined through external_id_mapping
-    so each source's footprint is isolated."""
+    source_system — joined through `external_references` so each source's
+    footprint stays isolated."""
     fields_sql = ", ".join(f"c.{f}" for f in spec.fields)
     rows = conn.execute(
         f"""
         SELECT {fields_sql}
         FROM {spec.canonical_table} c
-        JOIN external_id_mapping m
-          ON m.internal_id = c.{spec.pk_column}
-        WHERE m.entity_type = %s
-          AND m.source_system = %s
+        JOIN external_references r
+          ON r.internal_id = c.{spec.pk_column}
+        WHERE r.entity_type = %s
+          AND r.source_system = %s
         """,
-        (entity_type, source_system),
+        (spec.ref_entity_type, source_system),
     ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
