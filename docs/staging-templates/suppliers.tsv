@@ -1,0 +1,6 @@
+external_id	name	country	lead_time_days	reliability_score	status
+SAP-SUP-001	Müller GmbH	DE	14	0.95	active
+SAP-SUP-002	Atelier Durand	FR	21	0.92	active
+SAP-SUP-003	Shenzhen Electronics	CN	60	0.85	active
+SAP-SUP-004	Pioneer Metals USA	US	28	0.98	active
+SAP-SUP-005	Tanaka Seiko	JP	35	0.97	inactive

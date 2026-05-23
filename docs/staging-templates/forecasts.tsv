@@ -1,0 +1,6 @@
+item_external_id	location_external_id	quantity	bucket_date	period_end	time_grain
+SAP-FG-00001	SAP-DC-USA-East	450	2026-06-01	2026-06-30	month
+SAP-FG-00001	SAP-DC-USA-East	520	2026-07-01	2026-07-31	month
+SAP-FG-00001	SAP-DC-EU-Central	380	2026-06-01	2026-06-30	month
+SAP-FG-00002	SAP-DC-USA-East	200	2026-06-01	2026-06-30	month
+SAP-FG-00002	SAP-DC-EU-Central	170	2026-06-01	2026-06-30	month

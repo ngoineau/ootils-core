@@ -1,0 +1,5 @@
+external_id	item_external_id	location_external_id	quantity	due_date	status
+SAP-CO-2026-50001	SAP-FG-00001	SAP-DC-USA-East	25	2026-06-12	open
+SAP-CO-2026-50002	SAP-FG-00002	SAP-DC-USA-East	10	2026-06-15	open
+SAP-CO-2026-50003	SAP-FG-00001	SAP-DC-EU-Central	50	2026-06-20	open
+SAP-CO-2026-50004	SAP-FG-00003	SAP-DC-EU-Central	15	2026-07-01	open

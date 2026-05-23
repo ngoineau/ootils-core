@@ -1,0 +1,5 @@
+external_id	item_external_id	location_external_id	quantity	uom	expected_completion_date	status
+MES-WO-2026-1001	SAP-FG-00001	SAP-PL-MUC	100	EA	2026-06-10	in_progress
+MES-WO-2026-1002	SAP-FG-00001	SAP-PL-MUC	150	EA	2026-06-15	released
+MES-WO-2026-1003	SAP-SA-01024	SAP-PL-MUC	300	EA	2026-06-05	in_progress
+MES-WO-2026-1004	SAP-FG-00002	SAP-PL-SHA	200	EA	2026-06-20	planned

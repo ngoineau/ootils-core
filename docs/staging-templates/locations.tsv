@@ -1,0 +1,6 @@
+external_id	name	location_type	country	timezone
+SAP-DC-USA-East	DC USA East Coast	dc	US	America/New_York
+SAP-DC-EU-Central	DC Europe Central	dc	DE	Europe/Berlin
+SAP-PL-MUC	Plant Munich	plant	DE	Europe/Berlin
+SAP-PL-SHA	Plant Shanghai	plant	CN	Asia/Shanghai
+SAP-WH-NJ	Warehouse New Jersey	warehouse	US	America/New_York

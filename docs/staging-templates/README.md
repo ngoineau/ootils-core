@@ -22,15 +22,15 @@ Each entity supported by `ingest_batches.entity_type` has:
 | Entité | Template | Refresh | Notes |
 |--------|----------|---------|-------|
 | items | [items.md](items.md) — [items.tsv](items.tsv) | full reload | Master, source SAP/ERP typique |
-| locations | locations.md *(TBD)* | full reload | Master, faible volume |
-| suppliers | suppliers.md *(TBD)* | full reload | Master, faible volume |
-| supplier_items | supplier_items.md *(TBD)* | full reload | Master + commercial |
-| item_planning_params | item_planning_params.md *(TBD)* | **SCD2** | Versionné par effective_from/to |
-| on_hand | on_hand.md *(TBD)* | full reload | Snapshot WMS, quotidien |
-| purchase_orders | purchase_orders.md *(TBD)* | full reload | ERP, refresh quotidien |
-| work_orders | work_orders.md *(TBD)* | full reload | MES, refresh quotidien |
-| customer_orders | customer_orders.md *(TBD)* | full reload | ERP commercial |
-| transfers | transfers.md *(TBD)* | full reload | Inter-locations |
-| forecasts | forecasts.md *(TBD)* | full reload | Outil prévision |
+| locations | [locations.md](locations.md) — [locations.tsv](locations.tsv) | full reload | Master, faible volume |
+| suppliers | [suppliers.md](suppliers.md) — [suppliers.tsv](suppliers.tsv) | full reload | Master, faible volume |
+| supplier_items | [supplier_items.md](supplier_items.md) — [supplier_items.tsv](supplier_items.tsv) | full reload | Master + commercial |
+| item_planning_params | *(à venir)* | **SCD2** | Versionné par effective_from/to |
+| on_hand | [on_hand.md](on_hand.md) — [on_hand.tsv](on_hand.tsv) | full reload | Snapshot WMS, quotidien |
+| purchase_orders | [purchase_orders.md](purchase_orders.md) — [purchase_orders.tsv](purchase_orders.tsv) | full reload | ERP, refresh quotidien |
+| work_orders | [work_orders.md](work_orders.md) — [work_orders.tsv](work_orders.tsv) | full reload | MES, refresh quotidien |
+| customer_orders | [customer_orders.md](customer_orders.md) — [customer_orders.tsv](customer_orders.tsv) | full reload | ERP commercial |
+| transfers | [transfers.md](transfers.md) — [transfers.tsv](transfers.tsv) | full reload | Inter-locations |
+| forecasts | [forecasts.md](forecasts.md) — [forecasts.tsv](forecasts.tsv) | full reload | Outil prévision |
 
-Les templates marqués TBD sont rédigés au fil de l'implémentation de la roadmap ADR-013.
+`item_planning_params` reste à faire (modèle SCD2 plus complexe) — n'est pas dans la CHECK constraint actuelle de `ingest_batches.entity_type` ; sera ajouté quand le pipeline SCD2 sera câblé.

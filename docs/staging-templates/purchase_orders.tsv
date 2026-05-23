@@ -1,0 +1,5 @@
+external_id	item_external_id	location_external_id	supplier_external_id	quantity	uom	expected_delivery_date	status
+SAP-PO-202605-001	SAP-RM-15007	SAP-PL-MUC	SAP-SUP-001	500	KG	2026-06-15	open
+SAP-PO-202605-002	SAP-RM-15008	SAP-PL-MUC	SAP-SUP-002	100	L	2026-06-22	open
+SAP-PO-202605-003	SAP-PT-08833	SAP-PL-MUC	SAP-SUP-003	5000	EA	2026-07-10	in_transit
+SAP-PO-202605-004	SAP-PT-08834	SAP-PL-SHA	SAP-SUP-003	2000	M	2026-06-30	open

@@ -1,0 +1,5 @@
+supplier_external_id	item_external_id	lead_time_days	moq	unit_cost	currency	is_preferred	valid_from	valid_to
+SAP-SUP-001	SAP-RM-15007	14	100	5.50	EUR	true	2026-01-01
+SAP-SUP-002	SAP-RM-15007	21	100	6.20	EUR	false	2026-01-01
+SAP-SUP-003	SAP-PT-08833	60	500	0.45	USD	true	2026-01-01
+SAP-SUP-004	SAP-PT-08834	28	200	2.10	USD	true	2026-01-01	2026-12-31
