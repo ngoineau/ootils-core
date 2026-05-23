@@ -153,6 +153,97 @@ WHERE calc_run_id = %(calc_run_id)s AND scenario_id = %(scenario_id)s
 """
 
 
+SHORTAGES_SQL = """
+-- Mirror ShortageDetector.detect_with_params in pure SQL.
+-- Rules (closing_stock is now persisted from the propagation step):
+--   closing < 0                            -> 'stockout',           qty = -closing
+--   0 <= closing < safety_stock_qty        -> 'below_safety_stock', qty = safety_stock - closing
+-- severity_score = shortage_qty * days_in_bucket * unit_cost (proxy=1)
+-- shortage_date  = COALESCE(time_span_start, time_ref)
+WITH pi_with_ss AS (
+    SELECT
+        pi.scenario_id,
+        pi.node_id        AS pi_node_id,
+        pi.item_id,
+        pi.location_id,
+        pi.closing_stock,
+        COALESCE(pi.time_span_start, pi.time_ref) AS shortage_date,
+        -- DATE - DATE returns integer days directly in Postgres
+        GREATEST((pi.time_span_end - pi.time_span_start), 1) AS days_in_bucket,
+        ipp.safety_stock_qty
+    FROM nodes pi
+    LEFT JOIN LATERAL (
+        SELECT safety_stock_qty
+        FROM item_planning_params
+        WHERE item_id = pi.item_id
+          AND location_id = pi.location_id
+          AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
+        ORDER BY effective_from DESC
+        LIMIT 1
+    ) ipp ON TRUE
+    WHERE pi.node_type = 'ProjectedInventory'
+      AND pi.scenario_id = %(scenario_id)s
+      AND pi.active = TRUE
+      AND pi.closing_stock IS NOT NULL
+),
+shortage_rows AS (
+    SELECT
+        gen_random_uuid()::uuid AS shortage_id,
+        scenario_id,
+        pi_node_id,
+        item_id,
+        location_id,
+        shortage_date,
+        CASE
+            WHEN closing_stock < 0 THEN -closing_stock
+            ELSE safety_stock_qty - closing_stock
+        END AS shortage_qty,
+        CASE
+            WHEN closing_stock < 0 THEN 'stockout'
+            ELSE 'below_safety_stock'
+        END AS severity_class,
+        days_in_bucket
+    FROM pi_with_ss
+    WHERE closing_stock < 0
+       OR (
+            safety_stock_qty IS NOT NULL
+            AND closing_stock >= 0
+            AND closing_stock < safety_stock_qty
+       )
+)
+INSERT INTO shortages (
+    shortage_id, scenario_id, pi_node_id, item_id, location_id,
+    shortage_date, shortage_qty, severity_score,
+    explanation_id, calc_run_id, status, severity_class,
+    created_at, updated_at
+)
+SELECT
+    shortage_id, scenario_id, pi_node_id, item_id, location_id,
+    shortage_date, shortage_qty, shortage_qty * days_in_bucket * 1::numeric,
+    NULL::uuid, %(calc_run_id)s, 'active', severity_class,
+    now(), now()
+FROM shortage_rows
+ON CONFLICT (pi_node_id, calc_run_id) DO UPDATE SET
+    shortage_qty   = EXCLUDED.shortage_qty,
+    severity_score = EXCLUDED.severity_score,
+    shortage_date  = EXCLUDED.shortage_date,
+    status         = EXCLUDED.status,
+    severity_class = EXCLUDED.severity_class,
+    updated_at     = EXCLUDED.updated_at;
+"""
+
+
+RESOLVE_STALE_SQL = """
+-- Mirror ShortageDetector.resolve_stale: mark prior calc_runs' active
+-- shortages as 'resolved' once the new run finishes.
+UPDATE shortages
+SET status = 'resolved', updated_at = now()
+WHERE scenario_id = %(scenario_id)s
+  AND status = 'active'
+  AND calc_run_id != %(calc_run_id)s
+"""
+
+
 def _run_sql_propagation(conn: psycopg.Connection, calc_run_id: UUID) -> dict:
     """Drive the recursive-CTE propagation. Returns timing + counts."""
     started = time.perf_counter()

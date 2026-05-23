@@ -37,7 +37,7 @@ from bench_propagation import (  # type: ignore[import-not-found]
     _mark_all_pi_dirty,
     BASELINE_SCENARIO_ID,
 )
-from spike_sql_propagate import PROPAGATE_SQL, CLEAR_DIRTY_SQL  # type: ignore[import-not-found]
+from spike_sql_propagate import PROPAGATE_SQL, CLEAR_DIRTY_SQL, SHORTAGES_SQL, RESOLVE_STALE_SQL  # type: ignore[import-not-found]
 
 
 def _seed_rich(
@@ -166,6 +166,27 @@ def _seed_rich(
             FROM UNNEST(%s::uuid[], %s::uuid[], %s::numeric[], %s::date[]) AS p(id, item_id, qty, dt)
             """,
             (BASELINE_SCENARIO_ID, location_id, po_ids, po_item_ids, po_qtys, po_dates),
+        )
+
+    # 5a. item_planning_params — safety stock for ~half the items.
+    # Mix of zero and non-zero safety_stock_qty exercises both branches of
+    # ShortageDetector (stockout vs. below_safety_stock).
+    ipp_item_ids: list[UUID] = []
+    ipp_ss_qtys: list[Decimal] = []
+    for i, item_id in enumerate(item_ids):
+        if i % 2 == 0:  # half get safety stock
+            ipp_item_ids.append(item_id)
+            ipp_ss_qtys.append(Decimal(rng.choice([0, 20, 50, 100])))
+    if ipp_item_ids:
+        conn.execute(
+            """
+            INSERT INTO item_planning_params
+                (item_id, location_id, safety_stock_qty, effective_from, effective_to)
+            SELECT
+                p.item_id, %s, p.ss, %s, '9999-12-31'::DATE
+            FROM UNNEST(%s::uuid[], %s::numeric[]) AS p(item_id, ss)
+            """,
+            (location_id, horizon_start, ipp_item_ids, ipp_ss_qtys),
         )
 
     # 5b. Demand nodes — point-in-time only (no spans). Alternate types so we
@@ -329,8 +350,9 @@ def _reset_pi_state(conn: psycopg.Connection) -> None:
         (BASELINE_SCENARIO_ID,),
     )
     # Also wipe any dirty_nodes residual + complete the prior calc_run so a fresh
-    # one can be started.
+    # one can be started. Wipe shortages too — each engine writes them from scratch.
     conn.execute("DELETE FROM dirty_nodes WHERE scenario_id = %s", (BASELINE_SCENARIO_ID,))
+    conn.execute("DELETE FROM shortages WHERE scenario_id = %s", (BASELINE_SCENARIO_ID,))
     conn.execute(
         "UPDATE calc_runs SET status = 'completed', completed_at = now() "
         "WHERE scenario_id = %s AND status = 'running'",
@@ -339,11 +361,62 @@ def _reset_pi_state(conn: psycopg.Connection) -> None:
     conn.commit()
 
 
+def _snapshot_shortages(conn: psycopg.Connection) -> dict[UUID, dict]:
+    """Return {pi_node_id: shortage_row} for every active shortage in scenario.
+    Keyed by pi_node_id since (pi_node_id, calc_run_id) is unique per run."""
+    rows = conn.execute(
+        """
+        SELECT pi_node_id, item_id, location_id, shortage_date,
+               shortage_qty, severity_score, severity_class, status
+        FROM shortages
+        WHERE scenario_id = %s AND status = 'active'
+        """,
+        (BASELINE_SCENARIO_ID,),
+    ).fetchall()
+    return {UUID(str(r["pi_node_id"])): r for r in rows}
+
+
+def _diff_shortages(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
+    """Diff shortages by pi_node_id, comparing qty/score/class/date."""
+    keys_py = set(py)
+    keys_sql = set(sql)
+    only_py = keys_py - keys_sql
+    only_sql = keys_sql - keys_py
+    common = keys_py & keys_sql
+
+    mismatches: list[tuple[UUID, str, object, object]] = []
+    fields_num = ("shortage_qty", "severity_score")
+    fields_other = ("severity_class", "shortage_date")
+    for nid in common:
+        for f in fields_num:
+            a_n = Decimal(str(py[nid][f]))
+            b_n = Decimal(str(sql[nid][f]))
+            if a_n != b_n:
+                mismatches.append((nid, f, py[nid][f], sql[nid][f]))
+        for f in fields_other:
+            if py[nid][f] != sql[nid][f]:
+                mismatches.append((nid, f, py[nid][f], sql[nid][f]))
+        if len(mismatches) >= 10:
+            break
+
+    return {
+        "shortages_python": len(py),
+        "shortages_sql": len(sql),
+        "missing_from_sql": len(only_py),
+        "extra_in_sql": len(only_sql),
+        "field_mismatches": len(mismatches),
+        "sample_mismatches": mismatches,
+    }
+
+
 def _run_sql_propagation(conn: psycopg.Connection, calc_run_id: UUID) -> float:
-    """Run the SQL window spike. Returns wall_seconds."""
+    """Run the SQL window spike + shortage detection. Returns wall_seconds."""
+    params = {"scenario_id": BASELINE_SCENARIO_ID, "calc_run_id": calc_run_id}
     started = time.perf_counter()
-    conn.execute(PROPAGATE_SQL, {"scenario_id": BASELINE_SCENARIO_ID, "calc_run_id": calc_run_id})
-    conn.execute(CLEAR_DIRTY_SQL, {"scenario_id": BASELINE_SCENARIO_ID, "calc_run_id": calc_run_id})
+    conn.execute(PROPAGATE_SQL, params)
+    conn.execute(SHORTAGES_SQL, params)
+    conn.execute(RESOLVE_STALE_SQL, params)
+    conn.execute(CLEAR_DIRTY_SQL, params)
     conn.commit()
     return time.perf_counter() - started
 
@@ -421,37 +494,55 @@ def main() -> int:
         calc_run_py, dirty = _mark_all_pi_dirty(conn)
         py_wall = _run_python_propagation(conn, calc_run_py, dirty)
         snap_py = _snapshot_pi_state(conn)
-        print(f"[python] {len(snap_py)} PI nodes computed in {py_wall:.2f}s")
+        shortages_py = _snapshot_shortages(conn)
+        print(f"[python] {len(snap_py)} PI nodes, {len(shortages_py)} shortages in {py_wall:.2f}s")
 
         # ---- Phase 2: reset + SQL ----
         _reset_pi_state(conn)
         calc_run_sql, _ = _mark_all_pi_dirty(conn)
         sql_wall = _run_sql_propagation(conn, calc_run_sql)
         snap_sql = _snapshot_pi_state(conn)
-        print(f"[sql]    {len(snap_sql)} PI nodes computed in {sql_wall:.2f}s")
+        shortages_sql = _snapshot_shortages(conn)
+        print(f"[sql]    {len(snap_sql)} PI nodes, {len(shortages_sql)} shortages in {sql_wall:.2f}s")
 
         # ---- Phase 3: diff ----
         diff = _diff_snapshots(snap_py, snap_sql)
+        sh_diff = _diff_shortages(shortages_py, shortages_sql)
 
     print()
     print("=" * 60)
-    print("PARITY REPORT")
+    print("PARITY REPORT — PI nodes")
     print("=" * 60)
     print(f"  nodes_python              {diff['nodes_python']}")
     print(f"  nodes_sql                 {diff['nodes_sql']}")
     print(f"  missing_from_sql          {diff['missing_from_sql']}")
     print(f"  extra_in_sql              {diff['extra_in_sql']}")
     print(f"  field_mismatches          {diff['field_mismatches']}")
-    print()
     if diff["sample_mismatches"]:
-        print("Sample mismatches (up to 10):")
+        print("  Sample mismatches:")
         for nid, field, py_val, sql_val in diff["sample_mismatches"]:
-            print(f"  {nid}  {field:14s}  py={py_val!r:>12}  sql={sql_val!r:>12}")
-        print()
+            print(f"    {nid}  {field:14s}  py={py_val!r:>12}  sql={sql_val!r:>12}")
+    print()
+    print("=" * 60)
+    print("PARITY REPORT — shortages")
+    print("=" * 60)
+    print(f"  shortages_python          {sh_diff['shortages_python']}")
+    print(f"  shortages_sql             {sh_diff['shortages_sql']}")
+    print(f"  missing_from_sql          {sh_diff['missing_from_sql']}")
+    print(f"  extra_in_sql              {sh_diff['extra_in_sql']}")
+    print(f"  field_mismatches          {sh_diff['field_mismatches']}")
+    if sh_diff["sample_mismatches"]:
+        print("  Sample mismatches:")
+        for nid, field, py_val, sql_val in sh_diff["sample_mismatches"]:
+            print(f"    {nid}  {field:14s}  py={py_val!r:>20}  sql={sql_val!r:>20}")
+    print()
     ok = (
         diff["missing_from_sql"] == 0
         and diff["extra_in_sql"] == 0
         and diff["field_mismatches"] == 0
+        and sh_diff["missing_from_sql"] == 0
+        and sh_diff["extra_in_sql"] == 0
+        and sh_diff["field_mismatches"] == 0
     )
     print(f"PARITY: {'OK' if ok else 'FAILED'}")
     print(f"SPEEDUP: SQL is {py_wall / max(sql_wall, 1e-9):.2f}x faster ({py_wall:.2f}s -> {sql_wall:.2f}s)")
