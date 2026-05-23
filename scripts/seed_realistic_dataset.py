@@ -59,6 +59,10 @@ from ootils_core.seed.demand.customer_orders import (
     generate_customer_orders,
     insert_customer_orders,
 )
+from ootils_core.seed.demand.order_history import (
+    generate_order_history,
+    insert_order_history,
+)
 
 
 def _admin_recreate_db(dsn: str, dbname: str) -> None:
@@ -261,6 +265,103 @@ def _phase5_demand(
         "orders_gen_seconds": round(t_co_gen, 3),
         "forecast_insert_seconds": round(t_fc_ins, 3),
         "orders_insert_seconds": round(t_co_ins, 3),
+    }
+
+
+def _phase6_history(
+    conn: psycopg.Connection,
+    profile: Profile,
+    items,
+    locations,
+) -> dict:
+    """Generate + insert 12 months of closed customer orders."""
+    t0 = time.perf_counter()
+    history = generate_order_history(profile, items, locations)
+    t_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n = insert_order_history(conn, history)
+    t_ins = time.perf_counter() - t0
+    conn.commit()
+
+    return {
+        "orders_generated": len(history),
+        "orders_inserted": n,
+        "gen_seconds": round(t_gen, 3),
+        "insert_seconds": round(t_ins, 3),
+    }
+
+
+def _validate_history(conn: psycopg.Connection) -> dict:
+    """Sanity checks on the historic order set."""
+    def _agg(sql: str, key_col: str) -> dict:
+        rows = conn.execute(sql).fetchall()
+        return {r[key_col]: int(r["n"]) for r in rows}
+
+    counts = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE active = FALSE) AS historic,
+            COUNT(*) FILTER (WHERE active = TRUE)  AS open
+        FROM nodes WHERE node_type = 'CustomerOrderDemand'
+        """
+    ).fetchone()
+    # Date range
+    date_range = conn.execute(
+        """
+        SELECT
+            MIN(time_ref) AS mn,
+            MAX(time_ref) AS mx,
+            ROUND(AVG(CURRENT_DATE - time_ref)::numeric, 1) AS avg_days_back
+        FROM nodes WHERE node_type = 'CustomerOrderDemand' AND active = FALSE
+        """
+    ).fetchone()
+    # Per-month distribution (should show seasonality)
+    per_month = conn.execute(
+        """
+        SELECT TO_CHAR(time_ref, 'YYYY-MM') AS ym, COUNT(*) AS n
+        FROM nodes WHERE node_type = 'CustomerOrderDemand' AND active = FALSE
+        GROUP BY ym ORDER BY ym
+        """
+    ).fetchall()
+    # Pareto check
+    pareto = conn.execute(
+        """
+        WITH per_item AS (
+            SELECT item_id, SUM(quantity) AS q
+            FROM nodes WHERE node_type = 'CustomerOrderDemand' AND active = FALSE
+            GROUP BY item_id
+        ),
+        ranked AS (
+            SELECT q, ROW_NUMBER() OVER (ORDER BY q DESC) AS rk, SUM(q) OVER () AS total
+            FROM per_item
+        )
+        SELECT
+            (SELECT COUNT(*) FROM per_item) AS n_items,
+            ROUND((SELECT SUM(q) FROM ranked WHERE rk <= 100)::numeric / NULLIF((SELECT MAX(total) FROM ranked), 0) * 100, 1) AS top100_pct
+        """
+    ).fetchone()
+    # Did any obsolete FGs land in history? (Should be a small number.)
+    obsolete_in_history = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM nodes h JOIN items i ON i.item_id = h.item_id
+        WHERE h.node_type = 'CustomerOrderDemand' AND h.active = FALSE
+          AND i.status = 'obsolete'
+        """
+    ).fetchone()["n"]
+    return {
+        "historic_vs_open_count": (int(counts["historic"]), int(counts["open"])),
+        "date_range_min_max_avg_days_back": (
+            date_range["mn"], date_range["mx"], date_range["avg_days_back"],
+        ),
+        "n_months_covered": len(per_month),
+        "monthly_min_max": (
+            min(int(r["n"]) for r in per_month),
+            max(int(r["n"]) for r in per_month),
+        ),
+        "pareto_top100_pct_of_volume": (int(pareto["n_items"]), pareto["top100_pct"]),
+        "obsolete_fgs_in_history": int(obsolete_in_history),
     }
 
 
@@ -567,6 +668,8 @@ def main() -> int:
         validation_p4 = _validate_transactional(conn)
         stats_p5 = _phase5_demand(conn, profile, items_ref, locations_ref)
         validation_p5 = _validate_demand(conn)
+        stats_p6 = _phase6_history(conn, profile, items_ref, locations_ref)
+        validation_p6 = _validate_history(conn)
 
     print()
     print("=" * 60)
@@ -638,6 +741,20 @@ def main() -> int:
     print("PHASE 5 — validation")
     print("=" * 60)
     for k, v in validation_p5.items():
+        print(f"  {k:35s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 6 — historical (12 months back orders)")
+    print("=" * 60)
+    for k, v in stats_p6.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 6 — validation")
+    print("=" * 60)
+    for k, v in validation_p6.items():
         print(f"  {k:35s}  {v}")
     return 0
 
