@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from ootils_core.engine.mrp.llc_calculator import (
     LLCCalculator,
-    CycleDetectedError,
+    BomCycleDetectedError,
     compute_llc_pure,
 )
 
@@ -140,14 +140,14 @@ class TestDiamondBOM:
 # ─────────────────────────────────────────────────────────────
 
 class TestCycleDetection:
-    """Cycle detection must raise CycleDetectedError with the cycle path."""
+    """Cycle detection must raise BomCycleDetectedError with the cycle path."""
 
     def test_simple_cycle(self):
         """A → B → A forms a cycle."""
         a, b = _uuids(2)
         edges = [(a, b), (b, a)]
 
-        with pytest.raises(CycleDetectedError) as exc_info:
+        with pytest.raises(BomCycleDetectedError) as exc_info:
             compute_llc_pure(edges)
 
         assert len(exc_info.value.cycle) >= 2
@@ -158,7 +158,7 @@ class TestCycleDetection:
         a, b, c = _uuids(3)
         edges = [(a, b), (b, c), (c, a)]
 
-        with pytest.raises(CycleDetectedError) as exc_info:
+        with pytest.raises(BomCycleDetectedError) as exc_info:
             compute_llc_pure(edges)
 
         assert a in exc_info.value.cycle
@@ -170,7 +170,7 @@ class TestCycleDetection:
         a = UUID(int=1)
         edges = [(a, a)]
 
-        with pytest.raises(CycleDetectedError):
+        with pytest.raises(BomCycleDetectedError):
             compute_llc_pure(edges)
 
     def test_cycle_with_legs(self):
@@ -186,7 +186,7 @@ class TestCycleDetection:
             (c, a),     # cycle back to A
         ]
 
-        with pytest.raises(CycleDetectedError) as exc_info:
+        with pytest.raises(BomCycleDetectedError) as exc_info:
             compute_llc_pure(edges)
 
         # The cycle path should include A, B, C
@@ -194,7 +194,7 @@ class TestCycleDetection:
         assert a in cycle_set or b in cycle_set or c in cycle_set
 
     def test_no_cycle_linear(self):
-        """Linear chain should NOT raise CycleDetectedError."""
+        """Linear chain should NOT raise BomCycleDetectedError."""
         fg, sa, rm = _uuids(3)
         edges = [(fg, sa), (sa, rm)]
 
@@ -202,7 +202,7 @@ class TestCycleDetection:
         assert result.item_count == 3
 
     def test_no_cycle_diamond(self):
-        """Diamond BOM should NOT raise CycleDetectedError."""
+        """Diamond BOM should NOT raise BomCycleDetectedError."""
         fg, sa1, sa2, rm = _uuids(4)
         edges = [(fg, sa1), (fg, sa2), (sa1, rm), (sa2, rm)]
 
@@ -210,11 +210,11 @@ class TestCycleDetection:
         assert result.item_count == 4
 
     def test_cycle_error_message(self):
-        """CycleDetectedError message should contain the cycle path."""
+        """BomCycleDetectedError message should contain the cycle path."""
         a, b = _uuids(2)
         edges = [(a, b), (b, a)]
 
-        with pytest.raises(CycleDetectedError) as exc_info:
+        with pytest.raises(BomCycleDetectedError) as exc_info:
             compute_llc_pure(edges)
 
         msg = str(exc_info.value)
@@ -717,11 +717,11 @@ class TestEdgeCases:
         assert result.edge_count == 1
 
     def test_cycle_error_has_cycle_attribute(self):
-        """CycleDetectedError should have a .cycle attribute."""
+        """BomCycleDetectedError should have a .cycle attribute."""
         a, b = UUID(int=1), UUID(int=2)
         edges = [(a, b), (b, a)]
 
-        with pytest.raises(CycleDetectedError) as exc_info:
+        with pytest.raises(BomCycleDetectedError) as exc_info:
             compute_llc_pure(edges)
 
         assert hasattr(exc_info.value, 'cycle')
