@@ -826,7 +826,7 @@ class CRPEngine:
                 FROM planned_supply ps
                 JOIN items i ON ps.item_id = i.item_id
                 JOIN routings r ON i.item_id = r.item_id AND r.active = true
-                JOIN operations op ON r.routing_id = op.routing_id AND op.active = true
+                JOIN routing_operations op ON r.routing_id = op.routing_id AND op.active = true
                 JOIN work_centers wc ON op.work_center_id = wc.work_center_id
                 WHERE ps.due_date >= %s
                   AND ps.due_date <= %s
