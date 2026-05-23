@@ -710,7 +710,9 @@ class TestPropagate:
         engine._propagate(run, {node_id}, _mock_db())
 
         assert run.nodes_recalculated == 1
-        dirty.clear_dirty.assert_called_once()
+        # Batched flush: one DELETE…ANY(…) at the end of _propagate replaces
+        # the per-node clear_dirty round-trips.
+        dirty.clear_dirty_batch.assert_called_once()
 
     def test_pi_node_unchanged_increments_unchanged(self):
         scenario_id = uuid4()
@@ -768,7 +770,11 @@ class TestPropagate:
         engine = _make_engine(store=store, traversal=traversal, dirty=dirty)
 
         engine._propagate(run, {node_id}, _mock_db())
-        dirty.clear_dirty.assert_called_once()
+        # Even when the node isn't found in the cache, its dirty flag is
+        # cleared via the batched flush at the end of _propagate.
+        dirty.clear_dirty_batch.assert_called_once()
+        node_ids_arg = dirty.clear_dirty_batch.call_args.args[0]
+        assert node_id in node_ids_arg
 
     def test_node_not_in_remaining_dirty_skipped(self):
         scenario_id = uuid4()
@@ -789,8 +795,10 @@ class TestPropagate:
         engine = _make_engine(store=store, traversal=traversal, dirty=dirty)
 
         engine._propagate(run, {node_a}, _mock_db())
-        # node_b should be skipped; clear_dirty called only for node_a
-        assert dirty.clear_dirty.call_count == 1
+        # node_b should be skipped; the batched DELETE includes only node_a.
+        dirty.clear_dirty_batch.assert_called_once()
+        node_ids_arg = dirty.clear_dirty_batch.call_args.args[0]
+        assert list(node_ids_arg) == [node_a]
 
 
 # ===========================================================================

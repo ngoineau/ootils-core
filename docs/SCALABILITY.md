@@ -62,11 +62,37 @@ Throughput climbs from ~24 nodes/sec to ~125 nodes/sec, with `queries/node` drop
 
 The SMB tier no longer breaks; the mid-market tier becomes viable for batch runs even before further investment.
 
-#### Remaining levers (Tier 2 — not in scope of R2)
+#### Tier 2 — also shipped (2026-05-23)
 
-- Batch the `update_pi_result` writes (one `UPDATE … FROM (VALUES …)` instead of N executions).
-- Cap `clear_dirty` to a single `DELETE … WHERE node_id = ANY(%s)` at the end of the loop.
+After Tier 1, the hot path was bound by per-node round-trips (2 queries × ~4ms tunnel latency = ~8ms/node → ~125 nps ceiling). Tier 2 collapses those into a single round-trip per propagation run:
+
+- `update_pi_result` calls are accumulated and flushed via one
+  `UPDATE … FROM UNNEST(%s::uuid[], %s::numeric[], …)` at the end of
+  `_propagate`.
+- `clear_dirty` calls are batched into one
+  `DELETE FROM dirty_nodes WHERE node_id = ANY(%s)`.
+
+Result: **7 queries total per propagation regardless of dirty count**
+(4 pre-load + 1 safety-stock + 1 batched UPDATE + 1 batched DELETE).
+
+| Scale | Dirty PI | Tier 1 wall | Tier 2 wall | Tier 2 speedup vs Tier 1 |
+|-------|---------|-------------|-------------|--------------------------|
+| 140 nodes | 140 | 1.17 s | **0.12 s** | ~10× |
+| 1.5 K nodes | 1,500 | 11.5 s | **0.39 s** | ~30× |
+| 6 K nodes | 6,000 | 48.7 s | **1.40 s** | ~35× |
+| 15 K nodes | 15,000 | extrap. ≥120 s | **3.66 s** | ≥30× |
+
+Throughput climbs from ~125 nps (Tier 1) to **~4 000 nps** (Tier 2),
+the rate at which PostgreSQL can ingest a single bulk-update statement.
+Cumulative wall-time improvement vs the original pre-R2 implementation:
+**~50× at small scale, ≥150× at mid scale**.
+
+#### Still-open Tier 3 levers (deferred)
+
 - Push the kernel compute into a Rust extension (issue #197).
+- Batch the shortage-detector writes (currently 1 INSERT per shortage —
+  acceptable while shortages stay rare).
+- Streaming / pipelined propagation for very large dirty sets (>100 K).
 
 ---
 

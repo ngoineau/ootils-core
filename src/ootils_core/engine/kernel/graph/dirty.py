@@ -62,6 +62,32 @@ class DirtyFlagManager:
             (calc_run_id, node_id, scenario_id),
         )
 
+    def clear_dirty_batch(
+        self,
+        node_ids: list[UUID],
+        scenario_id: UUID,
+        calc_run_id: UUID,
+        db,
+    ) -> None:
+        """Clear many dirty flags in one DELETE.
+
+        Used by the propagator's batch write path — replaces N
+        per-node DELETEs with a single round-trip
+        (REVIEW-2026-05 R2 Tier 2 follow-up).
+        """
+        if not node_ids:
+            return
+        key = self._key(scenario_id, calc_run_id)
+        if key in self._dirty:
+            self._dirty[key].difference_update(node_ids)
+        db.execute(
+            """
+            DELETE FROM dirty_nodes
+            WHERE calc_run_id = %s AND scenario_id = %s AND node_id = ANY(%s)
+            """,
+            (calc_run_id, scenario_id, list(node_ids)),
+        )
+
     def get_dirty_nodes(
         self,
         calc_run_id: UUID,

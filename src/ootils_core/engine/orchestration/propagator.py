@@ -311,13 +311,18 @@ class PropagationEngine:
         # Remaining dirty set (may shrink as we process)
         remaining_dirty = set(dirty_nodes)
 
+        # Accumulators for batched writes — one round-trip at the end of the
+        # loop instead of two per node. See REVIEW-2026-05 R2 Tier 2.
+        pending_updates: list[tuple] = []
+        cleared_dirty: list[UUID] = []
+
         for node_id in ordered:
             if node_id not in remaining_dirty:
                 continue  # Already cleared (e.g., cascaded out of window)
 
             node = nodes_cache.get(node_id)
             if node is None:
-                self._dirty.clear_dirty(node_id, scenario_id, calc_run.calc_run_id, db)
+                cleared_dirty.append(node_id)
                 remaining_dirty.discard(node_id)
                 continue
 
@@ -330,6 +335,7 @@ class PropagationEngine:
                     nodes_cache=nodes_cache,
                     edges_by_target=edges_by_target,
                     safety_stock_cache=safety_stock_cache,
+                    pending_updates=pending_updates,
                 )
                 if changed:
                     calc_run.nodes_recalculated += 1
@@ -339,9 +345,17 @@ class PropagationEngine:
                 # Non-PI nodes don't need kernel computation — just mark as processed
                 calc_run.nodes_unchanged += 1
 
-            # Clear dirty flag
-            self._dirty.clear_dirty(node_id, scenario_id, calc_run.calc_run_id, db)
+            cleared_dirty.append(node_id)
             remaining_dirty.discard(node_id)
+
+        # ------------------------------------------------------------------
+        # FLUSH: one UPDATE…FROM(VALUES…) for results, one DELETE…ANY(…) for
+        # dirty-flag cleanup. Replaces N round-trips with 2.
+        # ------------------------------------------------------------------
+        if pending_updates:
+            self._store.update_pi_results_batch(pending_updates)
+        if cleared_dirty:
+            self._dirty.clear_dirty_batch(cleared_dirty, scenario_id, calc_run.calc_run_id, db)
 
     def _recompute_pi_node(
         self,
@@ -352,6 +366,7 @@ class PropagationEngine:
         nodes_cache: Optional[dict[UUID, Optional[Node]]] = None,
         edges_by_target: Optional[dict[UUID, dict[str, list]]] = None,
         safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
+        pending_updates: Optional[list[tuple]] = None,
     ) -> bool:
         """
         Recompute a single PI node.
@@ -504,18 +519,29 @@ class PropagationEngine:
 
         # ------------------------------------------------------------------
         # 6. Persist via GraphStore (all DB writes go through the store layer)
+        # When called from the batched _propagate loop, pending_updates is a
+        # list — accumulate and let the caller flush in one UPDATE…FROM(VALUES).
+        # When called standalone (tests, legacy paths), pending_updates is None
+        # → write immediately to preserve the original contract.
         # ------------------------------------------------------------------
-        self._store.update_pi_result(
-            node_id=node_id,
-            scenario_id=scenario_id,
-            calc_run_id=calc_run_id,
-            opening_stock=result["opening_stock"],
-            inflows=result["inflows"],
-            outflows=result["outflows"],
-            closing_stock=result["closing_stock"],
-            has_shortage=result["has_shortage"],
-            shortage_qty=result["shortage_qty"],
-        )
+        if pending_updates is not None:
+            pending_updates.append((
+                node_id, scenario_id, calc_run_id,
+                result["opening_stock"], result["inflows"], result["outflows"],
+                result["closing_stock"], result["has_shortage"], result["shortage_qty"],
+            ))
+        else:
+            self._store.update_pi_result(
+                node_id=node_id,
+                scenario_id=scenario_id,
+                calc_run_id=calc_run_id,
+                opening_stock=result["opening_stock"],
+                inflows=result["inflows"],
+                outflows=result["outflows"],
+                closing_stock=result["closing_stock"],
+                has_shortage=result["has_shortage"],
+                shortage_qty=result["shortage_qty"],
+            )
 
         # ------------------------------------------------------------------
         # 7. Explainability (Sprint M3) — inline causal chain generation
