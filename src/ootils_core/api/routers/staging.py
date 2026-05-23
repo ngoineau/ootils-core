@@ -51,6 +51,7 @@ from ootils_core.staging.approve import ApprovalError, approve_batch
 from ootils_core.staging.diff import DiffError, compute_diff
 from ootils_core.staging.loader import LoaderError, load_to_staging
 from ootils_core.staging.parser import ParseError, ParseOptions, parse
+from ootils_core.staging.reject import RejectionError, reject_batch
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/staging", tags=["staging"])
@@ -339,4 +340,56 @@ def approve(
         },
         "deletion_ratio": result.deletion_ratio,
         "samples": result.samples,
+    }
+
+
+class RejectRequest(BaseModel):
+    """Body of POST /v1/staging/batches/{id}/reject.
+
+    A rejection is permanent — the batch transitions to 'rejected' and
+    cannot be revived. The `reason` is stored in
+    `staging.transform_runs.approval_notes` AND appended to
+    `ingest_batches.notes` so operators can see the rationale either
+    way.
+
+    To retry the import after correction, the source must be
+    re-uploaded as a new batch (the rejected batch's ingest_rows stay
+    intact for forensics).
+    """
+    rejected_by: str = Field(..., min_length=1, max_length=200)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+@router.post(
+    "/batches/{batch_id}/reject",
+    dependencies=[Depends(require_auth)],
+)
+def reject(
+    batch_id: UUID,
+    body: RejectRequest,
+    db: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Close out a batch as rejected without writing to canonical."""
+    try:
+        result = reject_batch(
+            db,
+            batch_id=batch_id,
+            rejected_by=body.rejected_by,
+            reason=body.reason,
+        )
+    except RejectionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    return {
+        "batch_id": str(result.batch_id),
+        "run_id": str(result.run_id),
+        "entity_type": result.entity_type,
+        "source_system": result.source_system,
+        "rejected_by": result.rejected_by,
+        "rejection_reason": result.rejection_reason,
+        "prior_status": result.prior_status,
+        "new_status": "rejected",
     }
