@@ -89,10 +89,40 @@ Cumulative wall-time improvement vs the original pre-R2 implementation:
 
 #### Still-open Tier 3 levers (deferred)
 
-- Push the kernel compute into a Rust extension (issue #197).
+After Tier 2, the propagation hot path is no longer network-bound — it sits
+at ~3 200 nps because the per-node Python loop (`kernel.compute_pi_node` +
+`shortage_detector.detect_with_params` + cache lookups + list appends) takes
+~0.3 ms per PI node and runs N times. The remaining levers are
+**compute-bound**, not query-bound:
+
+- **Pure SQL projection** — rewrite `compute_pi_node` as a `WITH RECURSIVE`
+  / window-function pipeline in PostgreSQL. All compute server-side in one
+  statement, zero Python round-trips per node. Largest expected gain (~50×)
+  but a serious refactor: requires bit-exact parity tests between the SQL
+  and the Python kernel, and pulls explainability into SQL too.
+- **NumPy vectorisation per series** — each projection series is internally
+  sequential (every bucket reads the predecessor's `closing_stock`) but
+  series are mutually independent. Process series in a vectorised NumPy
+  loop using prefix sums for the running stock. ~10× expected, medium refactor.
+- **Rust kernel via PyO3** — issue #197. Same algorithm, native code.
+  ~30× expected, heavier build/CI lift.
 - Batch the shortage-detector writes (currently 1 INSERT per shortage —
   acceptable while shortages stay rare).
-- Streaming / pipelined propagation for very large dirty sets (>100 K).
+- Streaming / pipelined propagation for very large dirty sets (>1 M).
+
+#### Measured perf landscape (2026-05-23, post-Tier-2)
+
+| Horizon × Items | PI nodes | Propagation wall | Throughput |
+|---|---|---|---|
+| 90 d × 50 | 1.5 K | 0.39 s | 3 800 nps |
+| 90 d × 500 | 15 K | 3.7 s | 4 090 nps |
+| 365 d × 100 | 36.5 K | 8.9 s | 4 094 nps |
+| 365 d × 500 (SMB) | 182.5 K | 53 s | 3 420 nps |
+| 365 d × 2 000 (mid-market) | 730 K | 3.8 min | 3 187 nps |
+
+Extrapolated 2-year × 5 K items (~3.6 M nodes) ≈ 19 min. The Tier 3 levers
+target this range — anything beyond ~1 M PI nodes is where Python compute
+becomes the dominant cost.
 
 ---
 
