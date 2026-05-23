@@ -524,5 +524,5 @@ async def _run_apics_mrp(
             nodes_created=0,
             edges_created=0,
             elapsed_ms=elapsed_ms,
-            errors=[str(e)],
+            errors=["MRP APICS run failed"],
         )

@@ -216,7 +216,7 @@ async def run_mrp_apics(
     except Exception as e:
         db.rollback()
         logger.exception("MRP APICS run failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="MRP APICS run failed")
 
 
 @router.post("/consumption", response_model=ConsumptionResponse)
@@ -323,7 +323,7 @@ async def run_consumption(
     except Exception as e:
         db.rollback()
         logger.exception("Forecast consumption failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Forecast consumption failed")
 
 
 @router.post("/lot-sizing", response_model=LotSizingResponse)
@@ -367,7 +367,7 @@ async def calculate_lot_sizing(
 
     except Exception as e:
         logger.exception("Lot sizing calculation failed: %s", e)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Lot sizing calculation failed: invalid parameters")
 
 
 @router.get("/apics/llc", response_model=LlcResponse)
@@ -395,4 +395,4 @@ async def get_llc(
     except Exception as e:
         db.rollback()
         logger.exception("LLC calculation failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="LLC calculation failed")

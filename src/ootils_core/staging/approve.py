@@ -271,7 +271,7 @@ def approve_batch(
             "staging.approve failed: batch=%s run=%s entity=%s err=%s",
             batch_id, run_id, entity_type, exc,
         )
-        raise ApprovalError(f"approval failed during write: {exc}") from exc
+        raise ApprovalError("approval failed during write") from exc
 
     duration = _time.perf_counter() - started
     logger.info(

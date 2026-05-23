@@ -698,4 +698,10 @@ def test_post_simulate_invalid_node_returns_422(app, auth_headers):
     detail = data.get("detail", {})
     assert "failed_overrides" in detail, f"Expected failed_overrides in detail: {detail}"
     assert len(detail["failed_overrides"]) == 1
-    assert "not found" in detail["failed_overrides"][0]["error"].lower()
+    # Per-override error is sanitized (str(exc) is no longer leaked to the
+    # client — chantier 2 of audit 2026-05-23). The node_id is still
+    # echoed so the client can correlate the failure with the input.
+    failed = detail["failed_overrides"][0]
+    assert failed["node_id"] == "00000000-0000-0000-0000-000000000000"
+    assert failed["field_name"] == "shortage_qty"
+    assert failed["error"]  # generic, non-empty

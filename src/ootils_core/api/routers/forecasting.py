@@ -351,7 +351,7 @@ async def generate_forecast(
         logger.exception("forecast.generate failed item=%s location=%s: %s", body.item_id, body.location_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Forecast generation failed: {str(e)}",
+            detail="Forecast generation failed",
         )
 
     # 5. Create forecast header
