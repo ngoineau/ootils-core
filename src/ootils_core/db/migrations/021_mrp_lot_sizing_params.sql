@@ -1,5 +1,17 @@
 -- Migration 021: Add Phase 0 MRP lot sizing / consumption params
 -- Compatible with fresh databases and current mrp_* schema used by the engine.
+--
+-- JSONB carve-out (see CLAUDE.md "no JSONB for business data — explicit
+-- carve-outs for diagnostic/staging payloads"):
+--   `mrp_runs.errors` and `mrp_runs.warnings` are unbounded per-run
+--   diagnostic lists emitted by the MRP engine. Each element is a free-form
+--   message string plus an optional context dict; the shape varies by the
+--   originating engine stage and is intended for operator triage rather
+--   than structured querying. Typed normalisation would force a schema
+--   that the engine does not actually produce. This use is one of the
+--   documented carve-outs alongside `dq_agent_runs.summary` (mig 012) and
+--   `demo_runs.artifact` (mig 031). All other engine output is typed
+--   (see `mrp_bucket_records`, `mrp_action_messages` below).
 
 ALTER TYPE lot_size_rule_type ADD VALUE IF NOT EXISTS 'POQ';
 ALTER TYPE lot_size_rule_type ADD VALUE IF NOT EXISTS 'EOQ';
