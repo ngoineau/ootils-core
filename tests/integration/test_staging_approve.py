@@ -230,11 +230,18 @@ def test_approve_soft_deletes_missing_rows(staging_client, auth, conn) -> None:
         source_system=src,
     )
 
+    # 3 canonical, batch keeps 1 -> 67% deletion ratio > 20% guard.
+    # Test exercises soft-delete WITH force=true.
     resp = staging_client.post(
         f"/v1/staging/batches/{batch_id}/approve",
         headers=auth,
-        json={"approved_by": "test@example.com"},
+        json={
+            "approved_by": "test@example.com",
+            "force": True,
+            "notes": "test: exercising soft-delete with force=true",
+        },
     )
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["counts"]["rows_soft_deleted"] == 2
 
