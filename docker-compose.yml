@@ -13,6 +13,23 @@ services:
       - "5432:5432"  # Uncomment for local debug only — do NOT expose in production
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Tuning targeted at 2 cores / 5-6 GB RAM dev VM. Measured 2026-05-23:
+    # +39% on Python propagator (53s -> 38s at 500x365), +22% on SQL window
+    # spike (13.5s -> 11.1s). See docs/SCALABILITY.md "Tier 3 spike".
+    # Adjust shared_buffers / effective_cache_size if RAM changes; bump
+    # max_parallel_workers* if cores > 4.
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
+      -c effective_cache_size=4GB
+      -c max_worker_processes=4
+      -c max_parallel_workers=2
+      -c max_parallel_workers_per_gather=1
+      -c jit=off
+      -c wal_buffers=16MB
+      -c temp_buffers=16MB
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s

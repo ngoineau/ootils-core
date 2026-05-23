@@ -166,6 +166,30 @@ Extrapolated 2-year × 5 K items (~3.6 M nodes) ≈ 19 min. The Tier 3 levers
 target this range — anything beyond ~1 M PI nodes is where Python compute
 becomes the dominant cost.
 
+#### Postgres tuning gain — applied 2026-05-23
+
+The dev VM's Postgres ran the `postgres:16-alpine` defaults (`shared_buffers
+= 128 MB`, `work_mem = 4 MB`, `jit = on`), which is unusable for window
+functions and bulk UNNEST. After applying the tuning baked into
+`docker-compose.yml` (shared_buffers 1 GB, work_mem 32 MB, jit off, parallel
+workers capped to the 2 physical cores), re-bench at SMB annual:
+
+| Workload | Pre-tune | Post-tune | Gain |
+|---|---|---|---|
+| Python propagator (Tier 2) | 53 s / 3 420 nps | **38.2 s / 4 773 nps** | **+39 %** |
+| SQL window spike (Tier 3) | 13.5 s / 13 488 nps | **11.1 s / 16 423 nps** | **+22 %** |
+
+The Python path gained more because each of its 7 round-trips reads a
+warmer cache and skips disk spills (`work_mem` was 8× too small for the
+internal sorts). The SQL path was already doing one big query — tuning helps
+but the gain is smaller because there was less waste to recover.
+
+**Hardware ceiling**: 2-core VM is the real limit. Bumping to 4 cores would
+let `max_parallel_workers_per_gather` go to 2 and parallelise the window
+function across series partitions — another ~30-50 % on the SQL path,
+basically nothing on the Python path. **Do not pay for more RAM at current
+data sizes** — the 251 MB bench DB fits entirely in OS page cache.
+
 ---
 
 ### Breaking point #2: `expand_dirty_subgraph` — O(n²) list operations
