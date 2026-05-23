@@ -31,7 +31,7 @@ except ImportError:
 
 from ootils_core.api.auth import _expected_token
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import bom, calc, calendars, demo, dq, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, planning_params, projection, rccp, scenarios, simulate
+from ootils_core.api.routers import bom, calc, calendars, demo, dq, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, planning_params, projection, rccp, scenarios, simulate, staging
 from ootils_core.api.routers.graph import nodes_router
 from ootils_core.mps import router as mps_router
 from ootils_core.atp import atp_router
@@ -338,6 +338,7 @@ def create_app() -> FastAPI:
     application.include_router(graph.router)
     application.include_router(nodes_router)
     application.include_router(ingest.router)
+    application.include_router(staging.router)
     application.include_router(dq.router)
     application.include_router(bom.router)
     application.include_router(calendars.router)
