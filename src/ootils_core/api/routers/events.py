@@ -4,6 +4,7 @@ Events router — POST /v1/events (submit event) + GET /v1/events (read event lo
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date
 from decimal import Decimal
 from typing import List, Optional
@@ -21,7 +22,15 @@ router = APIRouter(prefix="/v1/events", tags=["events"])
 
 
 def _build_propagation_engine(db):
-    """Build a PropagationEngine instance wired to the given DB connection."""
+    """Build a PropagationEngine instance wired to the given DB connection.
+
+    The implementation is selected by the OOTILS_ENGINE environment variable:
+    - 'python' (default): the in-process Python kernel + dirty-flag pipeline
+    - 'sql':              SqlPropagationEngine — window-function projection
+                          inside Postgres. ~3-6x faster on batch workloads
+                          but does not regenerate causal-chain explanations.
+                          See docs/SCALABILITY.md "Tier 3 spike" for trade-offs.
+    """
     from ootils_core.engine.kernel.graph.store import GraphStore
     from ootils_core.engine.kernel.graph.traversal import GraphTraversal
     from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
@@ -37,7 +46,20 @@ def _build_propagation_engine(db):
     kernel = ProjectionKernel()
     shortage_detector = ShortageDetector()
 
-    return PropagationEngine(
+    engine_flavor = os.environ.get("OOTILS_ENGINE", "python").strip().lower()
+    if engine_flavor == "sql":
+        from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine
+        engine_cls: type[PropagationEngine] = SqlPropagationEngine
+        logger.info("PropagationEngine: using SQL backend (OOTILS_ENGINE=sql)")
+    elif engine_flavor in ("python", ""):
+        engine_cls = PropagationEngine
+    else:
+        logger.warning(
+            "Unknown OOTILS_ENGINE=%r — falling back to python", engine_flavor,
+        )
+        engine_cls = PropagationEngine
+
+    return engine_cls(
         store=store,
         traversal=traversal,
         dirty=dirty,
