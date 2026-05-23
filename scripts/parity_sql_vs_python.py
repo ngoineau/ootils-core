@@ -312,12 +312,39 @@ def _seed_rich(
     }
 
 
+def _build_python_engine(conn: psycopg.Connection):
+    """Build a PropagationEngine explicitly (bypasses OOTILS_ENGINE env var).
+
+    The harness needs both flavours guaranteed regardless of the API's
+    feature-flag selection.
+    """
+    from ootils_core.engine.kernel.graph.store import GraphStore
+    from ootils_core.engine.kernel.graph.traversal import GraphTraversal
+    from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+    from ootils_core.engine.orchestration.calc_run import CalcRunManager
+    from ootils_core.engine.kernel.calc.projection import ProjectionKernel
+    from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+    from ootils_core.engine.orchestration.propagator import PropagationEngine
+
+    # Note: no explanation_builder here — the API factory doesn't pass one
+    # either (matches production). Adding it would make the harness compute
+    # causal chains the SQL engine can't, inflating the parity-speedup ratio.
+    store = GraphStore(conn)
+    return PropagationEngine(
+        store=store,
+        traversal=GraphTraversal(store),
+        dirty=DirtyFlagManager(),
+        calc_run_mgr=CalcRunManager(),
+        kernel=ProjectionKernel(),
+        shortage_detector=ShortageDetector(),
+    )
+
+
 def _run_python_propagation(conn: psycopg.Connection, calc_run_id: UUID, dirty: set[UUID]) -> float:
     """Run the production Python propagator over the dirty set. Returns wall_seconds."""
-    from ootils_core.api.routers.events import _build_propagation_engine
     from ootils_core.models import CalcRun
 
-    engine = _build_propagation_engine(conn)
+    engine = _build_python_engine(conn)
     row = conn.execute(
         "SELECT * FROM calc_runs WHERE calc_run_id = %s",
         (calc_run_id,),
@@ -584,7 +611,6 @@ def _build_sql_engine(conn: psycopg.Connection) -> SqlPropagationEngine:
     from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
     from ootils_core.engine.orchestration.calc_run import CalcRunManager
     from ootils_core.engine.kernel.calc.projection import ProjectionKernel
-    from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
     from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 
     store = GraphStore(conn)
@@ -594,7 +620,6 @@ def _build_sql_engine(conn: psycopg.Connection) -> SqlPropagationEngine:
         dirty=DirtyFlagManager(),
         calc_run_mgr=CalcRunManager(),
         kernel=ProjectionKernel(),
-        explanation_builder=ExplanationBuilder(),
         shortage_detector=ShortageDetector(),
     )
 
