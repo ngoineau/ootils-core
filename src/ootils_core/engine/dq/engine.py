@@ -478,16 +478,16 @@ def _update_row_statuses(
     for row_id in all_row_ids:
         row_issue_list = row_issues.get(row_id, [])
         has_error = any(i.severity == "error" for i in row_issue_list)
-        has_warning = any(i.severity == "warning" for i in row_issue_list)
-
-        if has_error:
-            dq_status = "rejected"
-        elif has_warning:
-            dq_status = "l2_pass"  # passed both levels but with warnings
-        else:
-            dq_status = "l2_pass"  # clean pass
 
         level_reached = max_level_reached.get(row_id, 0)
+        if has_error:
+            dq_status = "rejected"
+        else:
+            # Map level_reached to the corresponding l{N}_pass status so
+            # downstream queries can filter by validation depth.
+            # Warnings don't downgrade the status — they are tracked in
+            # data_quality_issues directly.
+            dq_status = f"l{max(1, level_reached)}_pass" if level_reached >= 1 else "rejected"
 
         db.execute(
             """
@@ -637,6 +637,28 @@ def run_dq(db: psycopg.Connection, batch_id: UUID) -> DQResult:
     # Mark L2 reached for candidates
     for row_id, _, _ in l2_candidates:
         max_level_reached[row_id] = 2
+
+    # 4b. L3 business rules — only for rows that passed L1 + L2 (no error issues)
+    #     L3 is DB-free, fast, and DQ-issues land in the same data_quality_issues
+    #     table with dq_level=3. See engine/dq/l3_rules.py for the rule registry.
+    from ootils_core.engine.dq.l3_rules import check_l3
+
+    l3_candidates = [
+        (row_id, row_number, content)
+        for (row_id, row_number, content) in rows_data
+        if not any(i.severity == "error" for i in row_issues.get(row_id, []))
+    ]
+    if l3_candidates:
+        l3_issues = check_l3(l3_candidates, entity_type)
+        for issue in l3_issues:
+            row_issues.setdefault(issue.row_id, []).append(issue)
+        all_issues.extend(l3_issues)
+
+    # Mark L3 reached for candidates that didn't pick up a new L3 error
+    for row_id, _, _ in l3_candidates:
+        if not any(i.dq_level == 3 and i.severity == "error"
+                   for i in row_issues.get(row_id, [])):
+            max_level_reached[row_id] = 3
 
     # 5. Persist issues
     _persist_issues(db, batch_id, all_issues)
