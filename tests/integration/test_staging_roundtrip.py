@@ -151,13 +151,17 @@ def test_items_roundtrip_tsv(conn) -> None:
     )
     assert result.rows_inserted == len(_ITEMS)
 
-    # Verify each ingest_rows entry matches the source row exactly
+    # Verify each ingest_rows entry matches the source row exactly. We
+    # compare by external_id (sorted on both sides) rather than by
+    # row_number to be robust against ORDER BY differences between the
+    # canonical SELECT and the in-memory list order.
     loaded = conn.execute(
         "SELECT row_number, col_01, col_02, col_03, col_04, col_05 "
-        "FROM ingest_rows WHERE batch_id = %s ORDER BY row_number",
+        "FROM ingest_rows WHERE batch_id = %s ORDER BY col_01",
         (result.batch_id,),
     ).fetchall()
-    for original, ingested in zip(_ITEMS, loaded):
+    items_sorted = sorted(_ITEMS, key=lambda it: it[0])
+    for original, ingested in zip(items_sorted, loaded):
         assert ingested["col_01"] == original[0], f"external_id mismatch at row {ingested['row_number']}"
         assert ingested["col_02"] == original[1], f"name mismatch at row {ingested['row_number']}"
         assert ingested["col_03"] == original[2]
