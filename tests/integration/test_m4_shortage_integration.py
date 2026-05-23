@@ -111,10 +111,18 @@ def _make_pi_node_obj(
     item_id: UUID | None,
     location_id: UUID | None,
     closing_stock: Decimal | None,
-    time_span_start: date | None = None,
-    time_span_end: date | None = None,
+    time_span_start: date | None = date(2026, 4, 1),
+    time_span_end: date | None = date(2026, 4, 8),
 ) -> Node:
-    """Build the in-memory Node passed to ShortageDetector.detect()."""
+    """Build the in-memory Node passed to ShortageDetector.detect().
+
+    `time_span_start` defaults to a non-None date so that
+    ShortageDetector.persist() does not violate the
+    shortages.shortage_date NOT NULL constraint. Tests that need to
+    exercise the no-time-ref branch should pass time_span_start=None
+    AND time_ref=None explicitly via Node, but persist() will then
+    fail at the DB layer — by design.
+    """
     return Node(
         node_id=node_id,
         node_type="ProjectedInventory",
