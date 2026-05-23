@@ -14,6 +14,7 @@ from uuid import UUID
 
 import psycopg
 
+from ootils_core.engine.kernel._clock import Clock, SystemClock
 from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import (
     CycleDetectedError,
@@ -32,8 +33,9 @@ class GraphStore:
     The store does NOT manage transactions — callers own commit/rollback.
     """
 
-    def __init__(self, conn: psycopg.Connection) -> None:
+    def __init__(self, conn: psycopg.Connection, clock: Clock | None = None) -> None:
         self._conn = conn
+        self._clock = clock or SystemClock()
 
     # ------------------------------------------------------------------
     # Node reads
@@ -393,8 +395,7 @@ class GraphStore:
         """
         if not updates:
             return 0
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        now = self._clock.now()
         # Append `updated_at` to every tuple; psycopg renders the list-of-tuples
         # as a VALUES clause natively when bound to %s.
         rows = [(*u, now) for u in updates]
@@ -450,7 +451,6 @@ class GraphStore:
         Updates only the computation result fields + clears is_dirty.
         Called exclusively by the propagation engine — keeps all DB writes in the store.
         """
-        from datetime import datetime, timezone
         self._conn.execute(
             """
             UPDATE nodes
@@ -473,7 +473,7 @@ class GraphStore:
                 has_shortage,
                 shortage_qty,
                 calc_run_id,
-                datetime.now(timezone.utc),
+                self._clock.now(),
                 node_id,
                 scenario_id,
             ),
@@ -683,7 +683,6 @@ class GraphStore:
         has consumed from it.  Also clears is_dirty so downstream propagation
         knows this node is fresh.
         """
-        from datetime import datetime, timezone
         self._conn.execute(
             """
             UPDATE nodes
@@ -692,7 +691,7 @@ class GraphStore:
                 updated_at    = %s
             WHERE node_id = %s AND scenario_id = %s
             """,
-            (closing_stock, datetime.now(timezone.utc), node_id, scenario_id),
+            (closing_stock, self._clock.now(), node_id, scenario_id),
         )
 
     def get_or_create_projection_series(

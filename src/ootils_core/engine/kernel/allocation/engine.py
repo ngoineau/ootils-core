@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import logging
 from datetime import date as _date_type
-from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
 import psycopg
 
+from ootils_core.engine.kernel._clock import Clock, SystemClock
 from ootils_core.engine.kernel._ids import deterministic_uuid
 
 from ootils_core.engine.kernel.graph.store import GraphStore
@@ -55,6 +55,9 @@ class AllocationEngine:
         result = engine.allocate(scenario_id, db_conn)
     """
 
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = clock or SystemClock()
+
     def allocate(
         self,
         scenario_id: UUID,
@@ -70,8 +73,8 @@ class AllocationEngine:
 
         The caller owns transaction management (commit/rollback).
         """
-        store = GraphStore(db)
-        run_at = datetime.now(timezone.utc)
+        store = GraphStore(db, clock=self._clock)
+        run_at = self._clock.now()
 
         demands = self.get_demand_nodes(scenario_id, db)
         logger.info(
