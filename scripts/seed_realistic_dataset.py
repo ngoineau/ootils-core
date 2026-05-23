@@ -39,6 +39,14 @@ from ootils_core.seed.master.boms import (
 from ootils_core.seed.master.items import generate_items, insert_items
 from ootils_core.seed.master.locations import generate_locations, insert_locations
 from ootils_core.seed.master.suppliers import generate_suppliers, insert_suppliers
+from ootils_core.seed.network.planning_params import (
+    generate_planning_params,
+    insert_planning_params,
+)
+from ootils_core.seed.network.supplier_items import (
+    generate_supplier_items,
+    insert_supplier_items,
+)
 
 
 def _admin_recreate_db(dsn: str, dbname: str) -> None:
@@ -109,7 +117,9 @@ def _phase1_master(conn: psycopg.Connection, profile: Profile) -> dict:
             "gen_seconds": round(t_sup_gen, 3),
             "insert_seconds": round(t_sup_ins, 3),
         },
-        "_items_ref": items,  # kept for phase 2
+        "_items_ref": items,
+        "_locations_ref": locations,
+        "_suppliers_ref": suppliers,
     }
 
 
@@ -136,6 +146,113 @@ def _phase2_boms(conn: psycopg.Connection, profile: Profile, items) -> dict:
         "gen_seconds": round(t_gen, 3),
         "acyclicity_check_seconds": round(t_check, 3),
         "insert_seconds": round(t_ins, 3),
+    }
+
+
+def _phase3_network(
+    conn: psycopg.Connection,
+    profile: Profile,
+    items,
+    locations,
+    suppliers,
+) -> dict:
+    """Generate + insert supplier_items + item_planning_params."""
+    t0 = time.perf_counter()
+    si_set = generate_supplier_items(profile, items, suppliers)
+    t_si_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    pp_set = generate_planning_params(profile, items, locations, si_set)
+    t_pp_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n_si = insert_supplier_items(conn, si_set)
+    t_si_ins = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n_pp = insert_planning_params(conn, pp_set)
+    t_pp_ins = time.perf_counter() - t0
+    conn.commit()
+
+    return {
+        "supplier_items_generated": si_set.total,
+        "supplier_items_inserted": n_si,
+        "bought_items_count": len(si_set.bought_items),
+        "planning_params_generated": pp_set.total,
+        "planning_params_inserted": n_pp,
+        "supplier_items_gen_seconds": round(t_si_gen, 3),
+        "planning_params_gen_seconds": round(t_pp_gen, 3),
+        "supplier_items_insert_seconds": round(t_si_ins, 3),
+        "planning_params_insert_seconds": round(t_pp_ins, 3),
+    }
+
+
+def _validate_network(conn: psycopg.Connection) -> dict:
+    """Sanity checks on the network (sourcing + planning_params)."""
+    def _agg(sql: str, key_col: str) -> dict:
+        rows = conn.execute(sql).fetchall()
+        return {r[key_col]: int(r["n"]) for r in rows}
+
+    # Distinct items that have AT LEAST one supplier link
+    bought_items = conn.execute(
+        "SELECT COUNT(DISTINCT item_id) AS n FROM supplier_items"
+    ).fetchone()["n"]
+    # Items with multi-sourcing (>=2 suppliers)
+    multi_sourced = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM (
+            SELECT item_id FROM supplier_items GROUP BY item_id HAVING COUNT(*) >= 2
+        ) s
+        """
+    ).fetchone()["n"]
+    # planning_params: by is_make
+    pp_by_make = _agg(
+        "SELECT is_make::text AS is_make, COUNT(*) AS n FROM item_planning_params GROUP BY is_make",
+        "is_make",
+    )
+    # planning_params: by location_type via join
+    pp_by_loc_type = _agg(
+        """
+        SELECT l.location_type, COUNT(*) AS n
+        FROM item_planning_params ipp
+        JOIN locations l ON l.location_id = ipp.location_id
+        GROUP BY l.location_type
+        """,
+        "location_type",
+    )
+    # Coverage: items with at least one planning_params entry
+    item_coverage = conn.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM items)                                AS total_items,
+            (SELECT COUNT(DISTINCT item_id) FROM item_planning_params)  AS covered_items
+        """
+    ).fetchone()
+    # Safety stock coverage
+    ss_coverage = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE safety_stock_qty IS NOT NULL AND safety_stock_qty > 0) AS with_ss,
+            COUNT(*) AS total
+        FROM item_planning_params
+        """
+    ).fetchone()
+    lot_rules = _agg(
+        "SELECT lot_size_rule::text AS lot_size_rule, COUNT(*) AS n "
+        "FROM item_planning_params GROUP BY lot_size_rule ORDER BY n DESC",
+        "lot_size_rule",
+    )
+    return {
+        "items_with_at_least_one_supplier": int(bought_items),
+        "items_multi_sourced": int(multi_sourced),
+        "planning_params_by_is_make": pp_by_make,
+        "planning_params_by_location_type": pp_by_loc_type,
+        "item_coverage_total_vs_covered": (
+            int(item_coverage["total_items"]),
+            int(item_coverage["covered_items"]),
+        ),
+        "safety_stock_coverage": (int(ss_coverage["with_ss"]), int(ss_coverage["total"])),
+        "lot_size_rule_distribution": lot_rules,
     }
 
 
@@ -263,9 +380,13 @@ def main() -> int:
     with psycopg.connect(target_dsn, row_factory=dict_row) as conn:
         stats = _phase1_master(conn, profile)
         items_ref = stats.pop("_items_ref")
+        locations_ref = stats.pop("_locations_ref")
+        suppliers_ref = stats.pop("_suppliers_ref")
         validation_p1 = _validate_master(conn)
         stats_p2 = _phase2_boms(conn, profile, items_ref)
         validation_p2 = _validate_boms(conn)
+        stats_p3 = _phase3_network(conn, profile, items_ref, locations_ref, suppliers_ref)
+        validation_p3 = _validate_network(conn)
 
     print()
     print("=" * 60)
@@ -296,6 +417,20 @@ def main() -> int:
     print("=" * 60)
     for k, v in validation_p2.items():
         print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 3 — network (supplier_items + planning_params)")
+    print("=" * 60)
+    for k, v in stats_p3.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 3 — validation")
+    print("=" * 60)
+    for k, v in validation_p3.items():
+        print(f"  {k:35s}  {v}")
     return 0
 
 
