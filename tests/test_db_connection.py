@@ -254,14 +254,14 @@ def test_apply_migrations_runs_pending_files(fake_migrations_dir):
         (pg_errors.DuplicateObject("constraint already exists"), "42710"),
     ],
 )
-def test_apply_migrations_raises_on_duplicate_sqlstate(fake_migrations_dir, exc, sqlstate, capsys):
+def test_apply_migrations_raises_on_duplicate_sqlstate(fake_migrations_dir, exc, sqlstate, caplog):
     fake_conn, _ = _make_fake_connection(execute_side_effect=exc)
-    with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        with pytest.raises(type(exc)):
-            OotilsDB("postgresql:///x")
+    with caplog.at_level("ERROR", logger="ootils_core.db.connection"):
+        with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
+            with pytest.raises(type(exc)):
+                OotilsDB("postgresql:///x")
 
-    captured = capsys.readouterr()
-    assert f"[sqlstate={sqlstate}]" in captured.err
+    assert any(f"[sqlstate={sqlstate}]" in rec.getMessage() for rec in caplog.records)
     schema_migration_inserts = [
         call for call in fake_conn.execute.call_args_list
         if "INSERT INTO schema_migrations" in call.args[0]
@@ -269,17 +269,18 @@ def test_apply_migrations_raises_on_duplicate_sqlstate(fake_migrations_dir, exc,
     assert schema_migration_inserts == []
 
 
-def test_apply_migrations_raises_on_real_error(fake_migrations_dir, capsys):
-    """A non-idempotent error should propagate and be logged to stderr."""
+def test_apply_migrations_raises_on_real_error(fake_migrations_dir, caplog):
+    """A non-idempotent error should propagate and be logged."""
     fake_conn, _ = _make_fake_connection(
         execute_side_effect=Exception("syntax error at or near FOO")
     )
-    with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
-        with pytest.raises(Exception, match="syntax error"):
-            OotilsDB("postgresql:///x")
-    captured = capsys.readouterr()
-    assert "[MIGRATION ERROR]" in captured.err
-    assert "001_init.sql" in captured.err
+    with caplog.at_level("ERROR", logger="ootils_core.db.connection"):
+        with patch("ootils_core.db.connection.psycopg.connect", return_value=fake_conn):
+            with pytest.raises(Exception, match="syntax error"):
+                OotilsDB("postgresql:///x")
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("Migration failed" in msg for msg in messages)
+    assert any("001_init.sql" in msg for msg in messages)
 
 
 def test_apply_migrations_runs_files_in_sorted_order(tmp_path, monkeypatch):
