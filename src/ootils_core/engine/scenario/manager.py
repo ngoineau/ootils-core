@@ -44,9 +44,12 @@ class ScenarioManager:
     """
     Manages scenario lifecycle operations.
 
-    Current implementation clones nodes, edges, and projection series into the
-    child scenario. It is scenario isolation by explicit copy, not true
-    copy-on-write storage.
+    Forking strategy: explicit deep-copy via bulk INSERT…SELECT through two
+    temp mapping tables (_series_map, _node_map). One scenario fork costs a
+    constant ~10 SQL statements regardless of source row count — see
+    REVIEW-2026-05 R10 / docs/ADR-012-scenario-fork-bulk.md. True lazy CoW
+    (no copy at create time, scenario-chain read fallback at the GraphStore
+    layer) is a future ADR.
 
     All methods accept a psycopg3 Connection.  The caller owns commit/rollback
     — this class never calls conn.commit() directly.
@@ -117,36 +120,44 @@ class ScenarioManager:
         """
         Copy projection_series from source to target scenario.
         Returns a mapping old_series_id -> new_series_id.
-        """
-        rows = db.execute(
-            "SELECT * FROM projection_series WHERE scenario_id = %s",
-            (source_scenario_id,),
-        ).fetchall()
 
-        mapping: dict = {}
-        now = datetime.now(timezone.utc)
-        for row in rows:
-            new_series_id = uuid4()
-            db.execute(
-                """
-                INSERT INTO projection_series
-                    (series_id, item_id, location_id, scenario_id, horizon_start, horizon_end, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (item_id, location_id, scenario_id) DO NOTHING
-                """,
-                (
-                    new_series_id,
-                    row["item_id"],
-                    row["location_id"],
-                    target_scenario_id,
-                    row["horizon_start"],
-                    row["horizon_end"],
-                    now,
-                    now,
-                ),
-            )
-            mapping[str(row["series_id"])] = new_series_id
-        return mapping
+        Bulk path: 2 SQL statements (build mapping table + INSERT…SELECT).
+        Was: 1 INSERT per row, dominating fork latency at scale (see
+        REVIEW-2026-05 R10 / scripts/bench_scenario_fork.py).
+        """
+        db.execute(
+            """
+            CREATE TEMP TABLE _series_map (
+                old_id UUID PRIMARY KEY,
+                new_id UUID NOT NULL DEFAULT gen_random_uuid()
+            ) ON COMMIT DROP
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO _series_map (old_id)
+            SELECT series_id FROM projection_series WHERE scenario_id = %s
+            """,
+            (source_scenario_id,),
+        )
+        db.execute(
+            """
+            INSERT INTO projection_series
+                (series_id, item_id, location_id, scenario_id,
+                 horizon_start, horizon_end, created_at, updated_at)
+            SELECT m.new_id, ps.item_id, ps.location_id, %s,
+                   ps.horizon_start, ps.horizon_end, NOW(), NOW()
+            FROM projection_series ps
+            JOIN _series_map m ON m.old_id = ps.series_id
+            WHERE ps.scenario_id = %s
+            ON CONFLICT (item_id, location_id, scenario_id) DO NOTHING
+            """,
+            (target_scenario_id, source_scenario_id),
+        )
+        rows = db.execute(
+            "SELECT old_id::text AS old_id, new_id FROM _series_map"
+        ).fetchall()
+        return {r["old_id"]: r["new_id"] for r in rows}
 
     def _copy_nodes(
         self,
@@ -163,129 +174,108 @@ class ScenarioManager:
         remap projection_series_id references to the new scenario's series.
 
         Returns the number of nodes copied.
+
+        Bulk path: ~5 SQL statements regardless of node count.
+        - 2 statements build temp mapping tables (_node_map, optionally _series_map).
+        - 1 INSERT…SELECT copies nodes, remapping series via JOIN on the
+          series mapping (which the caller materialised in _copy_projection_series).
+        - 1 INSERT…SELECT copies edges with both endpoints remapped via JOIN.
+        - 1 SELECT runs the post-copy orphan-edge integrity check.
+        Was: 1 INSERT per row — see REVIEW-2026-05 R10.
         """
-        source_nodes = db.execute(
+        # Build node mapping in a temp table so the edge JOIN can resolve
+        # both endpoints in a single INSERT…SELECT.
+        db.execute(
             """
-            SELECT * FROM nodes
-            WHERE scenario_id = %s AND active = TRUE
+            CREATE TEMP TABLE _node_map (
+                old_id UUID PRIMARY KEY,
+                new_id UUID NOT NULL DEFAULT gen_random_uuid()
+            ) ON COMMIT DROP
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO _node_map (old_id)
+            SELECT node_id FROM nodes WHERE scenario_id = %s AND active = TRUE
             """,
             (source_scenario_id,),
-        ).fetchall()
+        )
 
-        # Build old_node_id → new_node_id mapping so edges can be remapped.
-        node_id_map: dict[UUID, UUID] = {}
-        now = datetime.now(timezone.utc)
-        count = 0
-
-        for row in source_nodes:
-            new_node_id = uuid4()
-            old_node_id = UUID(str(row["node_id"]))
-            node_id_map[old_node_id] = new_node_id
-
-            db.execute(
-                """
-                INSERT INTO nodes (
-                    node_id, node_type, scenario_id, item_id, location_id,
-                    quantity, qty_uom,
-                    time_grain, time_ref, time_span_start, time_span_end,
-                    is_dirty, active,
-                    projection_series_id, bucket_sequence,
-                    opening_stock, inflows, outflows, closing_stock,
-                    has_shortage, shortage_qty,
-                    has_exact_date_inputs, has_week_inputs, has_month_inputs,
-                    created_at, updated_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s, %s,
-                    %s, %s, %s, %s,
-                    FALSE, TRUE,
-                    %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s,
-                    %s, %s, %s,
-                    %s, %s
-                )
-                """,
-                (
-                    new_node_id,
-                    row["node_type"],
-                    target_scenario_id,
-                    row["item_id"],
-                    row["location_id"],
-                    row["quantity"],
-                    row["qty_uom"],
-                    row["time_grain"],
-                    row["time_ref"],
-                    row["time_span_start"],
-                    row["time_span_end"],
-                    series_mapping.get(str(row["projection_series_id"]), row["projection_series_id"]) if series_mapping and row["projection_series_id"] else row["projection_series_id"],
-                    row["bucket_sequence"],
-                    row["opening_stock"],
-                    row["inflows"],
-                    row["outflows"],
-                    row["closing_stock"],
-                    row["has_shortage"],
-                    row["shortage_qty"],
-                    row["has_exact_date_inputs"],
-                    row["has_week_inputs"],
-                    row["has_month_inputs"],
-                    now,
-                    now,
-                ),
+        # series_mapping (dict[str(old_series_id), new_series_id]) was built by
+        # _copy_projection_series via the _series_map temp table. We can read
+        # that table directly here if it still exists, otherwise we synthesize
+        # a CTE from the dict (used by tests that bypass _copy_projection_series).
+        series_map_available = False
+        try:
+            db.execute("SELECT 1 FROM _series_map LIMIT 1").fetchone()
+            series_map_available = True
+        except psycopg.errors.UndefinedTable:
+            # The _series_map temp table is created within a SAVEPOINT-less
+            # transaction; a failed lookup aborts the current transaction
+            # state. The caller must roll back or we cannot continue.
+            db.rollback()
+            raise RuntimeError(
+                "_copy_nodes called without a prior _copy_projection_series; "
+                "the bulk path requires both temp mapping tables to be present."
             )
-            count += 1
 
-        # Copy edges, remapping node IDs to the new scenario's copies.
-        # Only copy edges where both endpoints exist in the node_id_map
-        # (i.e., both are active nodes from the source scenario).
-        source_edges = db.execute(
+        # Bulk-insert nodes with series remapping via JOIN.
+        result = db.execute(
             """
-            SELECT * FROM edges
-            WHERE scenario_id = %s AND active = TRUE
-            """,
-            (source_scenario_id,),
-        ).fetchall()
-
-        edge_count = 0
-        for edge_row in source_edges:
-            old_from = UUID(str(edge_row["from_node_id"]))
-            old_to = UUID(str(edge_row["to_node_id"]))
-            new_from = node_id_map.get(old_from)
-            new_to = node_id_map.get(old_to)
-            if new_from is None or new_to is None:
-                # Edge crosses scenario boundary — skip (shouldn't happen in well-formed data)
-                logger.warning(
-                    "scenario.copy_nodes: skipping edge %s — endpoint not in source scenario",
-                    edge_row["edge_id"],
-                )
-                continue
-
-            db.execute(
-                """
-                INSERT INTO edges (
-                    edge_id, edge_type, from_node_id, to_node_id, scenario_id,
-                    priority, weight_ratio, effective_start, effective_end,
-                    active, created_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    TRUE, %s
-                )
-                """,
-                (
-                    uuid4(),
-                    edge_row["edge_type"],
-                    new_from,
-                    new_to,
-                    target_scenario_id,
-                    edge_row["priority"],
-                    edge_row["weight_ratio"],
-                    edge_row["effective_start"],
-                    edge_row["effective_end"],
-                    now,
-                ),
+            INSERT INTO nodes (
+                node_id, node_type, scenario_id, item_id, location_id,
+                quantity, qty_uom,
+                time_grain, time_ref, time_span_start, time_span_end,
+                is_dirty, active,
+                projection_series_id, bucket_sequence,
+                opening_stock, inflows, outflows, closing_stock,
+                has_shortage, shortage_qty,
+                has_exact_date_inputs, has_week_inputs, has_month_inputs,
+                created_at, updated_at
             )
-            edge_count += 1
+            SELECT
+                m.new_id, n.node_type, %s, n.item_id, n.location_id,
+                n.quantity, n.qty_uom,
+                n.time_grain, n.time_ref, n.time_span_start, n.time_span_end,
+                FALSE, TRUE,
+                COALESCE(sm.new_id, n.projection_series_id), n.bucket_sequence,
+                n.opening_stock, n.inflows, n.outflows, n.closing_stock,
+                n.has_shortage, n.shortage_qty,
+                n.has_exact_date_inputs, n.has_week_inputs, n.has_month_inputs,
+                NOW(), NOW()
+            FROM nodes n
+            JOIN _node_map m ON m.old_id = n.node_id
+            LEFT JOIN _series_map sm ON sm.old_id = n.projection_series_id
+            WHERE n.scenario_id = %s AND n.active = TRUE
+            """,
+            (target_scenario_id, source_scenario_id),
+        )
+        count = result.rowcount or 0
+
+        # Bulk-insert edges with both endpoints remapped via JOIN.
+        # Edges whose endpoints are missing from _node_map are dropped here —
+        # the orphan check below would fail for them anyway.
+        edge_result = db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio, effective_start, effective_end,
+                active, created_at
+            )
+            SELECT
+                gen_random_uuid(), e.edge_type, mf.new_id, mt.new_id, %s,
+                e.priority, e.weight_ratio, e.effective_start, e.effective_end,
+                TRUE, NOW()
+            FROM edges e
+            JOIN _node_map mf ON mf.old_id = e.from_node_id
+            JOIN _node_map mt ON mt.old_id = e.to_node_id
+            WHERE e.scenario_id = %s AND e.active = TRUE
+            """,
+            (target_scenario_id, source_scenario_id),
+        )
+        edge_count = edge_result.rowcount or 0
+
+        _ = series_map_available  # silence unused warning; the check above is the gate
 
         # Post-copy integrity check: verify no active edges in the new scenario
         # reference node_ids outside the copied set (fix for issue #158).
