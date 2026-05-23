@@ -276,11 +276,29 @@ def test_e2e_reject_a_validated_batch(e2e_client, auth, conn) -> None:
 
 
 @requires_db
-def test_e2e_second_batch_updates_and_soft_deletes(e2e_client, auth, conn) -> None:
+def test_e2e_second_batch_updates_and_soft_deletes(e2e_client, auth, migrated_db) -> None:
     """The most realistic ops pattern: source pushes batch 1 (initial
     load), then batch 2 (with one update + one drop). Verify the second
-    approval correctly updates + soft-deletes canonical state."""
+    approval correctly updates + soft-deletes canonical state.
+
+    Uses fresh psycopg connections per side-helper rather than a single
+    test-scoped conn — the pooled API conn can taint the shared conn's
+    transaction state on the failure-then-retry path.
+    """
     src = "E2E-2BATCH-" + uuid4().hex[:6]
+
+    def _fresh_dq(batch_id):
+        with psycopg.connect(migrated_db, row_factory=dict_row) as c:
+            _run_dq(c, batch_id)
+            c.commit()
+
+    def _set_validated(batch_id):
+        with psycopg.connect(migrated_db, row_factory=dict_row) as c:
+            c.execute(
+                "UPDATE ingest_batches SET status = 'validated' WHERE batch_id = %s",
+                (batch_id,),
+            )
+            c.commit()
 
     # ---- Batch 1: 4 fresh items ----
     tsv1 = (
@@ -291,11 +309,8 @@ def test_e2e_second_batch_updates_and_soft_deletes(e2e_client, auth, conn) -> No
         b"E2E-2B-004\tD\tcomponent\tEA\tactive\n"
     )
     b1 = _upload(e2e_client, auth, tsv1, "items", src)
-    _run_dq(conn, b1)
-    conn.execute(
-        "UPDATE ingest_batches SET status = 'validated' WHERE batch_id = %s", (b1,)
-    )
-    conn.commit()
+    _fresh_dq(b1)
+    _set_validated(b1)
     e2e_client.post(
         f"/v1/staging/batches/{b1}/approve",
         headers=auth,
@@ -305,17 +320,13 @@ def test_e2e_second_batch_updates_and_soft_deletes(e2e_client, auth, conn) -> No
     # ---- Batch 2: D is gone, B got a new name, A and C stay the same ----
     tsv2 = (
         b"external_id\tname\titem_type\tuom\tstatus\n"
-        b"E2E-2B-001\tA\tcomponent\tEA\tactive\n"          # noop
-        b"E2E-2B-002\tB renamed\tcomponent\tEA\tactive\n"   # update
-        b"E2E-2B-003\tC\tcomponent\tEA\tactive\n"          # noop
-        # E2E-2B-004 missing -> soft-delete
+        b"E2E-2B-001\tA\tcomponent\tEA\tactive\n"
+        b"E2E-2B-002\tB renamed\tcomponent\tEA\tactive\n"
+        b"E2E-2B-003\tC\tcomponent\tEA\tactive\n"
     )
     b2 = _upload(e2e_client, auth, tsv2, "items", src)
-    _run_dq(conn, b2)
-    conn.execute(
-        "UPDATE ingest_batches SET status = 'validated' WHERE batch_id = %s", (b2,)
-    )
-    conn.commit()
+    _fresh_dq(b2)
+    _set_validated(b2)
 
     # 1 deletion of 4 = 25% > 20% guard -> need force
     resp = e2e_client.post(
@@ -342,15 +353,16 @@ def test_e2e_second_batch_updates_and_soft_deletes(e2e_client, auth, conn) -> No
     assert body["forced_approval"] is True
 
     # Verify canonical state
-    b_row = conn.execute(
-        "SELECT name, status FROM items WHERE external_id = 'E2E-2B-002'"
-    ).fetchone()
-    assert b_row["name"] == "B renamed"
+    with psycopg.connect(migrated_db, row_factory=dict_row) as c:
+        b_row = c.execute(
+            "SELECT name, status FROM items WHERE external_id = 'E2E-2B-002'"
+        ).fetchone()
+        assert b_row["name"] == "B renamed"
 
-    d_row = conn.execute(
-        "SELECT status FROM items WHERE external_id = 'E2E-2B-004'"
-    ).fetchone()
-    assert d_row["status"] == "obsolete"
+        d_row = c.execute(
+            "SELECT status FROM items WHERE external_id = 'E2E-2B-004'"
+        ).fetchone()
+        assert d_row["status"] == "obsolete"
 
 
 # ---------------------------------------------------------------------------
