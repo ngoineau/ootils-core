@@ -660,6 +660,28 @@ def run_dq(db: psycopg.Connection, batch_id: UUID) -> DQResult:
                    for i in row_issues.get(row_id, [])):
             max_level_reached[row_id] = 3
 
+    # 4c. L4 cross-batch + cross-entity rules — only for rows that passed
+    #     L1+L2+L3 without errors. L4 hits the DB (intra-batch duplicate
+    #     scan + supplier/planning-params lookups). See l4_rules.py.
+    from ootils_core.engine.dq.l4_rules import check_l4
+
+    l4_candidates = [
+        (row_id, row_number, content)
+        for (row_id, row_number, content) in rows_data
+        if not any(i.severity == "error" for i in row_issues.get(row_id, []))
+    ]
+    if l4_candidates:
+        l4_issues = check_l4(l4_candidates, entity_type, batch_id, db)
+        for issue in l4_issues:
+            row_issues.setdefault(issue.row_id, []).append(issue)
+        all_issues.extend(l4_issues)
+
+    # Mark L4 reached for candidates that didn't pick up a new L4 error
+    for row_id, _, _ in l4_candidates:
+        if not any(i.dq_level == 4 and i.severity == "error"
+                   for i in row_issues.get(row_id, [])):
+            max_level_reached[row_id] = 4
+
     # 5. Persist issues
     _persist_issues(db, batch_id, all_issues)
 
