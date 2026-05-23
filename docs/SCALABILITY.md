@@ -87,28 +87,70 @@ the rate at which PostgreSQL can ingest a single bulk-update statement.
 Cumulative wall-time improvement vs the original pre-R2 implementation:
 **~50× at small scale, ≥150× at mid scale**.
 
-#### Still-open Tier 3 levers (deferred)
+#### Tier 3 spike — profile first, then SQL window functions (2026-05-23)
 
-After Tier 2, the propagation hot path is no longer network-bound — it sits
-at ~3 200 nps because the per-node Python loop (`kernel.compute_pi_node` +
-`shortage_detector.detect_with_params` + cache lookups + list appends) takes
-~0.3 ms per PI node and runs N times. The remaining levers are
-**compute-bound**, not query-bound:
+Profiling `_propagate` on a 100 × 365 (36.5 K nodes) bench revealed the
+"compute-bound" assumption was wrong. Self-time breakdown:
 
-- **Pure SQL projection** — rewrite `compute_pi_node` as a `WITH RECURSIVE`
-  / window-function pipeline in PostgreSQL. All compute server-side in one
-  statement, zero Python round-trips per node. Largest expected gain (~50×)
-  but a serious refactor: requires bit-exact parity tests between the SQL
-  and the Python kernel, and pulls explainability into SQL too.
-- **NumPy vectorisation per series** — each projection series is internally
-  sequential (every bucket reads the predecessor's `closing_stock`) but
-  series are mutually independent. Process series in a vectorised NumPy
-  loop using prefix sums for the running stock. ~10× expected, medium refactor.
-- **Rust kernel via PyO3** — issue #197. Same algorithm, native code.
-  ~30× expected, heavier build/CI lift.
-- Batch the shortage-detector writes (currently 1 INSERT per shortage —
+| Hotspot | Self time | % of wall |
+|---|---|---|
+| `select.select` (libpq waiting on Postgres) | 2.94 s | 28 % |
+| `graphlib.TopologicalSorter` driven by UUID hash/eq | 1.96 s | 19 % |
+| psycopg `array.dump_list` (UNNEST serialization) | 1.3 s | 13 % |
+| UUID `__init__` / `__str__` / `__hash__` / `__eq__` | 1.8 s | 17 % |
+| `_row_to_node` + `_row_to_edge` deserialization | 0.88 s | 8 % |
+| **`_recompute_pi_node` (the "compute")** | **0.78 s** | **7.5 %** |
+
+The kernel compute is **not** the bottleneck. A `UUID → str` PoC eliminated
+the hash/eq cost but only bought 5 % wall-time because `UUID.__init__` in
+`_row_to_*` and `__str__` for SQL output stayed put. NumPy vectorisation /
+Rust kernel target the wrong 7.5 %.
+
+The lever that *did* move the needle: **rewrite the projection chain as a
+single window-function UPDATE**. The inventory recurrence
+`opening[N] = OH + Σ_{k<N}(inflows[k] − outflows[k])` is a running sum,
+naturally expressed as:
+
+```sql
+SUM(inflows - outflows) OVER (
+    PARTITION BY projection_series_id
+    ORDER BY bucket_sequence
+    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+)
+```
+
+`WITH RECURSIVE` was tried first and ran ~5× *slower* than Python — recursion
+forces sequential bucket processing in Postgres. Window functions scan once
+and parallelise across series.
+
+| Scale | Python wall (Tier 2) | SQL window wall | Speedup | Parity |
+|---|---|---|---|---|
+| 100 × 365 (36.5 K) | 10.0 s | **4.0 s** | **2.5×** | ✅ |
+| 500 × 365 (182.5 K — SMB annual) | 53 s | **13.5 s** | **3.9×** | ✅ |
+
+Throughput climbs from 3 500 → 13 500 nps as scale grows (Postgres amortises
+plan/parse cost over the batch — opposite of the Python loop). See
+`scripts/spike_sql_propagate.py` for the prototype.
+
+**What the spike does NOT cover** (must land before merging):
+- demand events (`consumes` edges) with multi-day prorating
+- shortage detection / safety-stock conditional logic
+- explanation tracking (causal chains currently built in Python)
+- dirty subgraph propagation (the spike recomputes the whole series)
+- non-baseline scenarios / advisory-lock integration
+- bit-exact parity tests against the Python kernel across diverse inputs
+
+Estimated effort to production: **1–2 weeks of focused work**, gated by a
+parity test harness comparing both engines on the same fixtures.
+
+#### Other Tier 3 candidates (deferred — likely unnecessary)
+
+- **NumPy vectorisation / Rust kernel (issue #197)** — would save ≤ 7.5 %
+  even with perfect implementation. Not worth pursuing unless the SQL path
+  hits an unforeseen wall.
+- Batch shortage-detector writes (currently 1 INSERT per shortage —
   acceptable while shortages stay rare).
-- Streaming / pipelined propagation for very large dirty sets (>1 M).
+- Streaming / pipelined propagation for very large dirty sets (> 1 M).
 
 #### Measured perf landscape (2026-05-23, post-Tier-2)
 
