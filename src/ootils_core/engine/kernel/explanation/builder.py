@@ -14,8 +14,9 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
+from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import CausalStep, Explanation, Node
 from ootils_core.engine.kernel.graph.store import GraphStore
 
@@ -216,7 +217,7 @@ class ExplanationBuilder:
         summary = _build_summary(pi_node, causal_path)
 
         explanation = Explanation(
-            explanation_id=uuid4(),
+            explanation_id=deterministic_uuid("explanation", calc_run_id, node_id),
             calc_run_id=calc_run_id,
             target_node_id=node_id,
             target_type="Shortage",
@@ -271,7 +272,9 @@ class ExplanationBuilder:
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    uuid4(),
+                    deterministic_uuid(
+                        "causal_step", explanation.explanation_id, step.step,
+                    ),
                     explanation.explanation_id,
                     step.step,
                     step.node_id,

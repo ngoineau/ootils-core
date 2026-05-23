@@ -13,8 +13,9 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
+from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import Node, ShortageRecord
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,9 @@ class ShortageDetector:
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
         record = ShortageRecord(
-            shortage_id=uuid4(),
+            shortage_id=deterministic_uuid(
+                "shortage", scenario_id, calc_run_id, pi_node.node_id,
+            ),
             scenario_id=scenario_id,
             pi_node_id=pi_node.node_id,
             item_id=pi_node.item_id,

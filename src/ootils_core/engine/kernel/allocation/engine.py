@@ -24,9 +24,11 @@ import logging
 from datetime import date as _date_type
 from datetime import datetime, timezone
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
+
+from ootils_core.engine.kernel._ids import deterministic_uuid
 
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import AllocationResult, Edge, Node
@@ -266,7 +268,9 @@ class AllocationEngine:
             # Upsert pegged_to edge: demand_node → supply_node
             # Convention: from_node_id = demand, to_node_id = supply
             pegged_edge = Edge(
-                edge_id=uuid4(),
+                edge_id=deterministic_uuid(
+                    "edge_pegged_to", scenario_id, demand_node.node_id, pi_node_id,
+                ),
                 edge_type="pegged_to",
                 from_node_id=demand_node.node_id,
                 to_node_id=pi_node_id,

@@ -10,10 +10,11 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 
+from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import (
     CycleDetectedError,
     Edge,
@@ -511,7 +512,9 @@ class GraphStore:
         Raises if one already exists for (item, location, scenario).
         """
         series = ProjectionSeries(
-            series_id=uuid4(),
+            series_id=deterministic_uuid(
+                "projection_series", scenario_id, item_id, location_id,
+            ),
             item_id=item_id,
             location_id=location_id,
             scenario_id=scenario_id,

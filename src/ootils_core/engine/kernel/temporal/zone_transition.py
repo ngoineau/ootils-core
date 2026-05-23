@@ -17,10 +17,11 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 
+from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import Node
 
@@ -363,7 +364,9 @@ class ZoneTransitionEngine:
 
         for idx, (day_start, day_end) in enumerate(day_spans):
             new_node = Node(
-                node_id=uuid4(),
+                node_id=deterministic_uuid(
+                    "daily_bucket", scenario_id, source_node.node_id, day_start.isoformat(),
+                ),
                 node_type=source_node.node_type,
                 scenario_id=scenario_id,
                 item_id=source_node.item_id,
@@ -442,7 +445,9 @@ class ZoneTransitionEngine:
         new_nodes: list[Node] = []
         for idx, (wk_start, wk_end) in enumerate(week_spans):
             new_node = Node(
-                node_id=uuid4(),
+                node_id=deterministic_uuid(
+                    "weekly_bucket", scenario_id, source_node.node_id, wk_start.isoformat(),
+                ),
                 node_type=source_node.node_type,
                 scenario_id=scenario_id,
                 item_id=source_node.item_id,
@@ -512,7 +517,7 @@ class ZoneTransitionEngine:
 
         Returns the new run ID.
         """
-        run_id = uuid4()
+        run_id = deterministic_uuid("zone_transition_run", idempotency_key)
         db.execute(
             """
             INSERT INTO zone_transition_runs (
@@ -635,7 +640,7 @@ def _rewire_edges(
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, now())
             """,
             (
-                uuid4(),
+                deterministic_uuid("edge_rewire_in", edge.edge_id, first_new.node_id),
                 edge.edge_type,
                 edge.from_node_id,
                 first_new.node_id,
@@ -665,7 +670,7 @@ def _rewire_edges(
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, now())
             """,
             (
-                uuid4(),
+                deterministic_uuid("edge_rewire_out", edge.edge_id, last_new.node_id),
                 edge.edge_type,
                 last_new.node_id,
                 edge.to_node_id,
