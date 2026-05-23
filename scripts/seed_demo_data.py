@@ -95,6 +95,27 @@ def seed(conn):
     print(f"  ✓ Locations: DC-ATL ({atl_id[:8]}...), DC-LAX ({lax_id[:8]}...)")
 
     # ------------------------------------------------------------------
+    # 2.5. Resources (one per location for RCCP / capacity tests)
+    # ------------------------------------------------------------------
+    res_atl_id = _uid("resource:LINE-ATL-01")
+    res_lax_id = _uid("resource:LINE-LAX-01")
+
+    conn.execute("""
+        INSERT INTO resources (resource_id, external_id, name, resource_type,
+                               location_id, capacity_per_day, capacity_unit)
+        VALUES (%s, 'LINE-ATL-01', 'Atlanta Assembly Line 1', 'line',
+                %s, 480.0, 'minutes'),
+               (%s, 'LINE-LAX-01', 'Los Angeles Assembly Line 1', 'line',
+                %s, 480.0, 'minutes')
+        ON CONFLICT (external_id) DO UPDATE
+            SET name = EXCLUDED.name,
+                location_id = EXCLUDED.location_id,
+                capacity_per_day = EXCLUDED.capacity_per_day,
+                capacity_unit = EXCLUDED.capacity_unit
+    """, (res_atl_id, atl_id, res_lax_id, lax_id))
+    print(f"  ✓ Resources: LINE-ATL-01 ({res_atl_id[:8]}...), LINE-LAX-01 ({res_lax_id[:8]}...)")
+
+    # ------------------------------------------------------------------
     # 3. Projection series  (deterministic IDs)
     # ------------------------------------------------------------------
     series_pump_atl = _uid("series:PUMP-01:DC-ATL")
