@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from typing import Annotated, Optional
+from uuid import UUID
 
 import psycopg
 from fastapi import (
@@ -44,6 +45,7 @@ from fastapi import (
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.staging.diff import DiffError, compute_diff
 from ootils_core.staging.loader import LoaderError, load_to_staging
 from ootils_core.staging.parser import ParseError, ParseOptions, parse
 
@@ -206,3 +208,62 @@ def _extract_submitter() -> str | None:
     function is the single place to wire it up.
     """
     return None
+
+
+@router.get(
+    "/batches/{batch_id}/diff",
+    dependencies=[Depends(require_auth)],
+)
+def get_batch_diff(
+    batch_id: UUID,
+    db: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Preview the impact of approving this batch (ADR-013 D4).
+
+    Returns counts + samples of what `POST /approve` would do:
+      - will_insert     external_ids new to canonical
+      - will_update     external_ids in both; canonical values differ
+      - will_noop       external_ids in both; identical
+      - will_soft_delete external_ids in canonical for this
+                         (entity_type, source_system) but absent from
+                         the batch
+
+    The `deletion_ratio` is a fraction of soft-deletes over the current
+    canonical footprint. When > 20%, `exceeds_deletion_threshold=true` —
+    approval must be called with `force=true` (validated by /approve
+    in step 8). This is the principal protection against destructive
+    imports (truncated ERP exports, scope-reduction accidents, etc.).
+    """
+    try:
+        diff = compute_diff(db, batch_id)
+    except DiffError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    return {
+        "batch_id": str(diff.batch_id),
+        "entity_type": diff.entity_type,
+        "source_system": diff.source_system,
+        "supported": diff.supported,
+        "unsupported_reason": diff.unsupported_reason,
+        "counts": {
+            "in_batch": diff.total_in_batch,
+            "in_canonical_for_source": diff.total_in_canonical_for_source,
+            "will_insert": diff.will_insert_count,
+            "will_update": diff.will_update_count,
+            "will_noop": diff.will_noop_count,
+            "will_soft_delete": diff.will_soft_delete_count,
+        },
+        "samples": {
+            "will_insert": diff.will_insert_sample,
+            "will_update": diff.will_update_sample,
+            "will_soft_delete": diff.will_soft_delete_sample,
+        },
+        "deletion_guard": {
+            "ratio": diff.deletion_ratio,
+            "threshold": diff.deletion_ratio_threshold,
+            "exceeds_threshold": diff.exceeds_deletion_threshold,
+        },
+    }
