@@ -11,7 +11,7 @@ gets the *maximum* depth — this ensures its gross requirements include
 all possible dependent-demand paths.
 
 Cycle detection: any BOM cycle (A → B → … → A) is detected and
-reported as a ``CycleDetectedError`` with the cycle path.
+reported as a ``BomCycleDetectedError`` with the cycle path.
 
 Performance target: 10 000 items in < 50 ms (pure Python).
 """
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Exceptions
 # ─────────────────────────────────────────────────────────────
 
-class CycleDetectedError(Exception):
+class BomCycleDetectedError(Exception):
     """Raised when a cycle is found in the BOM graph.
 
     Attributes:
@@ -90,7 +90,7 @@ def compute_llc_pure(
         LLCResult with the full mapping.
 
     Raises:
-        CycleDetectedError: if a cycle is found in the BOM.
+        BomCycleDetectedError: if a cycle is found in the BOM.
 
     Performance: O(V + E) BFS + O(V + E) cycle check.
     """
@@ -143,7 +143,7 @@ def compute_llc_pure(
                         cur = parent_of.get(cur)
                     cycle.append(child)
                     cycle.reverse()
-                    raise CycleDetectedError(cycle)
+                    raise BomCycleDetectedError(cycle)
 
                 if colour.get(child, WHITE) == WHITE:
                     parent_of[child] = node
@@ -243,7 +243,7 @@ class LLCCalculator:
             LLCResult with full mapping and timing.
 
         Raises:
-            CycleDetectedError: if a cycle exists in the BOM.
+            BomCycleDetectedError: if a cycle exists in the BOM.
         """
         # 1. Load all active BOM edges
         rows = self.db.execute("""
