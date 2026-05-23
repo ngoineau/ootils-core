@@ -25,7 +25,7 @@ import psycopg
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
-from ootils_core.seed.network.planning_params import PlanningParamRecord, PlanningParamSet
+from ootils_core.seed.network.planning_params import PlanningParamSet
 
 
 BASELINE_SCENARIO_ID = UUID("00000000-0000-0000-0000-000000000001")

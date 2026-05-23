@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from ootils_core.seed.config import LocationSpec, Profile
+from ootils_core.seed.config import Profile
 
 
 @dataclass(frozen=True)
