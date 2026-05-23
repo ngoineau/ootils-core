@@ -47,6 +47,10 @@ from ootils_core.seed.network.supplier_items import (
     generate_supplier_items,
     insert_supplier_items,
 )
+from ootils_core.seed.transactional.nodes import (
+    generate_transactional,
+    insert_transactional,
+)
 
 
 def _admin_recreate_db(dsn: str, dbname: str) -> None:
@@ -184,6 +188,80 @@ def _phase3_network(
         "planning_params_gen_seconds": round(t_pp_gen, 3),
         "supplier_items_insert_seconds": round(t_si_ins, 3),
         "planning_params_insert_seconds": round(t_pp_ins, 3),
+        "_pp_ref": pp_set,
+    }
+
+
+def _phase4_transactional(
+    conn: psycopg.Connection,
+    profile: Profile,
+    items,
+    locations,
+    pp_set,
+) -> dict:
+    """Generate + insert OH/PO/WO/transfer supply nodes under baseline scenario."""
+    t0 = time.perf_counter()
+    tx_set = generate_transactional(profile, items, locations, pp_set)
+    t_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n = insert_transactional(conn, tx_set)
+    t_ins = time.perf_counter() - t0
+    conn.commit()
+
+    return {
+        "on_hand_count": len(tx_set.on_hand),
+        "purchase_orders_count": len(tx_set.purchase_orders),
+        "work_orders_count": len(tx_set.work_orders),
+        "transfers_count": len(tx_set.transfers),
+        "total_inserted": n,
+        "gen_seconds": round(t_gen, 3),
+        "insert_seconds": round(t_ins, 3),
+    }
+
+
+def _validate_transactional(conn: psycopg.Connection) -> dict:
+    def _agg(sql: str, key_col: str) -> dict:
+        rows = conn.execute(sql).fetchall()
+        return {r[key_col]: int(r["n"]) for r in rows}
+
+    by_type = _agg(
+        """
+        SELECT node_type, COUNT(*) AS n
+        FROM nodes
+        WHERE node_type IN ('OnHandSupply','PurchaseOrderSupply','WorkOrderSupply','TransferSupply')
+        GROUP BY node_type ORDER BY n DESC
+        """,
+        "node_type",
+    )
+    # Stock distribution (OH only): how many at 0 vs >0
+    oh_qty = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE quantity = 0)  AS zero_oh,
+            COUNT(*) FILTER (WHERE quantity > 0)  AS nonzero_oh,
+            ROUND(AVG(quantity)::numeric, 1)      AS avg_qty,
+            MAX(quantity)                          AS max_qty
+        FROM nodes WHERE node_type = 'OnHandSupply'
+        """
+    ).fetchone()
+    # ETA distribution for POs (days from today)
+    po_eta = conn.execute(
+        """
+        SELECT
+            MIN(time_ref - CURRENT_DATE) AS min_d,
+            MAX(time_ref - CURRENT_DATE) AS max_d,
+            ROUND(AVG(time_ref - CURRENT_DATE)::numeric, 1) AS avg_d
+        FROM nodes WHERE node_type = 'PurchaseOrderSupply'
+        """
+    ).fetchone()
+    return {
+        "supply_nodes_by_type": by_type,
+        "on_hand_zero_vs_nonzero_avg_max": (
+            int(oh_qty["zero_oh"]), int(oh_qty["nonzero_oh"]),
+            oh_qty["avg_qty"], oh_qty["max_qty"],
+        ),
+        "po_eta_min_max_avg_days": (po_eta["min_d"], po_eta["max_d"], po_eta["avg_d"]),
     }
 
 
@@ -386,7 +464,10 @@ def main() -> int:
         stats_p2 = _phase2_boms(conn, profile, items_ref)
         validation_p2 = _validate_boms(conn)
         stats_p3 = _phase3_network(conn, profile, items_ref, locations_ref, suppliers_ref)
+        pp_ref = stats_p3.pop("_pp_ref")
         validation_p3 = _validate_network(conn)
+        stats_p4 = _phase4_transactional(conn, profile, items_ref, locations_ref, pp_ref)
+        validation_p4 = _validate_transactional(conn)
 
     print()
     print("=" * 60)
@@ -430,6 +511,20 @@ def main() -> int:
     print("PHASE 3 — validation")
     print("=" * 60)
     for k, v in validation_p3.items():
+        print(f"  {k:35s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 4 — open transactional (OH/PO/WO/Transfer)")
+    print("=" * 60)
+    for k, v in stats_p4.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 4 — validation")
+    print("=" * 60)
+    for k, v in validation_p4.items():
         print(f"  {k:35s}  {v}")
     return 0
 
