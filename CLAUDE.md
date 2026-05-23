@@ -57,8 +57,9 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 
 ### Storage
 - PostgreSQL 16 via `psycopg[binary]` 3.x — **not** SQLite (ADR-005 proposes SQLite but the project has moved past the proof stage).
-- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data. Diagnostic / staging payloads are the explicit carve-out: `dq_agent_runs.summary` (per-run agent diagnostic, see header of `db/migrations/012_dq_agent.sql`), `mrp_runs.errors`/`mrp_runs.warnings`, and `demo_runs.artifact` are the only acceptable cases — every other column uses typed columns. 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
+- UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data. The "JSONB carve-out" pattern: diagnostic / forensic payloads with unbounded shape are the only acceptable JSONB sites, and each must carry a top-of-file comment block explaining the rationale (see `db/migrations/012_dq_agent.sql`, `021_mrp_lot_sizing_params.sql`, `031_demo_runs.sql`). Today's carve-out list: `dq_agent_runs.summary`, `mrp_runs.errors`, `mrp_runs.warnings`, `demo_runs.artifact`. Every other column uses typed columns. 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
 - Migrations auto-apply on `OotilsDB()` construction (i.e. at API startup), serialized by a PG advisory lock (`_LOCK_KEY = 8_037_421_901`), tracked in `schema_migrations`. A migration that fails with an "already exists"-family error is recorded as applied rather than re-run — so new migrations must be idempotent in that sense.
+- `events` are conceptually insert-only for the **payload**, but mutable for **bookkeeping metadata** (`processed` flag, `updated_at`). Sites that update `processed = TRUE` in the orchestration layer (`engine/orchestration/propagator.py`, `engine/orchestration/calc_run.py`) are by design — they advance the event lifecycle without rewriting the event. ADR-005 D2's "insert-only" applies to the payload, not the flag.
 
 ### Auth
 `api/auth.py` validates `OOTILS_API_TOKEN` at **import time** and raises `RuntimeError` if unset. Token comparison uses `hmac.compare_digest`. Don't add an "optional auth" path.
@@ -68,8 +69,9 @@ Event-driven, incremental, deterministic. An event marks a subgraph dirty; compu
 
 ## Conventions that aren't obvious from the code
 
-- **Tests run against real Postgres, no mocks.** Point `DATABASE_URL` at a throwaway DB.
+- **Tests run against real Postgres, no mocks.** Point `DATABASE_URL` at a throwaway DB. Pure-Python helper functions (and Pydantic-validation 422 boundary tests) live in `tests/test_*.py` and don't need a DB. DB-touching tests live in `tests/integration/test_*_integration.py` and use the `conn` / `seeded_db` fixtures.
 - `tests/legacy/` is intentionally excluded via `tests/conftest.py:collect_ignore_glob` — targets the pre-graph architecture, do not re-enable.
+- `print()` is forbidden in production code paths — use the module `logger`. The exception is documentation: example `print()` calls **inside docstrings** (showing how a caller would use the returned value) are fine. See `src/ootils_core/forecasting/engine.py:80-81` for the canonical case.
 - `/v1/ingest/*` has a 10 MB request-body cap enforced by `IngestPayloadSizeLimitMiddleware` in `api/app.py`.
 - The generic exception handler in `api/app.py` deliberately hides exception strings from clients (logs them instead) to avoid leaking DSNs / stack traces. Don't "improve" it by echoing `str(exc)` to the response.
 - Principles from `CONTRIBUTING.md` that the code enforces: API-first (no UI features in V1), explainability (every calculation traceable — see `kernel/explanation/`), fail-loudly over silent wrong answers.
