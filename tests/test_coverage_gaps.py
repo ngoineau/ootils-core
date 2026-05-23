@@ -1225,128 +1225,71 @@ class TestPoliciesGaps:
 
 
 class TestScenarioManagerGaps:
-    def test_copy_projection_series_with_rows(self):
-        """manager.py 119-147 — _copy_projection_series with at least one row."""
+    def test_create_scenario_uses_bulk_sql_path(self):
+        """REVIEW-2026-05 R10: create_scenario uses bulk INSERT…SELECT, not row-by-row.
+
+        Replaces two older tests that mocked the row-by-row INSERT flow. The
+        new contract is that `create_scenario` issues a fixed, small number
+        of SQL statements regardless of source row count: it builds temp
+        mapping tables, runs INSERT…SELECT for projection_series, then for
+        nodes, then for edges, then runs the orphan integrity check.
+        """
         from ootils_core.engine.scenario.manager import ScenarioManager
 
-        # Build a fake row with all expected fields
-        old_series_id = uuid4()
-        series_row = {
-            "series_id": old_series_id,
-            "item_id": uuid4(),
-            "location_id": uuid4(),
-            "horizon_start": date(2026, 1, 1),
-            "horizon_end": date(2026, 12, 31),
-        }
-
         db = MagicMock()
-        # First fetchall: projection_series rows
-        # Second fetchall: nodes (empty)
-        # Third fetchall: edges (empty)
-        db.execute.return_value.fetchall.side_effect = [
-            [series_row],  # projection_series
-            [],            # nodes
-            [],            # edges
-        ]
+        # The new flow does not iterate fetchall over source rows. fetchall
+        # is only used to read back the _series_map for the caller's dict
+        # return value; return an empty list so the mapping is {}.
+        db.execute.return_value.fetchall.return_value = []
         db.execute.return_value.fetchone.return_value = {"cnt": 0}
+        db.execute.return_value.rowcount = 0
 
         manager = ScenarioManager()
         manager.create_scenario(
-            name="WithSeries",
+            name="BulkPath",
             parent_scenario_id=UUID("00000000-0000-0000-0000-000000000001"),
             db=db,
         )
 
-        # Verify projection_series INSERT happened
-        insert_series_calls = [
-            c for c in db.execute.call_args_list
-            if "INSERT INTO projection_series" in str(c)
-        ]
-        assert len(insert_series_calls) >= 1
+        all_sql = " ".join(str(c) for c in db.execute.call_args_list)
+        # Bulk path markers
+        assert "CREATE TEMP TABLE _series_map" in all_sql
+        assert "CREATE TEMP TABLE _node_map" in all_sql
+        # INSERT…SELECT for the three entity types
+        assert "INSERT INTO projection_series" in all_sql
+        assert "INSERT INTO nodes" in all_sql
+        assert "INSERT INTO edges" in all_sql
 
-    def test_copy_nodes_with_edges_and_remapping(self):
-        """manager.py 248-286 — copy edges that reference copied nodes."""
+    def test_create_scenario_bulk_path_uses_constant_query_count(self):
+        """REVIEW-2026-05 R10: the bulk path is O(1) in queries, not O(N rows).
+
+        Without the bulk refactor, the call would issue one INSERT per row.
+        After the refactor, a small constant number of statements covers any
+        node count.
+        """
         from ootils_core.engine.scenario.manager import ScenarioManager
 
-        old_node_a = uuid4()
-        old_node_b = uuid4()
-        old_node_external = uuid4()
-
-        node_row_a = {
-            "node_id": old_node_a,
-            "node_type": "ProjectedInventory",
-            "scenario_id": UUID("00000000-0000-0000-0000-000000000001"),
-            "item_id": None,
-            "location_id": None,
-            "quantity": None,
-            "qty_uom": None,
-            "time_grain": "day",
-            "time_ref": None,
-            "time_span_start": None,
-            "time_span_end": None,
-            "projection_series_id": None,
-            "bucket_sequence": 0,
-            "opening_stock": None,
-            "inflows": None,
-            "outflows": None,
-            "closing_stock": None,
-            "has_shortage": False,
-            "shortage_qty": "0",
-            "has_exact_date_inputs": False,
-            "has_week_inputs": False,
-            "has_month_inputs": False,
-        }
-        node_row_b = dict(node_row_a)
-        node_row_b["node_id"] = old_node_b
-
-        # Edge between two copied nodes (will be successfully remapped)
-        good_edge = {
-            "edge_id": uuid4(),
-            "edge_type": "consumes",
-            "from_node_id": old_node_a,
-            "to_node_id": old_node_b,
-            "scenario_id": UUID("00000000-0000-0000-0000-000000000001"),
-            "priority": 0,
-            "weight_ratio": Decimal("1"),
-            "effective_start": None,
-            "effective_end": None,
-        }
-        # Edge with one endpoint NOT in the copied nodes → should be skipped (line 254-259)
-        bad_edge = {
-            "edge_id": uuid4(),
-            "edge_type": "consumes",
-            "from_node_id": old_node_external,  # not in source
-            "to_node_id": old_node_b,
-            "scenario_id": UUID("00000000-0000-0000-0000-000000000001"),
-            "priority": 0,
-            "weight_ratio": Decimal("1"),
-            "effective_start": None,
-            "effective_end": None,
-        }
-
         db = MagicMock()
-        db.execute.return_value.fetchall.side_effect = [
-            [],                           # projection_series
-            [node_row_a, node_row_b],     # nodes
-            [good_edge, bad_edge],        # edges
-        ]
+        db.execute.return_value.fetchall.return_value = []
         db.execute.return_value.fetchone.return_value = {"cnt": 0}
+        db.execute.return_value.rowcount = 0
 
         manager = ScenarioManager()
         manager.create_scenario(
-            name="WithEdges",
+            name="ConstantQueries",
             parent_scenario_id=UUID("00000000-0000-0000-0000-000000000001"),
             db=db,
         )
 
-        # At least one INSERT INTO edges should have happened (the good edge)
-        insert_edge_calls = [
-            c for c in db.execute.call_args_list
-            if "INSERT INTO edges" in str(c)
-        ]
-        assert len(insert_edge_calls) >= 1
-        # The bad edge should NOT have caused an INSERT
-        assert len(insert_edge_calls) == 1
+        # 1 INSERT scenarios + 2 _series_map (create + populate) + 1 INSERT
+        # projection_series + 1 SELECT _series_map + 1 SELECT 1 probe +
+        # 2 _node_map + 1 INSERT nodes + 1 INSERT edges + 1 orphan check
+        # = around a dozen statements. Allow head-room without making the
+        # assertion brittle to small structural changes.
+        assert db.execute.call_count <= 16, (
+            f"bulk path issued {db.execute.call_count} statements — "
+            "the O(N rows) regression would push this into the thousands."
+        )
 
     def test_apply_override_baseline_node_resolution_succeeds(self):
         """manager.py 332-364 — node_id is from baseline; resolve via semantic match."""

@@ -23,6 +23,7 @@ The current-state ADRs to read first:
 - [`ADR-003-incremental-propagation.md`](ADR-003-incremental-propagation.md) — Deterministic incremental propagation.
 - [`ADR-004-explainability.md`](ADR-004-explainability.md) — Causal step traces for shortage roots.
 - [`ADR-011-scenario-retention.md`](ADR-011-scenario-retention.md) — FK retention policy; soft-delete only.
+- [`ADR-012-scenario-fork-bulk.md`](ADR-012-scenario-fork-bulk.md) — Bulk `INSERT…SELECT` scenario fork (27.5× faster). Lazy CoW deferred to ADR-013.
 
 Elastic time (sprint of iteration, ADR-002 is the final version to read):
 
