@@ -31,6 +31,11 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ootils_core.seed.config import PROFILES, Profile
+from ootils_core.seed.master.boms import (
+    generate_boms,
+    insert_boms,
+    validate_acyclic,
+)
 from ootils_core.seed.master.items import generate_items, insert_items
 from ootils_core.seed.master.locations import generate_locations, insert_locations
 from ootils_core.seed.master.suppliers import generate_suppliers, insert_suppliers
@@ -104,6 +109,82 @@ def _phase1_master(conn: psycopg.Connection, profile: Profile) -> dict:
             "gen_seconds": round(t_sup_gen, 3),
             "insert_seconds": round(t_sup_ins, 3),
         },
+        "_items_ref": items,  # kept for phase 2
+    }
+
+
+def _phase2_boms(conn: psycopg.Connection, profile: Profile, items) -> dict:
+    """Generate + insert BOMs (headers + lines). Pure-graph acyclicity check."""
+    t0 = time.perf_counter()
+    bom_set = generate_boms(profile, items)
+    t_gen = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    validate_acyclic(bom_set, items)
+    t_check = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    n_h, n_l = insert_boms(conn, bom_set)
+    t_ins = time.perf_counter() - t0
+    conn.commit()
+
+    return {
+        "headers_generated": bom_set.total_headers,
+        "lines_generated": bom_set.total_lines,
+        "headers_inserted": n_h,
+        "lines_inserted": n_l,
+        "gen_seconds": round(t_gen, 3),
+        "acyclicity_check_seconds": round(t_check, 3),
+        "insert_seconds": round(t_ins, 3),
+    }
+
+
+def _validate_boms(conn: psycopg.Connection) -> dict:
+    """Sanity checks on BOM structure post-insert."""
+    def _agg(sql: str, key_col: str) -> dict:
+        rows = conn.execute(sql).fetchall()
+        return {r[key_col]: int(r["n"]) for r in rows}
+
+    # BOMs by parent level — join headers->items->derived level from item_type
+    # Note: level is implicit in the BOM graph, but item_type carries enough
+    # signal for L0 (finished_good), L1 (semi_finished), L4 (raw_material).
+    # L2/L3 both 'component' so we can't distinguish here; just count by type.
+    headers_by_parent_type = _agg(
+        """
+        SELECT i.item_type, COUNT(*) AS n
+        FROM bom_headers h
+        JOIN items i ON i.item_id = h.parent_item_id
+        GROUP BY i.item_type
+        ORDER BY i.item_type
+        """,
+        "item_type",
+    )
+    lines_per_bom = conn.execute(
+        """
+        SELECT MIN(c) AS mn, MAX(c) AS mx, ROUND(AVG(c)::numeric, 2) AS avg
+        FROM (SELECT COUNT(*) AS c FROM bom_lines GROUP BY bom_id) s
+        """
+    ).fetchone()
+    # Raw material as component (should be 0 BOMs with raw as PARENT, but many as CHILD)
+    raw_as_parent = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM bom_headers h
+        JOIN items i ON i.item_id = h.parent_item_id
+        WHERE i.item_type = 'raw_material'
+        """
+    ).fetchone()
+    raw_as_child = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM bom_lines l
+        JOIN items i ON i.item_id = l.component_item_id
+        WHERE i.item_type = 'raw_material'
+        """
+    ).fetchone()
+    return {
+        "headers_by_parent_type": headers_by_parent_type,
+        "lines_per_bom_min_max_avg": (lines_per_bom["mn"], lines_per_bom["mx"], lines_per_bom["avg"]),
+        "raw_material_as_bom_parent": int(raw_as_parent["n"]),  # MUST be 0
+        "raw_material_as_bom_child": int(raw_as_child["n"]),
     }
 
 
@@ -181,7 +262,10 @@ def main() -> int:
 
     with psycopg.connect(target_dsn, row_factory=dict_row) as conn:
         stats = _phase1_master(conn, profile)
-        validation = _validate_master(conn)
+        items_ref = stats.pop("_items_ref")
+        validation_p1 = _validate_master(conn)
+        stats_p2 = _phase2_boms(conn, profile, items_ref)
+        validation_p2 = _validate_boms(conn)
 
     print()
     print("=" * 60)
@@ -194,9 +278,23 @@ def main() -> int:
 
     print()
     print("=" * 60)
-    print("VALIDATION")
+    print("PHASE 1 — validation")
     print("=" * 60)
-    for k, v in validation.items():
+    for k, v in validation_p1.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 2 — BOMs")
+    print("=" * 60)
+    for k, v in stats_p2.items():
+        print(f"  {k:30s}  {v}")
+
+    print()
+    print("=" * 60)
+    print("PHASE 2 — validation")
+    print("=" * 60)
+    for k, v in validation_p2.items():
         print(f"  {k:30s}  {v}")
     return 0
 
