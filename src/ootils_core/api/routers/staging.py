@@ -43,8 +43,11 @@ from fastapi import (
     status,
 )
 
+from pydantic import BaseModel, Field
+
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.staging.approve import ApprovalError, approve_batch
 from ootils_core.staging.diff import DiffError, compute_diff
 from ootils_core.staging.loader import LoaderError, load_to_staging
 from ootils_core.staging.parser import ParseError, ParseOptions, parse
@@ -266,4 +269,74 @@ def get_batch_diff(
             "threshold": diff.deletion_ratio_threshold,
             "exceeds_threshold": diff.exceeds_deletion_threshold,
         },
+    }
+
+
+class ApproveRequest(BaseModel):
+    """Body of POST /v1/staging/batches/{id}/approve.
+
+    `force` is required (set to True) when the diff's deletion ratio
+    exceeds the 20% threshold — see ADR-013 D4. `notes` is optional but
+    strongly recommended when forcing, as it becomes the audit trail
+    rationale in staging.transform_runs.approval_notes.
+    """
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    force: bool = Field(default=False)
+    # Identity of the approver. The current auth layer doesn't extract
+    # subjects from the bearer token, so callers pass it explicitly for
+    # now. When auth.py grows subject extraction, this becomes optional.
+    approved_by: str = Field(..., min_length=1, max_length=200)
+
+
+@router.post(
+    "/batches/{batch_id}/approve",
+    dependencies=[Depends(require_auth)],
+)
+def approve(
+    batch_id: UUID,
+    body: ApproveRequest,
+    db: psycopg.Connection = Depends(get_db),
+) -> dict:
+    """Apply the validated batch to canonical tables (ADR-013 D3+D4).
+
+    Returns counts (rows_inserted / rows_updated / rows_soft_deleted /
+    rows_noop), the new run_id, and a list of samples per category.
+    The batch transitions from 'validated' to 'imported'; a new
+    `staging.transform_runs` row is created in 'completed' state.
+
+    Failure mode: if the canonical write fails for any reason, the
+    transaction is rolled back and the transform_runs row is marked
+    'failed' with the error message (audit trail preserved). The
+    batch stays in 'validated' state so the operator can retry.
+    """
+    try:
+        result = approve_batch(
+            db,
+            batch_id=batch_id,
+            approved_by=body.approved_by,
+            notes=body.notes,
+            force=body.force,
+        )
+    except ApprovalError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    return {
+        "batch_id": str(result.batch_id),
+        "run_id": str(result.run_id),
+        "entity_type": result.entity_type,
+        "source_system": result.source_system,
+        "approved_by": result.approved_by,
+        "forced_approval": result.forced_approval,
+        "duration_seconds": result.duration_seconds,
+        "counts": {
+            "rows_inserted": result.rows_inserted,
+            "rows_updated": result.rows_updated,
+            "rows_soft_deleted": result.rows_soft_deleted,
+            "rows_noop": result.rows_noop,
+        },
+        "deletion_ratio": result.deletion_ratio,
+        "samples": result.samples,
     }
