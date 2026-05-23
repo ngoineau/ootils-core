@@ -1,14 +1,17 @@
 """
 test_llc_calculator.py — Unit tests for LLCCalculator (Phase 0, Section 6.2).
 
-Covers:
+Covers (pure-Python, no DB needed):
   - BFS algorithm correctness (simple, multi-level, diamond BOM)
   - Cycle detection (simple cycle, deep cycle, self-reference)
   - Max-depth rule (item appearing at multiple levels)
   - Standalone items (LLC 0)
   - Performance (10k items < 50ms)
-  - DB-backed calculator integration (mocked DB)
   - APICS scenario 002 multi-level BOM LLC ordering
+
+The DB-backed LLCCalculator tests (which previously used MagicMock) now
+live in tests/integration/test_llc_calculator_integration.py and run
+against a real Postgres test database.
 
 Reference: APICS CPIM Part 2, Module 3 — BOM Structure & Low-Level Code
 """
@@ -17,7 +20,6 @@ from __future__ import annotations
 
 import time
 from typing import List
-from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -28,7 +30,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from ootils_core.engine.mrp.llc_calculator import (
-    LLCCalculator,
     BomCycleDetectedError,
     compute_llc_pure,
 )
@@ -500,172 +501,16 @@ class TestPerformance:
 
 
 # ─────────────────────────────────────────────────────────────
-# U-LLC-009: DB-backed LLCCalculator (mocked DB)
+# U-LLC-009: DB-backed LLCCalculator
 # ─────────────────────────────────────────────────────────────
-
-_psycopg_available = False
-try:
-    import psycopg  # noqa: F401
-    _psycopg_available = True
-except ImportError:
-    pass
-
-
-class TestDBBackedCalculator:
-    """Test LLCCalculator with mocked DB connection.
-
-    These tests require psycopg to be importable (for type annotation
-    in the production code). They are skipped when psycopg is not
-    available, such as in standalone test environments.
-    """
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_calculate_all_basic(self):
-        """DB-backed calculate_all loads edges, computes LLCs, persists."""
-        fg = UUID(int=1)
-        sa = UUID(int=2)
-        rm = UUID(int=3)
-        line1 = UUID(int=10)
-        line2 = UUID(int=11)
-
-        bom_rows = [
-            {"parent_item_id": fg, "component_item_id": sa, "line_id": line1},
-            {"parent_item_id": sa, "component_item_id": rm, "line_id": line2},
-        ]
-
-        mock_db = MagicMock()
-        cursor_result = MagicMock()
-        cursor_result.fetchall.return_value = bom_rows
-        mock_db.execute.return_value = cursor_result
-
-        mock_cursor = MagicMock()
-        mock_db.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-        mock_db.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        calc = LLCCalculator(mock_db)
-        result = calc.calculate_all()
-
-        assert result.llc_map[fg] == 0
-        assert result.llc_map[sa] == 1
-        assert result.llc_map[rm] == 2
-        assert result.max_llc == 2
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_calculate_all_empty(self):
-        """Empty BOM should return empty result."""
-        mock_db = MagicMock()
-        cursor_result = MagicMock()
-        cursor_result.fetchall.return_value = []
-        mock_db.execute.return_value = cursor_result
-
-        calc = LLCCalculator(mock_db)
-        result = calc.calculate_all()
-
-        assert result.llc_map == {}
-        assert result.item_count == 0
-        assert result.edge_count == 0
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_detect_cycle_incremental(self):
-        """detect_cycle should find cycles when adding new components.
-
-        Existing BOM: A → B.
-        Adding B under parent A: can B reach A via parent links?
-        B's parents = {A} → yes → cycle detected.
-        """
-        a, b = UUID(int=1), UUID(int=2)
-
-        bom_rows = [
-            {"parent_item_id": a, "component_item_id": b},
-        ]
-
-        mock_db = MagicMock()
-        cursor_result = MagicMock()
-        cursor_result.fetchall.return_value = bom_rows
-        mock_db.execute.return_value = cursor_result
-
-        calc = LLCCalculator(mock_db)
-
-        # parent=A, new_component=B: B can reach A (B's parent is A) → cycle
-        assert calc.detect_cycle(a, [b]) is True
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_detect_no_cycle_incremental(self):
-        """detect_cycle should return False when no cycle would be created."""
-        fg, sa, rm = UUID(int=1), UUID(int=2), UUID(int=3)
-
-        bom_rows = [
-            {"parent_item_id": fg, "component_item_id": sa},
-        ]
-
-        mock_db = MagicMock()
-        cursor_result = MagicMock()
-        cursor_result.fetchall.return_value = bom_rows
-        mock_db.execute.return_value = cursor_result
-
-        calc = LLCCalculator(mock_db)
-
-        # Adding RM under SA would not create a cycle
-        assert calc.detect_cycle(sa, [rm]) is False
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_load_existing_llc(self):
-        """load_existing_llc should return max LLC per component from DB."""
-        sa = UUID(int=2)
-        rm = UUID(int=3)
-
-        rows = [
-            {"component_item_id": sa, "llc": 1},
-            {"component_item_id": rm, "llc": 2},
-        ]
-
-        mock_db = MagicMock()
-        cursor_result = MagicMock()
-        cursor_result.fetchall.return_value = rows
-        mock_db.execute.return_value = cursor_result
-
-        calc = LLCCalculator(mock_db)
-        result = calc.load_existing_llc()
-
-        assert result[sa] == 1
-        assert result[rm] == 2
-
-    @pytest.mark.skipif(not _psycopg_available, reason="psycopg not installed")
-    def test_get_items_by_llc(self):
-        """get_items_by_llc should group items by LLC level."""
-        fg = UUID(int=1)
-        sa = UUID(int=2)
-        rm = UUID(int=3)
-
-        component_rows = [
-            {"item_id": sa, "llc": 1},
-            {"item_id": rm, "llc": 2},
-        ]
-
-        parent_rows = [
-            {"parent_item_id": fg},
-        ]
-
-        mock_db = MagicMock()
-
-        call_count = [0]
-        def mock_execute(query, params=None):
-            call_count[0] += 1
-            result = MagicMock()
-            if call_count[0] == 1:
-                result.fetchall.return_value = component_rows
-            else:
-                result.fetchall.return_value = parent_rows
-            return result
-
-        mock_db.execute = mock_execute
-
-        calc = LLCCalculator(mock_db)
-        result = calc.get_items_by_llc()
-
-        assert fg in result[0]
-        assert sa in result[1]
-        assert rm in result[2]
+# The 6 DB-backed test methods that previously mocked psycopg via
+# MagicMock have been ported to
+# tests/integration/test_llc_calculator_integration.py and now run
+# against a real Postgres test database. Per CLAUDE.md "tests run
+# against real Postgres, no mocks". The pure-Python tests above and
+# below continue to cover the BFS / cycle-detection algorithm in
+# isolation (no DB needed).
+# ─────────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────

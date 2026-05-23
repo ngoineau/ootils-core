@@ -8,6 +8,20 @@ Covers:
   reading migration files, per-migration transaction, raising on errors)
 - health_check (ok, orphaned edges, stuck calc_runs, connection error)
 - new_id() returns a UUID
+
+Mock-DB carve-out (CLAUDE.md "tests run against real Postgres, no mocks"):
+This file is the canonical exception to the no-mocks rule. It tests the
+OotilsDB wrapper itself — the abstraction layer between application
+code and psycopg.connect / psycopg_pool. Validating that wrapper
+requires mocking psycopg at the boundary it owns; otherwise the tests
+become integration tests of psycopg rather than of OotilsDB (advisory
+lock acquisition, migration-tracking SQL, pool fallback path,
+rollback-on-exception semantics — none of these can be exercised
+without controlling the psycopg layer).
+
+The real-DB equivalent is exercised by tests/integration/ via the
+`conn` / `migrated_db` fixtures, which actually use OotilsDB to set
+up the schema. Both layers are necessary.
 """
 from __future__ import annotations
 
