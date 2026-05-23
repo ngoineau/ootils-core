@@ -87,10 +87,35 @@ WITH per_bucket AS (
               AND s.time_ref >= pi.time_span_start
               AND s.time_ref <  pi.time_span_end
         ), 0)::numeric AS inflows,
-        -- outflows: demand events anchored in this bucket via 'consumes' (point-in-time;
-        -- multi-day span prorating is added in v0.4).
+        -- outflows: demand events consumed in this bucket via 'consumes' edges.
+        -- Mirrors propagator.py logic exactly:
+        --   - if demand has time_span_start AND time_span_end AND end > start:
+        --       prorate quantity * overlap_days / span_days (overlap clamped >= 0)
+        --   - else point-in-time using COALESCE(time_ref, time_span_start)
         COALESCE((
-            SELECT SUM(d.quantity)
+            SELECT SUM(
+                CASE
+                    WHEN d.time_span_start IS NOT NULL
+                         AND d.time_span_end IS NOT NULL
+                         AND d.time_span_end > d.time_span_start THEN
+                        -- Cast LHS to numeric(50,28) to force 28 fractional digits in
+                        -- the division — matches Python's Decimal default precision
+                        -- (28 sig digits) byte-for-byte. Without this Postgres rounds
+                        -- to ~16 digits and parity drifts on fractional daily rates.
+                        d.quantity::numeric(50, 28)
+                        / (d.time_span_end - d.time_span_start)::numeric
+                        * GREATEST(
+                            0,
+                            LEAST(pi.time_span_end, d.time_span_end)
+                            - GREATEST(pi.time_span_start, d.time_span_start)
+                          )::numeric
+                    WHEN COALESCE(d.time_ref, d.time_span_start) IS NOT NULL
+                         AND COALESCE(d.time_ref, d.time_span_start) >= pi.time_span_start
+                         AND COALESCE(d.time_ref, d.time_span_start) <  pi.time_span_end THEN
+                        d.quantity
+                    ELSE 0
+                END
+            )
             FROM edges c
             JOIN nodes d ON d.node_id = c.from_node_id
             WHERE c.to_node_id = pi.node_id
@@ -99,9 +124,6 @@ WITH per_bucket AS (
               AND c.active = TRUE
               AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
               AND d.active = TRUE
-              AND d.time_ref IS NOT NULL
-              AND d.time_ref >= pi.time_span_start
-              AND d.time_ref <  pi.time_span_end
         ), 0)::numeric AS outflows
     FROM nodes pi
     WHERE pi.node_type = 'ProjectedInventory'

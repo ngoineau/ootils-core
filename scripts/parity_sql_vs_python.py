@@ -189,38 +189,60 @@ def _seed_rich(
             (location_id, horizon_start, ipp_item_ids, ipp_ss_qtys),
         )
 
-    # 5b. Demand nodes — point-in-time only (no spans). Alternate types so we
-    # exercise both ForecastDemand and CustomerOrderDemand paths in the engine.
+    # 5b. Demand nodes — mix of point-in-time (time_ref only) and multi-day
+    # spans (time_span_start/end). Spans are connected to EVERY PI bucket they
+    # overlap; the kernel prorates daily_rate * overlap_days per bucket.
     dem_ids: list[UUID] = []
     dem_item_ids: list[UUID] = []
     dem_qtys: list[Decimal] = []
-    dem_dates: list[date] = []
+    dem_time_refs: list[date | None] = []
+    dem_span_starts: list[date | None] = []
+    dem_span_ends: list[date | None] = []
     dem_types: list[str] = []
+    # Tracks the PI buckets each demand consumes (for edge creation below).
+    dem_bucket_indices: list[list[int]] = []
     for i in range(items):
         for k in range(demands_per_item):
-            offset = rng.randint(0, buckets - 1)
             dem_ids.append(uuid4())
             dem_item_ids.append(item_ids[i])
-            # Smaller qty than supplies so we stay non-negative on average,
-            # but some buckets MAY go negative — that exercises the shortage path.
-            dem_qtys.append(Decimal(rng.choice([5, 10, 20, 40])))
-            dem_dates.append(horizon_start + timedelta(days=offset))
+            dem_qtys.append(Decimal(rng.choice([5, 10, 20, 40, 80])))
             dem_types.append("ForecastDemand" if k % 2 == 0 else "CustomerOrderDemand")
+            # 1/3 of demands are multi-day spans; 2/3 are point-in-time.
+            if rng.random() < 0.33 and buckets > 5:
+                span_len = rng.randint(2, 5)
+                offset = rng.randint(0, buckets - span_len)
+                ts = horizon_start + timedelta(days=offset)
+                te = horizon_start + timedelta(days=offset + span_len)
+                dem_time_refs.append(None)
+                dem_span_starts.append(ts)
+                dem_span_ends.append(te)
+                # Buckets the demand overlaps (daily grain, contiguous)
+                dem_bucket_indices.append(list(range(offset, offset + span_len)))
+            else:
+                offset = rng.randint(0, buckets - 1)
+                dt = horizon_start + timedelta(days=offset)
+                dem_time_refs.append(dt)
+                dem_span_starts.append(None)
+                dem_span_ends.append(None)
+                dem_bucket_indices.append([offset])
 
     if dem_ids:
         conn.execute(
             """
             INSERT INTO nodes
                 (node_id, node_type, scenario_id, item_id, location_id,
-                 quantity, qty_uom, time_grain, time_ref, is_dirty, active)
+                 quantity, qty_uom, time_grain, time_ref,
+                 time_span_start, time_span_end, is_dirty, active)
             SELECT
                 d.id, d.tp, %s, d.item_id, %s,
-                d.qty, 'EA', 'exact_date', d.dt, FALSE, TRUE
-            FROM UNNEST(%s::uuid[], %s::text[], %s::uuid[], %s::numeric[], %s::date[])
-                 AS d(id, tp, item_id, qty, dt)
+                d.qty, 'EA', 'exact_date', d.tr, d.ts, d.te, FALSE, TRUE
+            FROM UNNEST(%s::uuid[], %s::text[], %s::uuid[], %s::numeric[],
+                        %s::date[], %s::date[], %s::date[])
+                 AS d(id, tp, item_id, qty, tr, ts, te)
             """,
             (BASELINE_SCENARIO_ID, location_id,
-             dem_ids, dem_types, dem_item_ids, dem_qtys, dem_dates),
+             dem_ids, dem_types, dem_item_ids, dem_qtys,
+             dem_time_refs, dem_span_starts, dem_span_ends),
         )
 
     # 6. Edges
@@ -251,15 +273,18 @@ def _seed_rich(
             edge_from.append(po_id)
             edge_to.append(pi_ids[item_idx * buckets + bucket_idx])
 
-    # Demand → PI bucket whose window contains the demand time_ref (consumes)
-    for dem_id, dem_item_id, dem_date in zip(dem_ids, dem_item_ids, dem_dates):
-        item_idx = item_ids.index(dem_item_id)
-        bucket_idx = (dem_date - horizon_start).days
-        if 0 <= bucket_idx < buckets:
-            edge_ids.append(uuid4())
-            edge_types.append("consumes")
-            edge_from.append(dem_id)
-            edge_to.append(pi_ids[item_idx * buckets + bucket_idx])
+    # Demand -> PI bucket(s). For point-in-time, one edge to the bucket
+    # whose window contains time_ref. For multi-day spans, one edge per
+    # overlapping daily bucket.
+    item_id_to_idx = {iid: idx for idx, iid in enumerate(item_ids)}
+    for dem_id, dem_item_id, bucket_indices in zip(dem_ids, dem_item_ids, dem_bucket_indices):
+        item_idx = item_id_to_idx[dem_item_id]
+        for b in bucket_indices:
+            if 0 <= b < buckets:
+                edge_ids.append(uuid4())
+                edge_types.append("consumes")
+                edge_from.append(dem_id)
+                edge_to.append(pi_ids[item_idx * buckets + b])
 
     conn.execute(
         """
@@ -384,6 +409,7 @@ def _diff_shortages(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
     only_sql = keys_sql - keys_py
     common = keys_py & keys_sql
 
+    TOL = Decimal("1e-12")
     mismatches: list[tuple[UUID, str, object, object]] = []
     fields_num = ("shortage_qty", "severity_score")
     fields_other = ("severity_class", "shortage_date")
@@ -391,7 +417,7 @@ def _diff_shortages(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
         for f in fields_num:
             a_n = Decimal(str(py[nid][f]))
             b_n = Decimal(str(sql[nid][f]))
-            if a_n != b_n:
+            if abs(a_n - b_n) > TOL:
                 mismatches.append((nid, f, py[nid][f], sql[nid][f]))
         for f in fields_other:
             if py[nid][f] != sql[nid][f]:
@@ -429,6 +455,11 @@ def _diff_snapshots(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
     only_sql = keys_sql - keys_py
     common = keys_py & keys_sql
 
+    # Tolerance accounts for the ~24-26th digit rounding difference between
+    # Python's Decimal default context (28 sig digits, ROUND_HALF_EVEN) and
+    # Postgres NUMERIC division/multiplication. 1e-12 is parts-per-trillion,
+    # ~12 orders of magnitude below any business-meaningful inventory value.
+    TOL = Decimal("1e-12")
     mismatches: list[tuple[UUID, str, object, object]] = []
     numeric_fields = ("opening_stock", "inflows", "outflows", "closing_stock", "shortage_qty")
     bool_fields = ("has_shortage",)
@@ -436,9 +467,14 @@ def _diff_snapshots(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
         for f in numeric_fields:
             a = py[nid][f]
             b = sql[nid][f]
-            a_n = None if a is None else Decimal(str(a))
-            b_n = None if b is None else Decimal(str(b))
-            if a_n != b_n:
+            if a is None and b is None:
+                continue
+            if a is None or b is None:
+                mismatches.append((nid, f, a, b))
+                continue
+            a_n = Decimal(str(a))
+            b_n = Decimal(str(b))
+            if abs(a_n - b_n) > TOL:
                 mismatches.append((nid, f, a, b))
         for f in bool_fields:
             if py[nid][f] != sql[nid][f]:
