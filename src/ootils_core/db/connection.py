@@ -16,8 +16,8 @@ Environment:
 """
 from __future__ import annotations
 
+import logging
 import os
-import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +25,8 @@ from typing import Generator
 
 import psycopg
 from psycopg.rows import dict_row
+
+logger = logging.getLogger(__name__)
 
 # Migrations are applied in filename order.
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
@@ -186,9 +188,9 @@ class OotilsDB:
                     except Exception as e:
                         sqlstate = _sqlstate_of(e)
                         sqlstate_suffix = f" [sqlstate={sqlstate}]" if sqlstate else ""
-                        print(
-                            f"[MIGRATION ERROR] {migration_path.name}{sqlstate_suffix}: {e}",
-                            file=sys.stderr,
+                        logger.error(
+                            "Migration failed: %s%s — %s",
+                            migration_path.name, sqlstate_suffix, e,
                         )
                         raise
             finally:
