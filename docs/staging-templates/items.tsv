@@ -1,0 +1,11 @@
+external_id	name	item_type	uom	status
+SAP-FG-00001	Smart Sensor Module 24V	finished_good	EA	active
+SAP-FG-00002	Industrial Gateway Pro	finished_good	EA	active
+SAP-FG-00003	Compact Controller X1	finished_good	EA	phase_out
+SAP-SA-01024	Power Supply Subassembly 24V/5A	semi_finished	EA	active
+SAP-SA-01025	Wireless Radio Module	semi_finished	EA	active
+SAP-CP-04201	PCB Main Board Rev3	component	EA	active
+SAP-PT-08833	Connector M12 5-pin shielded	component	EA	active
+SAP-PT-08834	Cable Cat6 shielded	component	M	active
+SAP-RM-15007	Steel sheet 1.5mm AISI 304	raw_material	KG	active
+SAP-RM-15008	Industrial epoxy resin grade A	raw_material	L	active
