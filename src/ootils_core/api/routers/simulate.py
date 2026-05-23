@@ -122,7 +122,7 @@ async def create_simulation(
             failed_overrides.append({
                 "node_id": str(override.node_id),
                 "field_name": override.field_name,
-                "error": str(exc),
+                "error": "Override failed validation",
             })
 
     # If all overrides failed, return 422 with details instead of 500

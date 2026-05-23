@@ -496,9 +496,10 @@ async def run_ghost_endpoint(
             to_date=body.to_date,
         )
     except ValueError as exc:
+        logger.warning("ghost.run failed ghost_id=%s scenario_id=%s: %s", ghost_id, body.scenario_id, exc)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
+            detail="Ghost not found or invalid parameters",
         )
 
     return result
