@@ -134,7 +134,7 @@ class TestPostEvents:
         """POST event without trigger_node_id → 202, event row persisted."""
         payload = {
             "event_type": "supply_date_changed",
-            "source": "integration-test",
+            "source": "test",
             "field_changed": "due_date",
             "new_date": "2026-12-01",
         }
@@ -155,14 +155,14 @@ class TestPostEvents:
                 ).fetchone()
                 assert row is not None
                 assert row["event_type"] == "supply_date_changed"
-                assert row["source"] == "integration-test"
+                assert row["source"] == "test"
             finally:
                 c.execute("DELETE FROM events WHERE event_id = %s", (event_id,))
                 c.commit()
 
     def test_post_event_onhand_updated(self, api_client, auth, seeded_db):
         """A different valid event_type — onhand_updated, manual source."""
-        payload = {"event_type": "onhand_updated", "source": "manual"}
+        payload = {"event_type": "onhand_updated", "source": "user"}
         resp = api_client.post("/v1/events", json=payload, headers=auth)
         assert resp.status_code == 202, resp.text
         event_id = resp.json()["event_id"]
