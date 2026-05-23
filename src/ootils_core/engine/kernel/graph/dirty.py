@@ -8,8 +8,9 @@ Callers own commit/rollback on the db connection.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from uuid import UUID
+
+from ootils_core.engine.kernel._clock import Clock, SystemClock
 
 
 class DirtyFlagManager:
@@ -17,10 +18,14 @@ class DirtyFlagManager:
     Two-tier dirty tracking: in-memory Python set (fast) + Postgres dirty_nodes (durable).
 
     Key: (scenario_id, calc_run_id) → set of node_ids
+
+    Optional ``clock`` (ADR-003): pass a ``FrozenClock`` from tests so
+    ``marked_at`` values on dirty_nodes are reproducible.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Clock | None = None) -> None:
         self._dirty: dict[tuple[UUID, UUID], set[UUID]] = {}
+        self._clock = clock or SystemClock()
 
     def _key(self, scenario_id: UUID, calc_run_id: UUID) -> tuple[UUID, UUID]:
         return (scenario_id, calc_run_id)
@@ -134,7 +139,7 @@ class DirtyFlagManager:
         if not node_ids:
             return
 
-        now = datetime.now(timezone.utc)
+        now = self._clock.now()
         # Build batch values
         rows = [(calc_run_id, node_id, scenario_id, now) for node_id in node_ids]
 

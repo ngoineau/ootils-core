@@ -10,11 +10,12 @@ direct SQL on it.  All other graph data access goes through GraphStore.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
+from ootils_core.engine.kernel._clock import Clock, SystemClock
+from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import Node, ShortageRecord
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,13 @@ class ShortageDetector:
     Detects, scores, persists, and resolves inventory shortages.
 
     Owns the `shortages` table — uses direct SQL.
+
+    Optional ``clock`` (ADR-003): pass a ``FrozenClock`` from tests so
+    ``created_at`` / ``updated_at`` values are reproducible.
     """
+
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = clock or SystemClock()
 
     # ------------------------------------------------------------------
     # Detection
@@ -106,7 +113,9 @@ class ShortageDetector:
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
         record = ShortageRecord(
-            shortage_id=uuid4(),
+            shortage_id=deterministic_uuid(
+                "shortage", scenario_id, calc_run_id, pi_node.node_id,
+            ),
             scenario_id=scenario_id,
             pi_node_id=pi_node.node_id,
             item_id=pi_node.item_id,
@@ -138,7 +147,7 @@ class ShortageDetector:
         Upsert a ShortageRecord into the `shortages` table.
         ON CONFLICT (pi_node_id, calc_run_id) → update all mutable fields.
         """
-        now = datetime.now(timezone.utc)
+        now = self._clock.now()
         db.execute(
             """
             INSERT INTO shortages (
@@ -206,7 +215,7 @@ class ShortageDetector:
 
         Returns the count of rows updated.
         """
-        now = datetime.now(timezone.utc)
+        now = self._clock.now()
         result = db.execute(
             """
             UPDATE shortages

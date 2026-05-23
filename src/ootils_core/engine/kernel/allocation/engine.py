@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import logging
 from datetime import date as _date_type
-from datetime import datetime, timezone
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
+
+from ootils_core.engine.kernel._clock import Clock, SystemClock
+from ootils_core.engine.kernel._ids import deterministic_uuid
 
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import AllocationResult, Edge, Node
@@ -53,6 +55,9 @@ class AllocationEngine:
         result = engine.allocate(scenario_id, db_conn)
     """
 
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = clock or SystemClock()
+
     def allocate(
         self,
         scenario_id: UUID,
@@ -68,8 +73,8 @@ class AllocationEngine:
 
         The caller owns transaction management (commit/rollback).
         """
-        store = GraphStore(db)
-        run_at = datetime.now(timezone.utc)
+        store = GraphStore(db, clock=self._clock)
+        run_at = self._clock.now()
 
         demands = self.get_demand_nodes(scenario_id, db)
         logger.info(
@@ -266,7 +271,9 @@ class AllocationEngine:
             # Upsert pegged_to edge: demand_node → supply_node
             # Convention: from_node_id = demand, to_node_id = supply
             pegged_edge = Edge(
-                edge_id=uuid4(),
+                edge_id=deterministic_uuid(
+                    "edge_pegged_to", scenario_id, demand_node.node_id, pi_node_id,
+                ),
                 edge_type="pegged_to",
                 from_node_id=demand_node.node_id,
                 to_node_id=pi_node_id,
