@@ -335,6 +335,16 @@ def _run_python_propagation(conn: psycopg.Connection, calc_run_id: UUID, dirty: 
     )
     started = time.perf_counter()
     engine._propagate(calc_run, dirty, conn)
+    # Mirror _finish_run's resolve_stale call (production behaviour).
+    if engine._shortage_detector is not None:
+        try:
+            engine._shortage_detector.resolve_stale(
+                scenario_id=BASELINE_SCENARIO_ID,
+                calc_run_id=calc_run_id,
+                db=conn,
+            )
+        except Exception:
+            pass
     conn.commit()
     return time.perf_counter() - started
 
@@ -433,6 +443,136 @@ def _diff_shortages(py: dict[UUID, dict], sql: dict[UUID, dict]) -> dict:
         "field_mismatches": len(mismatches),
         "sample_mismatches": mismatches,
     }
+
+
+def _save_pi_nodes_snapshot(conn: psycopg.Connection) -> None:
+    """Stash current PI fields into a temp table so we can restore between engines."""
+    conn.execute("DROP TABLE IF EXISTS _pi_snapshot")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _pi_snapshot AS
+        SELECT node_id, opening_stock, inflows, outflows, closing_stock,
+               has_shortage, shortage_qty, is_dirty, last_calc_run_id
+        FROM nodes
+        WHERE node_type = 'ProjectedInventory' AND scenario_id = %s AND active = TRUE
+        """,
+        (BASELINE_SCENARIO_ID,),
+    )
+    conn.execute("DROP TABLE IF EXISTS _shortages_snapshot")
+    conn.execute(
+        "CREATE TEMP TABLE _shortages_snapshot AS SELECT * FROM shortages WHERE scenario_id = %s",
+        (BASELINE_SCENARIO_ID,),
+    )
+    conn.commit()
+
+
+def _restore_pi_nodes_snapshot(conn: psycopg.Connection) -> None:
+    """Restore PI fields from the temp table built by _save_pi_nodes_snapshot."""
+    conn.execute(
+        """
+        UPDATE nodes n
+        SET opening_stock    = s.opening_stock,
+            inflows          = s.inflows,
+            outflows         = s.outflows,
+            closing_stock    = s.closing_stock,
+            has_shortage     = s.has_shortage,
+            shortage_qty     = s.shortage_qty,
+            is_dirty         = s.is_dirty,
+            last_calc_run_id = s.last_calc_run_id
+        FROM _pi_snapshot s
+        WHERE n.node_id = s.node_id
+        """,
+    )
+    conn.execute("DELETE FROM shortages WHERE scenario_id = %s", (BASELINE_SCENARIO_ID,))
+    conn.execute(
+        "INSERT INTO shortages SELECT * FROM _shortages_snapshot",
+    )
+    conn.commit()
+
+
+def _mark_subset_dirty(
+    conn: psycopg.Connection,
+    pi_node_ids: list[UUID],
+) -> UUID:
+    """Reset the listed PI nodes' computed fields and mark them dirty for a new calc_run.
+
+    Returns the new calc_run_id. Mirrors what the propagator would do given a
+    cascade-expanded dirty set — without any actual change to upstream data.
+    Both engines should produce identical results to a no-op recompute of
+    those buckets (re-using the persisted closing_stock of bucket N-1 as seed).
+    """
+    from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+    from ootils_core.engine.orchestration.calc_run import CalcRunManager
+
+    # Reset the subset's computed fields so neither engine reads stale state.
+    conn.execute(
+        """
+        UPDATE nodes
+        SET opening_stock    = NULL,
+            inflows          = NULL,
+            outflows         = NULL,
+            closing_stock    = NULL,
+            has_shortage     = FALSE,
+            shortage_qty     = 0,
+            is_dirty         = TRUE,
+            last_calc_run_id = NULL
+        WHERE node_id = ANY(%s) AND scenario_id = %s
+        """,
+        (pi_node_ids, BASELINE_SCENARIO_ID),
+    )
+    # Clean up any leftovers from prior runs that may interfere with the new one
+    conn.execute("DELETE FROM dirty_nodes WHERE scenario_id = %s", (BASELINE_SCENARIO_ID,))
+    conn.execute(
+        "UPDATE calc_runs SET status = 'completed', completed_at = now() "
+        "WHERE scenario_id = %s AND status = 'running'",
+        (BASELINE_SCENARIO_ID,),
+    )
+    conn.commit()
+
+    calc_mgr = CalcRunManager()
+    calc_run = calc_mgr.start_calc_run(
+        scenario_id=BASELINE_SCENARIO_ID, event_ids=[], db=conn
+    )
+    assert calc_run is not None
+    dirty = DirtyFlagManager()
+    dirty.mark_dirty(set(pi_node_ids), BASELINE_SCENARIO_ID, calc_run.calc_run_id, conn)
+    dirty.flush_to_postgres(calc_run.calc_run_id, BASELINE_SCENARIO_ID, conn)
+    conn.commit()
+    return calc_run.calc_run_id
+
+
+def _pick_incremental_subset(conn: psycopg.Connection, buckets: int) -> list[UUID]:
+    """Pick a contiguous slice of buckets [10..buckets-1] of one series.
+
+    Mimics what `expand_dirty_subgraph` produces when a change lands on the
+    middle of a series: a contiguous downstream suffix is marked dirty.
+    """
+    if buckets < 12:
+        # Not enough buckets to test incremental — return empty (caller skips)
+        return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT projection_series_id FROM nodes
+        WHERE scenario_id = %s AND node_type = 'ProjectedInventory' AND active = TRUE
+        ORDER BY projection_series_id LIMIT 1
+        """,
+        (BASELINE_SCENARIO_ID,),
+    ).fetchall()
+    if not rows:
+        return []
+    series_id = rows[0]["projection_series_id"]
+    rows = conn.execute(
+        """
+        SELECT node_id FROM nodes
+        WHERE projection_series_id = %s
+          AND bucket_sequence >= 10
+          AND scenario_id = %s
+          AND active = TRUE
+        ORDER BY bucket_sequence
+        """,
+        (series_id, BASELINE_SCENARIO_ID),
+    ).fetchall()
+    return [UUID(str(r["node_id"])) for r in rows]
 
 
 def _run_sql_propagation(conn: psycopg.Connection, calc_run_id: UUID) -> float:
@@ -545,6 +685,35 @@ def main() -> int:
         diff = _diff_snapshots(snap_py, snap_sql)
         sh_diff = _diff_shortages(shortages_py, shortages_sql)
 
+        # ---- Phase 4: incremental parity (subset re-dirty) ----
+        inc_pi_diff = None
+        inc_sh_diff = None
+        inc_py_wall = 0.0
+        inc_sql_wall = 0.0
+        subset = _pick_incremental_subset(conn, args.buckets)
+        if subset:
+            print(f"[incremental] testing on {len(subset)} buckets of one series")
+            # Snapshot the current (= post-SQL-full) state so we can restore
+            # between the two incremental runs.
+            _save_pi_nodes_snapshot(conn)
+
+            # Python incremental
+            calc_run_inc_py = _mark_subset_dirty(conn, subset)
+            inc_py_wall = _run_python_propagation(conn, calc_run_inc_py, set(subset))
+            snap_py_inc = _snapshot_pi_state(conn)
+            shortages_py_inc = _snapshot_shortages(conn)
+
+            # Restore + SQL incremental
+            _restore_pi_nodes_snapshot(conn)
+            calc_run_inc_sql = _mark_subset_dirty(conn, subset)
+            inc_sql_wall = _run_sql_propagation(conn, calc_run_inc_sql)
+            snap_sql_inc = _snapshot_pi_state(conn)
+            shortages_sql_inc = _snapshot_shortages(conn)
+
+            inc_pi_diff = _diff_snapshots(snap_py_inc, snap_sql_inc)
+            inc_sh_diff = _diff_shortages(shortages_py_inc, shortages_sql_inc)
+            print(f"[python-inc] {inc_py_wall:.2f}s | [sql-inc] {inc_sql_wall:.2f}s")
+
     print()
     print("=" * 60)
     print("PARITY REPORT — PI nodes")
@@ -572,7 +741,44 @@ def main() -> int:
         for nid, field, py_val, sql_val in sh_diff["sample_mismatches"]:
             print(f"    {nid}  {field:14s}  py={py_val!r:>20}  sql={sql_val!r:>20}")
     print()
-    ok = (
+    inc_ok = True
+    if inc_pi_diff is not None and inc_sh_diff is not None:
+        print()
+        print("=" * 60)
+        print("PARITY REPORT — incremental PI nodes")
+        print("=" * 60)
+        print(f"  nodes_python              {inc_pi_diff['nodes_python']}")
+        print(f"  nodes_sql                 {inc_pi_diff['nodes_sql']}")
+        print(f"  missing_from_sql          {inc_pi_diff['missing_from_sql']}")
+        print(f"  extra_in_sql              {inc_pi_diff['extra_in_sql']}")
+        print(f"  field_mismatches          {inc_pi_diff['field_mismatches']}")
+        if inc_pi_diff["sample_mismatches"]:
+            print("  Sample mismatches:")
+            for nid, field, py_val, sql_val in inc_pi_diff["sample_mismatches"]:
+                print(f"    {nid}  {field:14s}  py={py_val!r:>12}  sql={sql_val!r:>12}")
+        print()
+        print("=" * 60)
+        print("PARITY REPORT — incremental shortages")
+        print("=" * 60)
+        print(f"  shortages_python          {inc_sh_diff['shortages_python']}")
+        print(f"  shortages_sql             {inc_sh_diff['shortages_sql']}")
+        print(f"  missing_from_sql          {inc_sh_diff['missing_from_sql']}")
+        print(f"  extra_in_sql              {inc_sh_diff['extra_in_sql']}")
+        print(f"  field_mismatches          {inc_sh_diff['field_mismatches']}")
+        if inc_sh_diff["sample_mismatches"]:
+            print("  Sample mismatches:")
+            for nid, field, py_val, sql_val in inc_sh_diff["sample_mismatches"]:
+                print(f"    {nid}  {field:14s}  py={py_val!r:>20}  sql={sql_val!r:>20}")
+        inc_ok = (
+            inc_pi_diff["missing_from_sql"] == 0
+            and inc_pi_diff["extra_in_sql"] == 0
+            and inc_pi_diff["field_mismatches"] == 0
+            and inc_sh_diff["missing_from_sql"] == 0
+            and inc_sh_diff["extra_in_sql"] == 0
+            and inc_sh_diff["field_mismatches"] == 0
+        )
+    print()
+    full_ok = (
         diff["missing_from_sql"] == 0
         and diff["extra_in_sql"] == 0
         and diff["field_mismatches"] == 0
@@ -580,8 +786,12 @@ def main() -> int:
         and sh_diff["extra_in_sql"] == 0
         and sh_diff["field_mismatches"] == 0
     )
-    print(f"PARITY: {'OK' if ok else 'FAILED'}")
-    print(f"SPEEDUP: SQL is {py_wall / max(sql_wall, 1e-9):.2f}x faster ({py_wall:.2f}s -> {sql_wall:.2f}s)")
+    ok = full_ok and inc_ok
+    print(f"PARITY (full):        {'OK' if full_ok else 'FAILED'}")
+    print(f"PARITY (incremental): {'OK' if inc_ok else 'FAILED'}")
+    print(f"SPEEDUP (full):       SQL is {py_wall / max(sql_wall, 1e-9):.2f}x faster ({py_wall:.2f}s -> {sql_wall:.2f}s)")
+    if inc_py_wall > 0:
+        print(f"SPEEDUP (incremental):SQL is {inc_py_wall / max(inc_sql_wall, 1e-9):.2f}x faster ({inc_py_wall:.2f}s -> {inc_sql_wall:.2f}s)")
     return 0 if ok else 1
 
 

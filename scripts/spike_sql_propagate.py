@@ -50,42 +50,88 @@ from bench_propagation import (  # type: ignore[import-not-found]
 
 
 PROPAGATE_SQL = """
--- Tier 3 spike v0.3: window-function projection with demand events.
--- The inventory chain opening[N] = OH + sum_{k<N}(inflows[k] - outflows[k])
--- is a running sum, expressible as a single window over each series.
-WITH per_bucket AS (
+-- Tier 3 spike v0.6: window-function projection over dirty subgraph.
+-- Within each affected projection_series, the lowest dirty bucket is the
+-- "seed". Its opening_stock comes from:
+--   - the OH sum, when seed_seq = 0  (full-recompute case)
+--   - the previous (clean) bucket's already-persisted closing_stock, otherwise
+-- Subsequent dirty buckets chain via the window function.
+-- ASSUMES dirty buckets within a series are contiguous (guaranteed by
+-- expand_dirty_subgraph's downstream cascade through feeds_forward edges).
+WITH dirty_pi AS (
+    SELECT pi.node_id, pi.projection_series_id, pi.bucket_sequence,
+           pi.time_span_start, pi.time_span_end, pi.scenario_id
+    FROM nodes pi
+    JOIN dirty_nodes dn
+      ON dn.node_id = pi.node_id
+     AND dn.scenario_id = pi.scenario_id
+    WHERE dn.calc_run_id = %(calc_run_id)s
+      AND pi.node_type = 'ProjectedInventory'
+      AND pi.scenario_id = %(scenario_id)s
+      AND pi.active = TRUE
+),
+series_first_dirty AS (
+    SELECT projection_series_id, MIN(bucket_sequence) AS seed_seq
+    FROM dirty_pi
+    GROUP BY projection_series_id
+),
+seed_openings AS (
+    -- One row per affected series with the opening for the seed bucket.
     SELECT
-        pi.node_id,
-        pi.projection_series_id,
-        pi.bucket_sequence,
-        pi.time_span_start,
-        pi.time_span_end,
-        -- OH seed: only present on bucket 0. SUM() OVER from start of series
-        -- broadcasts the bucket-0 OH value across all subsequent buckets.
-        CASE WHEN pi.bucket_sequence = 0 THEN COALESCE((
-            SELECT SUM(oh.quantity)
-            FROM edges r
-            JOIN nodes oh ON oh.node_id = r.from_node_id
-            WHERE r.to_node_id = pi.node_id
-              AND r.edge_type = 'replenishes'
-              AND r.scenario_id = pi.scenario_id
-              AND r.active = TRUE
-              AND oh.node_type = 'OnHandSupply'
-              AND oh.active = TRUE
-        ), 0)::numeric ELSE 0::numeric END AS oh_seed,
+        sfd.projection_series_id,
+        sfd.seed_seq,
+        CASE WHEN sfd.seed_seq = 0 THEN
+            COALESCE((
+                SELECT SUM(oh.quantity)
+                FROM nodes pi_seed
+                JOIN edges r ON r.to_node_id = pi_seed.node_id
+                JOIN nodes oh ON oh.node_id = r.from_node_id
+                WHERE pi_seed.projection_series_id = sfd.projection_series_id
+                  AND pi_seed.bucket_sequence = 0
+                  AND pi_seed.scenario_id = %(scenario_id)s
+                  AND pi_seed.active = TRUE
+                  AND r.edge_type = 'replenishes'
+                  AND r.scenario_id = %(scenario_id)s
+                  AND r.active = TRUE
+                  AND oh.node_type = 'OnHandSupply'
+                  AND oh.active = TRUE
+            ), 0)::numeric
+        ELSE
+            COALESCE((
+                SELECT prev.closing_stock
+                FROM nodes prev
+                WHERE prev.projection_series_id = sfd.projection_series_id
+                  AND prev.bucket_sequence = sfd.seed_seq - 1
+                  AND prev.scenario_id = %(scenario_id)s
+                  AND prev.active = TRUE
+            ), 0)::numeric
+        END AS seed_opening
+    FROM series_first_dirty sfd
+),
+per_bucket AS (
+    SELECT
+        dp.node_id,
+        dp.projection_series_id,
+        dp.bucket_sequence,
+        dp.time_span_start,
+        dp.time_span_end,
+        -- Only the seed bucket carries the opening contribution; the rest
+        -- get it via the running-sum window below.
+        CASE WHEN dp.bucket_sequence = so.seed_seq THEN so.seed_opening
+             ELSE 0::numeric END AS oh_seed,
         -- inflows: supply events (non-OH) anchored in this bucket via 'replenishes'
         COALESCE((
             SELECT SUM(s.quantity)
             FROM edges r
             JOIN nodes s ON s.node_id = r.from_node_id
-            WHERE r.to_node_id = pi.node_id
+            WHERE r.to_node_id = dp.node_id
               AND r.edge_type = 'replenishes'
-              AND r.scenario_id = pi.scenario_id
+              AND r.scenario_id = dp.scenario_id
               AND r.active = TRUE
               AND s.node_type IN ('PurchaseOrderSupply','WorkOrderSupply','TransferSupply','PlannedSupply')
               AND s.active = TRUE
-              AND s.time_ref >= pi.time_span_start
-              AND s.time_ref <  pi.time_span_end
+              AND s.time_ref >= dp.time_span_start
+              AND s.time_ref <  dp.time_span_end
         ), 0)::numeric AS inflows,
         -- outflows: demand events consumed in this bucket via 'consumes' edges.
         -- Mirrors propagator.py logic exactly:
@@ -98,37 +144,31 @@ WITH per_bucket AS (
                     WHEN d.time_span_start IS NOT NULL
                          AND d.time_span_end IS NOT NULL
                          AND d.time_span_end > d.time_span_start THEN
-                        -- Cast LHS to numeric(50,28) to force 28 fractional digits in
-                        -- the division — matches Python's Decimal default precision
-                        -- (28 sig digits) byte-for-byte. Without this Postgres rounds
-                        -- to ~16 digits and parity drifts on fractional daily rates.
                         d.quantity::numeric(50, 28)
                         / (d.time_span_end - d.time_span_start)::numeric
                         * GREATEST(
                             0,
-                            LEAST(pi.time_span_end, d.time_span_end)
-                            - GREATEST(pi.time_span_start, d.time_span_start)
+                            LEAST(dp.time_span_end, d.time_span_end)
+                            - GREATEST(dp.time_span_start, d.time_span_start)
                           )::numeric
                     WHEN COALESCE(d.time_ref, d.time_span_start) IS NOT NULL
-                         AND COALESCE(d.time_ref, d.time_span_start) >= pi.time_span_start
-                         AND COALESCE(d.time_ref, d.time_span_start) <  pi.time_span_end THEN
+                         AND COALESCE(d.time_ref, d.time_span_start) >= dp.time_span_start
+                         AND COALESCE(d.time_ref, d.time_span_start) <  dp.time_span_end THEN
                         d.quantity
                     ELSE 0
                 END
             )
             FROM edges c
             JOIN nodes d ON d.node_id = c.from_node_id
-            WHERE c.to_node_id = pi.node_id
+            WHERE c.to_node_id = dp.node_id
               AND c.edge_type = 'consumes'
-              AND c.scenario_id = pi.scenario_id
+              AND c.scenario_id = dp.scenario_id
               AND c.active = TRUE
               AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
               AND d.active = TRUE
         ), 0)::numeric AS outflows
-    FROM nodes pi
-    WHERE pi.node_type = 'ProjectedInventory'
-      AND pi.scenario_id = %(scenario_id)s
-      AND pi.active = TRUE
+    FROM dirty_pi dp
+    JOIN seed_openings so ON so.projection_series_id = dp.projection_series_id
 ),
 projected AS (
     SELECT
@@ -183,6 +223,9 @@ SHORTAGES_SQL = """
 -- severity_score = shortage_qty * days_in_bucket * unit_cost (proxy=1)
 -- shortage_date  = COALESCE(time_span_start, time_ref)
 WITH pi_with_ss AS (
+    -- Restrict detection to the dirty subgraph for this calc_run. Clean PIs'
+    -- shortages from prior runs are left alone here (and then RESOLVE_STALE
+    -- marks them as 'resolved', matching ShortageDetector.resolve_stale).
     SELECT
         pi.scenario_id,
         pi.node_id        AS pi_node_id,
@@ -190,10 +233,12 @@ WITH pi_with_ss AS (
         pi.location_id,
         pi.closing_stock,
         COALESCE(pi.time_span_start, pi.time_ref) AS shortage_date,
-        -- DATE - DATE returns integer days directly in Postgres
         GREATEST((pi.time_span_end - pi.time_span_start), 1) AS days_in_bucket,
         ipp.safety_stock_qty
     FROM nodes pi
+    JOIN dirty_nodes dn
+      ON dn.node_id = pi.node_id
+     AND dn.scenario_id = pi.scenario_id
     LEFT JOIN LATERAL (
         SELECT safety_stock_qty
         FROM item_planning_params
@@ -203,7 +248,8 @@ WITH pi_with_ss AS (
         ORDER BY effective_from DESC
         LIMIT 1
     ) ipp ON TRUE
-    WHERE pi.node_type = 'ProjectedInventory'
+    WHERE dn.calc_run_id = %(calc_run_id)s
+      AND pi.node_type = 'ProjectedInventory'
       AND pi.scenario_id = %(scenario_id)s
       AND pi.active = TRUE
       AND pi.closing_stock IS NOT NULL
