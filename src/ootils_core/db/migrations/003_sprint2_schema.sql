@@ -9,7 +9,12 @@
 -- 002 had: transition_run_id, scenario_id, series_id, affected_start, affected_end
 -- Correct:  id, job_type, transition_date, series_total, series_done
 --
--- Safe to run on a fresh DB (zone_transition_runs has no inbound FK references).
+-- DROP TABLE rationale (CLAUDE.md "migrations are idempotent" carve-out):
+--   This is a one-shot schema repair of the misaligned table created by
+--   migration 002. No production database ran 002 without 003 — they
+--   were shipped together. zone_transition_runs has no inbound FK
+--   references, so the DROP cannot cascade unintended deletions.
+--   Re-running 003 after the fact is a no-op (CREATE TABLE IF NOT EXISTS).
 -- ============================================================
 
 -- Drop the misaligned table from migration 002

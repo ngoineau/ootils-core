@@ -1,6 +1,16 @@
 -- ============================================================
 -- Ootils Core — Migration 024: MRP APICS Schema Fixes
--- Adds missing tables/columns for APICS MRP engine
+-- Adds missing tables/columns for APICS MRP engine.
+--
+-- DROP TABLE rationale (CLAUDE.md "migrations are idempotent" carve-out):
+--   `DROP TABLE IF EXISTS forecast_consumption_log CASCADE` below is a
+--   one-shot repair of a table whose schema was created during dev
+--   work with incorrect columns. The dev environments holding that
+--   stale shape needed a clean slate; no production DB ever held
+--   business data in this table prior to 024. The CASCADE is bounded
+--   (no inbound FKs at the time of authoring). Re-running 024 after
+--   the fact is a no-op because subsequent steps use CREATE TABLE /
+--   ADD COLUMN IF NOT EXISTS.
 -- ============================================================
 
 -- 1. Add llc column to items table (required by LLC calculator)
