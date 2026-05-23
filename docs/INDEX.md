@@ -9,6 +9,8 @@ Resolves R9 of [REVIEW-2026-05.md](REVIEW-2026-05.md).
 ## Start here
 
 - [`QUICKSTART.md`](QUICKSTART.md) — Clone → run → first API call in 5 minutes.
+- [`staging-quickstart.md`](staging-quickstart.md) — Push data from an external system (ERP / WMS / MES / Excel) end-to-end in 4 steps.
+- [`staging-templates/`](staging-templates/) — Per-entity file-format contracts (one `.md` + one `.tsv` per entity).
 - [`../README.md`](../README.md) — Full capability surface and architecture diagram.
 - [`../CLAUDE.md`](../CLAUDE.md) — Context for Claude Code sessions: conventions, commands, architecture map.
 - [`../ROADMAP.md`](../ROADMAP.md) — V1 milestones.
@@ -34,8 +36,9 @@ Operational concerns:
 
 - [`ADR-005-storage-layer.md`](ADR-005-storage-layer.md) — Storage. **Marked superseded** — kept for history, runtime is Postgres via psycopg3.
 - [`ADR-006-blockers-resolution.md`](ADR-006-blockers-resolution.md), [`ADR-007-showstoppers-resolution.md`](ADR-007-showstoppers-resolution.md), [`ADR-008-agent-operability-fixes.md`](ADR-008-agent-operability-fixes.md) — Punctual decisions during sprint hardening.
-- [`ADR-009-import-pipeline.md`](ADR-009-import-pipeline.md) — Ingest pipeline shape.
+- [`ADR-009-import-pipeline.md`](ADR-009-import-pipeline.md) — Ingest pipeline shape (2-step staging + DQ).
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
+- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009.
 
 ## Feature specs (SPEC-*)
 
