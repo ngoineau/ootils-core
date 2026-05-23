@@ -241,6 +241,10 @@ def get_batch_diff(
     try:
         diff = compute_diff(db, batch_id)
     except DiffError as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
@@ -319,6 +323,12 @@ def approve(
             force=body.force,
         )
     except ApprovalError as e:
+        # Roll back any open transaction state so the pooled connection
+        # comes back clean for the next request.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
@@ -378,6 +388,10 @@ def reject(
             reason=body.reason,
         )
     except RejectionError as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
