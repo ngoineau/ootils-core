@@ -84,7 +84,7 @@ def _insert_resource(conn, external_id: str, capacity_per_day: float = 10.0,
     conn.execute(
         """
         INSERT INTO resources (resource_id, external_id, name, resource_type, capacity_per_day, capacity_unit)
-        VALUES (%s, %s, 'Test Resource', %s, %s, 'units')
+        VALUES (%s, %s, 'Test Resource', %s, %s, 'unit')
         """,
         (resource_id, external_id, resource_type, capacity_per_day),
     )
