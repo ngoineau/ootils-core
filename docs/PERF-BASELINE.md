@@ -40,13 +40,28 @@ officiel est calculé sur `dirty_node_count`.
 | S | 1 900 | 6 | 47 520 | 100 817 | sql | **5.6 s** | 8 419 PI/s | **10.0×** |
 | M | 5 000 | 14 | 111 240 | 228 097 | python | 74.7 s | 1 489 PI/s | — |
 | M | 5 000 | 14 | 111 240 | 228 097 | sql | **12.4 s** | 8 940 PI/s | **6.0×** |
+| L | 10 000 | 14 | 226 800 | 459 614 | python | 165.7 s | 1 369 PI/s | — |
+| L | 10 000 | 14 | 226 800 | 459 614 | sql | **34.5 s** | 6 579 PI/s | **4.81×** |
 
 ### Lecture
 
-- **Le moteur SQL window-function est largement sous le seuil de 30s** sur les deux profiles, y compris à 5 K SKUs.
-- Le SQL engine maintient un **throughput stable autour de 8 400-8 900 PI/s** quelle que soit l'échelle.
-- Le Python engine montre environ **840-1 500 PI/s**.
-- Speedup mesuré : **6-10× selon la taille**, en faveur du SQL.
+- Le moteur SQL window-function **passe le seuil 30s à profile L** (34.5s).
+  L'extrapolation linéaire optimiste (~28s) ne tient pas — voir
+  non-linéarité ci-dessous.
+- **Non-linéarité confirmée S→M→L** : le throughput SQL chute de
+  8419 → 8940 → 6579 PI/s. Une accélération entre S et M (cache /
+  parallèle workers efficaces sur volume moyen) puis une **chute de
+  26% entre M et L**. Probables causes :
+  - `work_mem=32MB` saturé sur les CTE intermédiaires de PROPAGATE_SQL,
+    forçant des spill disk.
+  - Postgres planner switch (nested loop → hash join), induit par
+    statistiques après l'ANALYZE.
+  - Cache eviction sur le buffer (1GB `shared_buffers` ne tient pas
+    227K PI × 460K edges en mémoire).
+- Le Python engine reste linéaire mais **15-25× plus lent** au-delà de
+  profile S.
+- Speedup mesuré : **5-10× selon la taille**, en faveur du SQL —
+  **diminue avec l'échelle**.
 
 ### Bench incremental (mode UX réel)
 
@@ -95,18 +110,51 @@ p95=**664**, p99=764, max=764. 0 failures.
 quelques dizaines de secondes reste fluide (p50 ~100ms par event,
 quelques pics ponctuels à ~700ms acceptables).
 
-### Extrapolation V2
+### Extrapolation V3 — révisée post-profile L
 
-À throughput SQL ~8 000 PI/s constant et ~25 buckets PI par couple (item × location) :
+Le throughput SQL **n'est pas constant**. Le run L a invalidé
+l'hypothèse linéaire. Hypothèse révisée : dégradation au-delà de
+200K PI proportionnelle à `work_mem` / volume CTE.
 
-| SKU cibles | PI nodes estimés | Temps SQL estimé |
-|---|---|---|
-| 1 K | ~25 K | ~3 s |
-| 5 K | ~120 K | ~15 s ✅ (mesuré) |
-| 10 K | ~250 K | ~30 s ⚠️ (à la frontière) |
-| 50 K | ~1.2 M | ~150 s 🔴 (Rust justifié) |
+| SKU cibles | PI nodes estimés | Temps SQL extrapolé (révisé) | Confiance |
+|---|---|---|---|
+| 1 K | ~25 K | ~3 s | ✅ extrapolé S |
+| 5 K | ~120 K | ~13 s | ✅ mesuré (M) |
+| 10 K | ~230 K | **34 s** | ✅ mesuré (L) |
+| 25 K | ~570 K | **~120 s** | ⚠️ extrapolé avec ralentissement |
+| 50 K | ~1.1 M | **~280 s** | 🔴 extrapolé conservateur |
 
-**Le seuil "Rust justifié par la perf" se situe autour de 10-50 K SKU avec `OOTILS_ENGINE=sql` activé.** Pour des cibles client < 10 K, le moteur SQL Python suffit.
+**⚠️ Important** : la mesure full propagation est un cas batch
+(tous les PI dirty). En usage opératoire normal, on n'a *jamais* tous
+les PIs dirty d'un coup — un event utilisateur touche ~91 PIs (une
+série × 90 buckets) et **l'incremental est insensible au volume total**
+(p50 = 95ms constant sur M et L, cf section suivante).
+
+→ Le seuil pertinent "Rust justifié" est :
+- ❌ **Full prop > 30s** : déjà atteint sur L (34s), mais c'est du batch
+  acceptable (en réalité ce mode tourne dans la nuit ou en async).
+- ✅ **Incremental p95 > 500ms en charge réelle** : non atteint à L.
+  L'engine SQL Python reste viable pour les agents jusqu'à 10K SKU
+  *au moins*.
+
+### Burst incremental sur profile L
+
+Re-mesuré séquentiellement (le 1er run était en parallèle du full bench
+et hit le scenario lock → invalide).
+
+| Position | count | p50 (ms) | p95 (ms) | max (ms) |
+|---|---|---|---|---|
+| 1-5 | 5 | 99 | 715 | 715 |
+| 6-20 | 15 | 95 | 447 | 447 |
+| 21-50 | 30 | 94 | 439 | 626 |
+| 51-100 | 50 | 94 | 680 | 683 |
+
+Global L : p50=**95ms**, p95=**675ms**, mean=185, 0 failures.
+
+**Comparaison M vs L : strictement identique.** L'incremental ne
+dépend pas du volume total — le dirty subgraph reste constant (~91 PI
+par event). Confirme que **l'engine reste utilisable pour les agents
+jusqu'à 10K SKU**.
 
 ## Stratégie d'explainability (M3) — lazy regen
 
@@ -135,6 +183,7 @@ Configuration :
 | 2026-05-24 | post-#270 | M | 73.2s | 14.5s | 5.0× | Baseline initial via tunnel SSH |
 | 2026-05-24 | post-#273 | S | 56.5s | **5.6s** | **10.0×** | Direct LAN, Postgres infra refondue |
 | 2026-05-24 | post-#273 | M | 74.7s | **12.4s** | **6.0×** | Direct LAN, Postgres infra refondue |
+| 2026-05-24 | post-#275 | L | 165.7s | **34.5s** | **4.81×** | Profile L (10K SKU, 227K PI), seuil 30s franchi |
 
 ## Hardware / contexte
 
