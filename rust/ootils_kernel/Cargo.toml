@@ -1,0 +1,31 @@
+[package]
+name = "ootils_kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Rust kernel for ootils-core propagation engine (ADR-016)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ootils_kernel"
+# cdylib = produces a shared library (.so / .pyd / .dylib) for PyO3
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 0.22 stable, abi3 stable ABI so one wheel works across Python 3.11+
+pyo3 = { version = "0.22", features = ["abi3-py311", "extension-module"] }
+
+# Domain types — must round-trip with Python Decimal + date precisely.
+rust_decimal = { version = "1.36", features = ["serde-with-str", "db-postgres"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Postgres client — blocking variant (no tokio), to keep the kernel
+# simple. ADR-016 §"out of scope" intentionally excludes async runtime.
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-uuid-1"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

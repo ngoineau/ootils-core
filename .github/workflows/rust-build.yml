@@ -1,0 +1,70 @@
+name: Rust kernel build
+
+# Validates the Rust extension builds cleanly on Linux + Windows and the
+# Python smoke tests pass against the freshly-compiled wheel. Gates the
+# ADR-016 week-1 "foundation" go/no-go.
+#
+# Triggered on any PR that touches:
+# - rust/ootils_kernel/** (the crate)
+# - tests/test_rust_kernel_smoke.py
+# - this workflow file
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust/ootils_kernel/**"
+      - "tests/test_rust_kernel_smoke.py"
+      - ".github/workflows/rust-build.yml"
+  pull_request:
+    paths:
+      - "rust/ootils_kernel/**"
+      - "tests/test_rust_kernel_smoke.py"
+      - ".github/workflows/rust-build.yml"
+  workflow_dispatch:  # manual trigger for ad-hoc runs
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/ootils_kernel/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/ootils_kernel/Cargo.lock', 'rust/ootils_kernel/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install maturin + pytest
+        run: pip install --upgrade pip maturin pytest
+
+      - name: Build the Rust wheel
+        working-directory: rust/ootils_kernel
+        run: maturin build --release --out dist
+
+      - name: Install the built wheel
+        shell: bash
+        run: pip install --force-reinstall rust/ootils_kernel/dist/*.whl
+
+      - name: Run smoke tests
+        run: pytest tests/test_rust_kernel_smoke.py -v
