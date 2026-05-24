@@ -32,20 +32,39 @@ officiel est calculé sur `dirty_node_count`.
 
 ## Résultats
 
-### Run du 2026-05-24
+### Run du 2026-05-24 — direct LAN (Postgres infra refondue)
 
 | Profile | Items | Locations | PI nodes | Edges | Engine | Elapsed | Throughput | Speedup |
 |---|---|---|---|---|---|---|---|---|
-| S | 1 900 | 6 | 47 520 | 100 817 | python | 47.2 s | 1 008 PI/s | — |
-| S | 1 900 | 6 | 47 520 | 100 817 | sql | **5.4 s** | 8 873 PI/s | **8.8×** |
-| M | 5 000 | 14 | 116 910 | 239 805 | python | 73.2 s | 1 597 PI/s | — |
-| M | 5 000 | 14 | 116 910 | 239 805 | sql | **14.5 s** | 8 055 PI/s | **5.0×** |
+| S | 1 900 | 6 | 47 520 | 100 817 | python | 56.5 s | 841 PI/s | — |
+| S | 1 900 | 6 | 47 520 | 100 817 | sql | **5.6 s** | 8 419 PI/s | **10.0×** |
+| M | 5 000 | 14 | 111 240 | 228 097 | python | 74.7 s | 1 489 PI/s | — |
+| M | 5 000 | 14 | 111 240 | 228 097 | sql | **12.4 s** | 8 940 PI/s | **6.0×** |
 
 ### Lecture
 
 - **Le moteur SQL window-function est largement sous le seuil de 30s** sur les deux profiles, y compris à 5 K SKUs.
-- Le SQL engine maintient un **throughput stable autour de 8 000 PI/s** quelle que soit l'échelle.
-- Le Python engine montre environ **1 000-1 600 PI/s**, à comparer aux 3-6× speedup annoncés historiquement — la mesure réelle est plutôt **5-9× selon la taille**.
+- Le SQL engine maintient un **throughput stable autour de 8 400-8 900 PI/s** quelle que soit l'échelle.
+- Le Python engine montre environ **840-1 500 PI/s**.
+- Speedup mesuré : **6-10× selon la taille**, en faveur du SQL.
+
+### Bench incremental (mode UX réel)
+
+Mesuré via `scripts/bench_incremental.py` sur profile M, 10 events
+`demand_qty_changed` sur ForecastDemand triggers (avec PI couplage garanti) :
+
+| Métrique | SQL direct LAN | Note |
+|---|---|---|
+| p50 latence | **163 ms** | — |
+| mean | 214 ms | — |
+| p95 | 545 ms | — |
+| max | 545 ms | — |
+| Dirty subgraph (constant) | 91 PI | item × loc series sur 90 buckets |
+| Throughput | 425 PI/s | par event, overhead orchestration inclus |
+
+**Cible UX p95 < 500ms : atteinte en direct LAN.** Les mesures précédentes
+à p95 7 s venaient d'un tunnel SSH qui ajoutait ~500 ms/event d'overhead
+network.
 
 ### Extrapolation V2
 
@@ -83,16 +102,22 @@ Configuration :
 
 | Date | Commit | Profile | Python | SQL | Speedup | Notes |
 |---|---|---|---|---|---|---|
-| 2026-05-24 | post-#270 | S | 47.2s | 5.4s | 8.8× | Baseline initial |
-| 2026-05-24 | post-#270 | M | 73.2s | 14.5s | 5.0× | Baseline initial |
+| 2026-05-24 | post-#270 | S | 47.2s | 5.4s | 8.8× | Baseline initial via tunnel SSH (15432) |
+| 2026-05-24 | post-#270 | M | 73.2s | 14.5s | 5.0× | Baseline initial via tunnel SSH |
+| 2026-05-24 | post-#273 | S | 56.5s | **5.6s** | **10.0×** | Direct LAN, Postgres infra refondue |
+| 2026-05-24 | post-#273 | M | 74.7s | **12.4s** | **6.0×** | Direct LAN, Postgres infra refondue |
 
 ## Hardware / contexte
 
-- Postgres 16 sur VM Debian (192.168.1.176)
-- Postgres tuning : `shared_buffers=1GB`, `work_mem=32MB`, `jit=off`, parallel workers capped à 2 cores (cf `docker-compose.yml`)
+- Postgres 16.13 sur VM Debian (192.168.1.176:5432) — infra refondue 2026-05-24
 - Python 3.13 client (machine dev locale)
-- Réseau LAN gigabit
+- Réseau LAN gigabit, **accès direct** (pas de tunnel SSH)
 - 2026-05-24 — pas de charge concurrente sur la VM
+
+**À noter — biais tunnel SSH** : les mesures initiales (post-#270) passaient
+par un tunnel SSH local (`127.0.0.1:15432`) qui ajoutait ~500 ms par event
+en mode incremental (négligeable en bulk mais catastrophique pour l'UX). Le
+direct LAN supprime cet overhead. Toujours bencher direct quand possible.
 
 ## Comment refaire le bench
 
@@ -101,9 +126,13 @@ Configuration :
 DATABASE_URL="postgresql://ootils:ootils@<host>:5432/postgres" \
     python scripts/seed_realistic_dataset.py --profile S --dbname ootils_bench_s
 
-# 2. Lancer le bench (compare automatiquement python et sql)
+# 2a. Full propagation bench (compare python vs sql)
 DATABASE_URL="postgresql://ootils:ootils@<host>:5432/ootils_bench_s" \
     python scripts/bench_engine_comparison.py
+
+# 2b. Incremental UX bench (p50/p95 latency per event)
+DATABASE_URL="postgresql://ootils:ootils@<host>:5432/ootils_bench_m" \
+    python scripts/bench_incremental.py --n 20 --warmup 5 --engine sql
 ```
 
 À mettre à jour à chaque modification du propagator ou de la couche SQL.
