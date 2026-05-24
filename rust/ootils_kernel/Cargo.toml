@@ -1,0 +1,26 @@
+[package]
+name = "ootils_kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Rust kernel for ootils-core propagation engine (ADR-016)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ootils_kernel"
+# cdylib = produces a shared library (.so / .pyd / .dylib) for PyO3
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 0.22 stable, abi3 stable ABI so one wheel works across Python 3.11+
+pyo3 = { version = "0.22", features = ["abi3-py311", "extension-module"] }
+
+# Domain types — must round-trip with Python Decimal + date precisely.
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
