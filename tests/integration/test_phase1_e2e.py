@@ -85,10 +85,16 @@ def test_phase1_forecast_mps_crp_atp_rest_e2e(api_client, auth, seeded_db):
                 historical,
             )
 
+        # Migration 034 (ADR-014 D1+D2): work_centers merged into resources.
+        # Maps: work_center_id→resource_id, code→external_id, description→name.
+        # routing_operations.work_center_id renamed to resource_id.
         conn.execute(
             """
-            INSERT INTO work_centers (work_center_id, code, description, capacity_per_day, efficiency, active)
-            VALUES (%s, %s, 'Phase 1 E2E Cell', 80, 1.0, true)
+            INSERT INTO resources (
+                resource_id, external_id, name, resource_type,
+                capacity_per_day, capacity_unit, efficiency, active
+            )
+            VALUES (%s, %s, 'Phase 1 E2E Cell', 'work_center', 80, 'unit', 1.0, true)
             """,
             (work_center_id, f"E2E-WC-{uuid4().hex[:8]}"),
         )
@@ -102,7 +108,7 @@ def test_phase1_forecast_mps_crp_atp_rest_e2e(api_client, auth, seeded_db):
         conn.execute(
             """
             INSERT INTO routing_operations (
-                operation_id, routing_id, sequence, work_center_id,
+                operation_id, routing_id, sequence, resource_id,
                 setup_time, run_time_per_unit, description, active
             ) VALUES (%s, %s, 10, %s, 2, 0.5, 'Assemble', true)
             """,

@@ -492,41 +492,46 @@ class CRPEngine:
             Dictionary mapping work_center_id to WorkCenter
         """
         work_centers: Dict[UUID, WorkCenter] = {}
-        
+
         with self._conn.cursor() as cur:
+            # Migration 034 (ADR-014 D1): work_centers merged into resources.
+            # The engine does not discriminate by resource_type — every active
+            # row in `resources` is schedulable. We map DB columns to the
+            # internal WorkCenter dataclass: resource_id → work_center_id,
+            # external_id → code, name → description.
             if work_center_ids:
                 placeholders = ",".join("%s" for _ in work_center_ids)
                 cur.execute(f"""
-                    SELECT 
-                        work_center_id,
-                        code,
-                        description,
+                    SELECT
+                        resource_id,
+                        external_id,
+                        name,
                         capacity_per_day,
                         efficiency,
                         calendar_id,
                         active
-                    FROM work_centers
-                    WHERE work_center_id IN ({placeholders})
+                    FROM resources wc
+                    WHERE wc.resource_id IN ({placeholders})
                       AND active = true
                 """, work_center_ids)
             else:
                 cur.execute("""
-                    SELECT 
-                        work_center_id,
-                        code,
-                        description,
+                    SELECT
+                        resource_id,
+                        external_id,
+                        name,
                         capacity_per_day,
                         efficiency,
                         calendar_id,
                         active
-                    FROM work_centers
+                    FROM resources wc
                     WHERE active = true
                 """)
-            
+
             for row in cur.fetchall():
                 wc_id, code, desc, cap, eff, cal_id, active = _row_values(
                     row,
-                    ["work_center_id", "code", "description", "capacity_per_day", "efficiency", "calendar_id", "active"],
+                    ["resource_id", "external_id", "name", "capacity_per_day", "efficiency", "calendar_id", "active"],
                 )
                 work_centers[wc_id] = WorkCenter(
                     work_center_id=wc_id,
@@ -537,7 +542,7 @@ class CRPEngine:
                     calendar_id=cal_id,
                     active=active,
                 )
-        
+
         return work_centers
     
     def _fetch_planned_orders(
@@ -665,11 +670,11 @@ class CRPEngine:
                 routing_ids = list(routing_map.keys())
                 placeholders = ",".join("%s" for _ in routing_ids)
                 cur.execute(f"""
-                    SELECT 
+                    SELECT
                         operation_id,
                         routing_id,
                         sequence,
-                        work_center_id,
+                        resource_id,
                         setup_time,
                         run_time_per_unit,
                         description,
@@ -679,11 +684,16 @@ class CRPEngine:
                       AND active = true
                     ORDER BY routing_id, sequence
                 """, routing_ids)
-                
+
+                # Migration 034: routing_operations.work_center_id renamed
+                # to resource_id. We keep the internal Python attribute
+                # `Operation.work_center_id` so the rest of the engine
+                # (load aggregation, suggest_resolutions, etc.) doesn't
+                # need to change.
                 for row in cur.fetchall():
                     op_id, r_id, seq, wc_id, setup, run, desc, active = _row_values(
                         row,
-                        ["operation_id", "routing_id", "sequence", "work_center_id", "setup_time", "run_time_per_unit", "description", "active"],
+                        ["operation_id", "routing_id", "sequence", "resource_id", "setup_time", "run_time_per_unit", "description", "active"],
                     )
                     op = Operation(
                         operation_id=op_id,
@@ -810,8 +820,15 @@ class CRPEngine:
         # Fetch planned orders that contribute to this work center on this date
         # These are orders whose operations fall on the overload date
         with self._conn.cursor() as cur:
+            # Migration 034: work_centers merged into resources.
+            #   wc.code         → wc.external_id
+            #   wc.work_center_id → wc.resource_id
+            #   op.work_center_id → op.resource_id
+            # The alias `wc` and the SQL column alias `work_center_code`
+            # are kept so downstream Python (suggestion dict keys) is
+            # untouched.
             cur.execute("""
-                SELECT 
+                SELECT
                     ps.planned_supply_id,
                     ps.item_id,
                     ps.quantity,
@@ -822,15 +839,15 @@ class CRPEngine:
                     op.sequence,
                     op.run_time_per_unit,
                     op.setup_time,
-                    wc.code AS work_center_code
+                    wc.external_id AS work_center_code
                 FROM planned_supply ps
                 JOIN items i ON ps.item_id = i.item_id
                 JOIN routings r ON i.item_id = r.item_id AND r.active = true
                 JOIN routing_operations op ON r.routing_id = op.routing_id AND op.active = true
-                JOIN work_centers wc ON op.work_center_id = wc.work_center_id
+                JOIN resources wc ON op.resource_id = wc.resource_id
                 WHERE ps.due_date >= %s
                   AND ps.due_date <= %s
-                  AND wc.work_center_id = %s
+                  AND wc.resource_id = %s
                   AND ps.status IN ('RELEASED', 'APPROVED', 'PLANNED')
                 ORDER BY ps.due_date DESC, op.sequence DESC
             """, (horizon_start, horizon_end, work_center_id))

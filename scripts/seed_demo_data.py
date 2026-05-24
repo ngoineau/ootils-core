@@ -104,9 +104,9 @@ def seed(conn):
         INSERT INTO resources (resource_id, external_id, name, resource_type,
                                location_id, capacity_per_day, capacity_unit)
         VALUES (%s, 'LINE-ATL-01', 'Atlanta Assembly Line 1', 'line',
-                %s, 480.0, 'minutes'),
+                %s, 480.0, 'minute'),
                (%s, 'LINE-LAX-01', 'Los Angeles Assembly Line 1', 'line',
-                %s, 480.0, 'minutes')
+                %s, 480.0, 'minute')
         ON CONFLICT (external_id) DO UPDATE
             SET name = EXCLUDED.name,
                 location_id = EXCLUDED.location_id,

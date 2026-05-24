@@ -102,10 +102,16 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
                 historical,
             )
 
+        # Migration 034 (ADR-014 D1): work_centers merged into resources.
+        # Maps: work_center_id→resource_id, code→external_id,
+        # description→name. resource_type='work_center', capacity_unit='unit'.
         conn.execute(
             """
-            INSERT INTO work_centers (work_center_id, code, description, capacity_per_day, efficiency, active)
-            VALUES (%s, %s, 'Demo assembly cell', 80, 1.0, true)
+            INSERT INTO resources (
+                resource_id, external_id, name, resource_type,
+                capacity_per_day, capacity_unit, efficiency, active
+            )
+            VALUES (%s, %s, 'Demo assembly cell', 'work_center', 80, 'unit', 1.0, true)
             """,
             (work_center_id, f"DEMO-WC-{uuid4().hex[:8]}"),
         )
@@ -116,10 +122,11 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
             """,
             (routing_id, item_id),
         )
+        # Migration 034: routing_operations.work_center_id renamed to resource_id.
         conn.execute(
             """
             INSERT INTO routing_operations (
-                operation_id, routing_id, sequence, work_center_id,
+                operation_id, routing_id, sequence, resource_id,
                 setup_time, run_time_per_unit, description, active
             ) VALUES (%s, %s, 10, %s, 2, 0.5, 'Assemble', true)
             """,

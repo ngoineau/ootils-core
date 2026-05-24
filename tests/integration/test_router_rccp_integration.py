@@ -100,11 +100,13 @@ def _insert_resource(
 ) -> dict:
     """Insert a resource row + corresponding 'Resource' graph node."""
     resource_id = uuid4()
+    # Migration 034 (ADR-014 D2) restricted capacity_unit to ('unit', 'minute').
+    # Legacy 'hours' violates the new CHECK constraint; default to 'unit'.
     conn.execute(
         """
         INSERT INTO resources
             (resource_id, external_id, name, resource_type, capacity_per_day, capacity_unit, location_id)
-        VALUES (%s, %s, 'Test Resource', %s, %s, 'hours', %s)
+        VALUES (%s, %s, 'Test Resource', %s, %s, 'unit', %s)
         """,
         (resource_id, external_id, resource_type, capacity_per_day, location_id),
     )
