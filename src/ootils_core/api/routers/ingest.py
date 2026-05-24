@@ -2424,3 +2424,240 @@ async def ingest_planning_params(
     ingest_response = _ok(inserted, updated, len(body.params), results, batch_id=batch_id, dq_status=dq_status)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
+
+
+# ─────────────────────────────────────────────────────────────
+# 12. POST /v1/ingest/routings (ADR-014 D2 — typed time units)
+# ─────────────────────────────────────────────────────────────
+#
+# Full-reload per (item, sequence). One routing per item in V1
+# (sequence defaults to 1). Each routing carries N operations.
+# Each operation declares its time_unit; must match the target
+# resource's capacity_unit (ADR-014 D2). Mismatch = 422.
+#
+# Normalisation at ingest: time_unit='hour' is converted to 'minute'
+# (run_time_per_unit and setup_time multiplied by 60) before storage.
+
+_VALID_TIME_UNITS_INGEST = {"unit", "minute", "hour"}
+_VALID_TIME_UNITS_DB = {"unit", "minute"}
+
+
+class RoutingOperationRow(BaseModel):
+    sequence: int = Field(..., gt=0, description="Operation sequence within the routing (1, 2, 3...).")
+    resource_external_id: str = Field(..., description="Target resource (work_center / machine / line).")
+    setup_time: float = Field(default=0.0, ge=0, description="Setup time (per routing run, not per unit).")
+    run_time_per_unit: float = Field(default=0.0, ge=0, description="Time consumed per produced unit.")
+    time_unit: str = Field(default="unit", description="Unit for setup_time + run_time_per_unit. One of: unit, minute, hour. 'hour' is normalized to minute (x60) at ingest.")
+    description: Optional[str] = None
+
+    @field_validator("resource_external_id")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("resource_external_id must not be empty")
+        return v
+
+    @field_validator("time_unit")
+    @classmethod
+    def valid_time_unit(cls, v: str) -> str:
+        if v not in _VALID_TIME_UNITS_INGEST:
+            raise ValueError(f"time_unit must be one of {sorted(_VALID_TIME_UNITS_INGEST)}")
+        return v
+
+
+class RoutingRow(BaseModel):
+    item_external_id: str = Field(..., description="Item this routing produces.")
+    sequence: int = Field(default=1, gt=0, description="Routing sequence per item. V1 fixes sequence=1.")
+    description: Optional[str] = None
+    operations: list[RoutingOperationRow] = Field(..., min_length=1, description="Operations list, at least one.")
+
+    @field_validator("item_external_id")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("item_external_id must not be empty")
+        return v
+
+    @field_validator("operations")
+    @classmethod
+    def unique_operation_sequences(cls, ops: list[RoutingOperationRow]) -> list[RoutingOperationRow]:
+        seqs = [op.sequence for op in ops]
+        if len(seqs) != len(set(seqs)):
+            raise ValueError("operations must have unique sequence numbers within a routing")
+        return ops
+
+
+class IngestRoutingsRequest(BaseModel):
+    routings: list[RoutingRow]
+    dry_run: bool = False
+
+
+def _normalize_op_time_unit(op: RoutingOperationRow) -> tuple[str, float, float]:
+    """Return (db_time_unit, setup_time_normalized, run_time_per_unit_normalized).
+
+    'hour' → 'minute' with x60 scaling.
+    'unit' and 'minute' stored as-is.
+    """
+    if op.time_unit == "hour":
+        return ("minute", op.setup_time * 60.0, op.run_time_per_unit * 60.0)
+    return (op.time_unit, op.setup_time, op.run_time_per_unit)
+
+
+@router.post(
+    "/routings",
+    response_model=IngestResponse,
+    summary="Import routings (with typed time units, ADR-014 D2)",
+    description=(
+        "Full-reload per (item, sequence). Each routing carries N operations. "
+        "Each operation declares its time_unit (unit | minute | hour); hour is "
+        "normalized to minute at ingest. The op's normalized time_unit must "
+        "match the target resource's capacity_unit — mismatch = 422."
+    ),
+)
+async def ingest_routings(
+    body: IngestRoutingsRequest,
+    request: Request,
+    response: Response,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """Full-reload routings + operations per (item, sequence). ADR-014 D2 unit checks at ingest."""
+    # 1. Resolve item + resource external_ids in batch
+    item_ext_ids = list({r.item_external_id for r in body.routings})
+    resource_ext_ids = list({
+        op.resource_external_id
+        for r in body.routings
+        for op in r.operations
+    })
+
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+    resource_rows = db.execute(
+        "SELECT external_id, resource_id, capacity_unit FROM resources WHERE external_id = ANY(%s)",
+        (resource_ext_ids,),
+    ).fetchall() if resource_ext_ids else []
+    resource_map: dict[str, dict] = {
+        r["external_id"]: {"resource_id": r["resource_id"], "capacity_unit": r["capacity_unit"]}
+        for r in resource_rows
+    }
+
+    # 2. Validate FK + unit cohérence in one pass — collect ALL errors
+    errors: list[dict] = []
+    for i, r in enumerate(body.routings):
+        row_errs = []
+        if r.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{r.item_external_id}' not found in DB")
+        for op_idx, op in enumerate(r.operations):
+            if op.resource_external_id not in resource_map:
+                row_errs.append(
+                    f"operations[{op_idx}].resource_external_id '{op.resource_external_id}' not found in DB"
+                )
+                continue
+            # ADR-014 D2 unit cohérence: normalized op time_unit must match resource capacity_unit
+            normalized_unit, _, _ = _normalize_op_time_unit(op)
+            res_unit = resource_map[op.resource_external_id]["capacity_unit"]
+            if normalized_unit != res_unit:
+                row_errs.append(
+                    f"operations[{op_idx}] time_unit '{op.time_unit}' (normalized to '{normalized_unit}') "
+                    f"does not match resource '{op.resource_external_id}' capacity_unit '{res_unit}' "
+                    f"— ADR-014 D2 forbids unit ↔ minute mixing"
+                )
+        if row_errs:
+            errors.append({
+                "item_external_id": r.item_external_id,
+                "row": i,
+                "errors": row_errs,
+            })
+
+    if errors:
+        _raise_422(errors)
+
+    if body.dry_run:
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.routings), inserted=0, updated=0, errors=0),
+            results=[
+                {
+                    "item_external_id": r.item_external_id,
+                    "sequence": r.sequence,
+                    "operations_count": len(r.operations),
+                    "action": "dry_run",
+                }
+                for r in body.routings
+            ],
+        )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "routings", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db, "routings", body.routings,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
+    inserted = updated = 0
+    results: list[dict] = []
+
+    for r in body.routings:
+        item_id = item_map[r.item_external_id]
+        # Look up existing routing for (item, sequence)
+        existing = db.execute(
+            "SELECT routing_id FROM routings WHERE item_id = %s AND sequence = %s AND active = TRUE",
+            (item_id, r.sequence),
+        ).fetchone()
+
+        if existing is not None:
+            # Full-reload: DELETE existing routing (CASCADE delete operations) + INSERT new.
+            # Preserves the routing_id is NOT a goal — we re-create with a new id.
+            db.execute("DELETE FROM routings WHERE routing_id = %s", (existing["routing_id"],))
+            action = "replaced"
+            updated += 1
+        else:
+            action = "created"
+            inserted += 1
+
+        # INSERT routing
+        routing_id = uuid4()
+        db.execute(
+            """
+            INSERT INTO routings (routing_id, item_id, sequence, description, active)
+            VALUES (%s, %s, %s, %s, TRUE)
+            """,
+            (routing_id, item_id, r.sequence, r.description),
+        )
+
+        # INSERT operations (normalize units)
+        for op in r.operations:
+            db_unit, setup_n, run_per_unit_n = _normalize_op_time_unit(op)
+            resource_id = resource_map[op.resource_external_id]["resource_id"]
+            db.execute(
+                """
+                INSERT INTO routing_operations (
+                    operation_id, routing_id, sequence, resource_id,
+                    setup_time, run_time_per_unit, time_unit, description, active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                """,
+                (uuid4(), routing_id, op.sequence, resource_id,
+                 setup_n, run_per_unit_n, db_unit, op.description),
+            )
+
+        results.append({
+            "item_external_id": r.item_external_id,
+            "sequence": r.sequence,
+            "routing_id": str(routing_id),
+            "operations_count": len(r.operations),
+            "action": action,
+        })
+
+    logger.info(
+        "ingest.routings total=%d created=%d replaced=%d",
+        len(body.routings), inserted, updated,
+    )
+    dq_status = _trigger_dq(db, batch_id)
+    ingest_response = _ok(inserted, updated, len(body.routings), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
