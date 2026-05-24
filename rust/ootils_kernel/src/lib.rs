@@ -23,6 +23,8 @@
 //! 3.13+ without rebuild.
 
 mod io;
+mod kernel;
+mod propagator;
 
 use chrono::NaiveDate;
 use pyo3::prelude::*;
@@ -120,6 +122,70 @@ fn load_subgraph_stats<'py>(
     Ok(d)
 }
 
+/// Week 3: project all dirty PIs in the (calc_run_id, scenario_id) subgraph
+/// **in memory**, without writing back to Postgres. Returns a list of dicts
+/// where each entry corresponds to one PI, ready for parity comparison
+/// against the Python and SQL engines.
+///
+/// Each dict has the keys:
+///   - "node_id"      : str (UUID)
+///   - "opening_stock": str (Decimal)
+///   - "inflows"      : str (Decimal)
+///   - "outflows"     : str (Decimal)
+///   - "closing_stock": str (Decimal)
+///   - "has_shortage" : bool
+///   - "shortage_qty" : str (Decimal)
+///
+/// Also returns metadata in a separate dict (`stats`) with timings.
+#[pyfunction]
+fn project_subgraph<'py>(
+    py: Python<'py>,
+    dsn: &str,
+    calc_run_id_str: &str,
+    scenario_id_str: &str,
+) -> PyResult<(Vec<Bound<'py, pyo3::types::PyDict>>, Bound<'py, pyo3::types::PyDict>)> {
+    let calc_run_id = parse_uuid(calc_run_id_str)?;
+    let scenario_id = parse_uuid(scenario_id_str)?;
+
+    let t_load_start = std::time::Instant::now();
+    let mut loader = io::Loader::connect(dsn).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("postgres connect failed: {e}"))
+    })?;
+    let sg = loader
+        .load_subgraph(calc_run_id, scenario_id)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}")))?;
+    let load_ms = t_load_start.elapsed().as_secs_f64() * 1000.0;
+
+    let t_compute_start = std::time::Instant::now();
+    let projection = propagator::project(&sg);
+    let compute_ms = t_compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Serialize the results back to Python.
+    let mut out: Vec<Bound<'py, pyo3::types::PyDict>> = Vec::with_capacity(projection.len());
+    for (node_id, r) in &projection.results {
+        let d = pyo3::types::PyDict::new_bound(py);
+        d.set_item("node_id", node_id.to_string())?;
+        d.set_item("opening_stock", r.opening_stock.to_string())?;
+        d.set_item("inflows", r.inflows.to_string())?;
+        d.set_item("outflows", r.outflows.to_string())?;
+        d.set_item("closing_stock", r.closing_stock.to_string())?;
+        d.set_item("has_shortage", r.has_shortage)?;
+        d.set_item("shortage_qty", r.shortage_qty.to_string())?;
+        out.push(d);
+    }
+
+    let stats = pyo3::types::PyDict::new_bound(py);
+    stats.set_item("n_dirty_pis", sg.n_dirty_pis())?;
+    stats.set_item("n_supplies", sg.n_supplies())?;
+    stats.set_item("n_demands", sg.n_demands())?;
+    stats.set_item("n_series_seeds", sg.n_series_seeds())?;
+    stats.set_item("n_shortages_detected", projection.n_shortages())?;
+    stats.set_item("load_ms", load_ms)?;
+    stats.set_item("compute_ms", compute_ms)?;
+
+    Ok((out, stats))
+}
+
 #[pymodule]
 fn ootils_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(echo, m)?)?;
@@ -127,5 +193,6 @@ fn ootils_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(days_between, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(load_subgraph_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(project_subgraph, m)?)?;
     Ok(())
 }
