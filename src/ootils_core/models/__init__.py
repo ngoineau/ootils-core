@@ -366,6 +366,21 @@ class CalcRun:
     triggered_by_event_ids: list[UUID] = field(default_factory=list)
     is_full_recompute: bool = False
     dirty_node_count: Optional[int] = None
+
+    # NOTE — semantic divergence between engines (2026-05-24):
+    #   - PropagationEngine (Python) : `nodes_recalculated` counts only PIs
+    #     whose computed values DIFFER from the persisted state
+    #     (strict diff via `old_values != new_values`, propagator.py:518).
+    #     `nodes_unchanged` accumulates the rest.
+    #   - SqlPropagationEngine      : `nodes_recalculated` = the UPDATE
+    #     `rowcount` (every dirty PI traversed by PROPAGATE_SQL window
+    #     function). `nodes_unchanged` is never incremented by SQL.
+    # → For unambiguous "PIs processed" use `dirty_node_count`.
+    # → "Did values change" semantics are reliable only on the Python
+    #   engine today. Aligning SQL requires RETURNING-based diff
+    #   detection (~20 lines on PROPAGATE_SQL) — deferred until a real
+    #   consumer needs it. Cross-engine throughput comparisons must use
+    #   `dirty_node_count` to avoid the bias.
     nodes_recalculated: int = 0
     nodes_unchanged: int = 0
     status: str = "pending"  # pending | running | completed | completed_stale | interrupted | failed
