@@ -64,6 +64,7 @@ def _build_engine(conn, engine_flavor: str):
     calc_run_mgr = CalcRunManager()
     kernel = ProjectionKernel()
     shortage_detector = ShortageDetector()
+    # Explanations are generated lazily by GET /v1/explain, not on propagation.
 
     if engine_flavor == "sql":
         from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine

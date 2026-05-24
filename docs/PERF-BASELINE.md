@@ -47,13 +47,24 @@ Script : `scripts/bench_engine_comparison.py`
 
 **Le seuil "Rust justifié par la perf" se situe autour de 10-50 K SKU avec `OOTILS_ENGINE=sql` activé.** Pour des cibles client < 10 K, le moteur SQL Python suffit.
 
-## Note importante
+## Stratégie d'explainability (M3) — lazy regen
 
-Le moteur SQL **ne régénère pas les causal chains** (explanations). Pour la traçabilité explicative (M3 / agent), le moteur Python reste nécessaire. Le SQL est donc un mode batch, pas un remplacement complet du Python.
+Depuis 2026-05-24, **`OOTILS_ENGINE=sql` est le défaut**, et les causal chains
+sont régénérées **à la lecture** via `GET /v1/explain/{node_id}` :
 
-Configuration recommandée :
-- Propagation batch / recalcul horizon : `OOTILS_ENGINE=sql`
-- Propagation interactive / agent explainability : `OOTILS_ENGINE=python` (défaut)
+- Pas de génération eager pendant `propagate()` — coûterait ~5 s / 1 K
+  shortages avec le builder Python et ferait perdre tout le speedup SQL
+  (mesuré : 306s eager-SQL vs 250s eager-Python — SQL devenait plus lent).
+- Quand `GET /v1/explain` ne trouve pas d'explication mais le PI a un shortage
+  actif → construction de la chaîne causale à la demande, persistée, liée au
+  shortage. Coût mesuré : **~50 ms par chaîne** sur profile S.
+- Aucun compromis sur le contrat M3 — la chaîne est toujours fraîche au moment
+  où elle est consultée (amortie sur les seuls nœuds réellement explorés).
+
+Configuration :
+- Défaut : `OOTILS_ENGINE=sql` (8-9× plus rapide, explainability lazy).
+- Fallback : `OOTILS_ENGINE=python` reste disponible pour la parité
+  (`scripts/parity_sql_vs_python.py`) ou en régression de last resort.
 
 ## Historique des runs
 
