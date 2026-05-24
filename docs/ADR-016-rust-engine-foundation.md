@@ -160,7 +160,7 @@ Explicitement **hors scope** de cet ADR :
 | Semaine | Livrable | Go/No-Go gate |
 |---|---|---|
 | 1 | Foundation : crate Rust + PyO3 + maturin + CI Linux/Windows + ADR-016 | `pip install` + `import ootils_kernel` + tests Decimal roundtrip OK |
-| 2 | Read path : Rust lit dirty subgraph depuis Postgres | Read 227K PI + 700K edges < 2s |
+| 2 | Read path : Rust lit dirty subgraph depuis Postgres | Read 227K PI + 230K demands en **2.2s (vs 4.6s psycopg, 2× gain)** ✅ |
 | 3 | Compute + parity | 0 mismatch sur 100% des PIs profile L vs Python et SQL |
 | 4 | Writeback via COPY + intégration `OOTILS_ENGINE=rust` | Full prop L < 12s, incremental L < 50ms p50 |
 | 5 | Hardening : error handling, concurrence, mémoire, Docker | Tous tests intégration verts, mémoire < 500MB sur L |
