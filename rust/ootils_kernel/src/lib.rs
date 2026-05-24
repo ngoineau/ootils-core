@@ -22,10 +22,13 @@
 //! arithmetic — and keep one wheel compatible across Python 3.11/3.12/
 //! 3.13+ without rebuild.
 
+mod io;
+
 use chrono::NaiveDate;
 use pyo3::prelude::*;
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use uuid::Uuid;
 
 /// Parse a Python-side ISO date string ("YYYY-MM-DD") into a NaiveDate.
 fn parse_iso_date(s: &str) -> PyResult<NaiveDate> {
@@ -73,11 +76,56 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Parse a UUID string, ValueError on failure.
+fn parse_uuid(s: &str) -> PyResult<Uuid> {
+    Uuid::parse_str(s)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad uuid {s:?}: {e}")))
+}
+
+/// Diagnostic: load the dirty subgraph for (calc_run_id, scenario_id) and
+/// return the count tuples. Week 2 deliverable — validates the Rust read
+/// path against Postgres without doing any compute.
+///
+/// Returns a dict with:
+///   - "n_dirty_pis": int
+///   - "n_supplies": int
+///   - "n_demands": int
+///   - "n_series_seeds": int
+///   - "elapsed_ms": float (server-side wall clock from connect to return)
+#[pyfunction]
+fn load_subgraph_stats<'py>(
+    py: Python<'py>,
+    dsn: &str,
+    calc_run_id_str: &str,
+    scenario_id_str: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let calc_run_id = parse_uuid(calc_run_id_str)?;
+    let scenario_id = parse_uuid(scenario_id_str)?;
+
+    let t0 = std::time::Instant::now();
+    let mut loader = io::Loader::connect(dsn).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("postgres connect failed: {e}"))
+    })?;
+    let sg = loader.load_subgraph(calc_run_id, scenario_id).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}"))
+    })?;
+    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("n_dirty_pis", sg.n_dirty_pis())?;
+    d.set_item("n_supplies", sg.n_supplies())?;
+    d.set_item("n_demands", sg.n_demands())?;
+    d.set_item("n_series_seeds", sg.n_series_seeds())?;
+    d.set_item("elapsed_ms", elapsed_ms)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn ootils_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(echo, m)?)?;
     m.add_function(wrap_pyfunction!(add_decimals, m)?)?;
     m.add_function(wrap_pyfunction!(days_between, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(load_subgraph_stats, m)?)?;
     Ok(())
 }

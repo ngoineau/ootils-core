@@ -16,8 +16,13 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["abi3-py311", "extension-module"] }
 
 # Domain types — must round-trip with Python Decimal + date precisely.
-rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+rust_decimal = { version = "1.36", features = ["serde-with-str", "db-postgres"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Postgres client — blocking variant (no tokio), to keep the kernel
+# simple. ADR-016 §"out of scope" intentionally excludes async runtime.
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-uuid-1"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [profile.release]
 opt-level = 3
