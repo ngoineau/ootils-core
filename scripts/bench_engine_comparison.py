@@ -120,8 +120,12 @@ def _run_full_propagation(dsn: str, engine_flavor: str) -> dict:
         elapsed = time.perf_counter() - t0
         conn.commit()
 
-        nodes_recomputed = calc_run.nodes_recalculated or 0
-        throughput = nodes_recomputed / elapsed if elapsed > 0 else 0
+        # Cross-engine comparable: use dirty_node_count (unambiguous "PIs
+        # processed"). `nodes_recalculated` has divergent semantics — Python
+        # = "values changed", SQL = "rows updated" (cf CalcRun docstring).
+        n_dirty = calc_run.dirty_node_count or len(pi_ids)
+        n_changed_python_only = calc_run.nodes_recalculated or 0
+        throughput = n_dirty / elapsed if elapsed > 0 else 0
 
         # Mark event processed so the next run can take the lock
         conn.execute("UPDATE events SET processed = TRUE WHERE event_id = %s", (event_id,))
@@ -129,10 +133,10 @@ def _run_full_propagation(dsn: str, engine_flavor: str) -> dict:
 
         return {
             "engine": engine_flavor,
-            "pi_count_dirty": len(pi_ids),
-            "pi_count_recomputed": nodes_recomputed,
+            "pi_count_dirty": n_dirty,
+            "pi_count_changed_python_only": n_changed_python_only,
             "elapsed_sec": round(elapsed, 3),
-            "throughput_per_sec": round(throughput, 1),
+            "throughput_per_sec_dirty": round(throughput, 1),
         }
 
 
@@ -166,6 +170,7 @@ def main():
     if "error" not in py and "error" not in sql:
         speedup = py["elapsed_sec"] / sql["elapsed_sec"] if sql["elapsed_sec"] > 0 else 0
         print(f"=== Speedup sql vs python : {speedup:.2f}x  ===")
+        print("    (throughput compared on dirty_node_count — unbiased across engines)")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,19 @@ Script : `scripts/bench_engine_comparison.py`
 - Mêmes hardware/réseau pour les deux engines (Postgres distant 192.168.1.176)
 - 2 runs consécutifs pour vérifier la stabilité (résultats stables ±5%)
 
+### Métrique throughput
+
+**`throughput = dirty_node_count / elapsed`** — c'est le nombre de PI nodes
+*processed* (marqués dirty et traités par le kernel), pas le nombre de PI
+dont la valeur a changé. C'est l'indicateur non-ambigu, comparable entre
+engines.
+
+`CalcRun.nodes_recalculated` est intentionnellement **biaisé** entre engines
+(cf docstring `models/__init__.py`) — Python compte les nodes *changed*,
+SQL compte les *rows updated*. À ne pas utiliser pour des comparaisons
+cross-engine. Le bench script reporte les deux mais le throughput
+officiel est calculé sur `dirty_node_count`.
+
 ## Résultats
 
 ### Run du 2026-05-24
