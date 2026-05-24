@@ -207,6 +207,40 @@ def main():
             print(f"=== Throughput (dirty-based, cross-engine comparable) ===")
             print(f"    {tput:.0f} node/s   (total {total_dirty} dirty PIs in {total_time_s:.2f}s)")
 
+        # --------------------------------------------------------------
+        # Burst analysis — detect degradation over the session
+        # --------------------------------------------------------------
+        # Slice the latency timeline into position buckets to expose any
+        # lock contention / autovacuum / WAL-checkpoint stalls that build
+        # up over a sustained sequence of events.
+        if len(latencies_ms) >= 20:
+            buckets = [(1, 5), (6, 20), (21, 50), (51, 100)]
+            print()
+            print("=== Burst degradation (latency by position in session) ===")
+            print(f"  {'position':<10} {'count':>6} {'p50':>8} {'p95':>8} {'max':>8}")
+            for lo, hi in buckets:
+                slice_ = latencies_ms[lo - 1 : hi]
+                if not slice_:
+                    continue
+                ss = sorted(slice_)
+                p50_b = statistics.median(ss)
+                p95_b = ss[int(0.95 * len(ss))] if len(ss) >= 5 else ss[-1]
+                mx_b = max(ss)
+                print(f"  {lo:>3}-{hi:<5} {len(slice_):>6d} {p50_b:>8.1f} {p95_b:>8.1f} {mx_b:>8.1f}")
+
+            # Simple monotonic-degradation check: compare bucket p50s
+            p50s = [
+                statistics.median(latencies_ms[lo - 1 : hi])
+                for lo, hi in buckets
+                if latencies_ms[lo - 1 : hi]
+            ]
+            if len(p50s) >= 2 and p50s[-1] > 2 * p50s[0]:
+                print()
+                print(f"  WARNING: p50 doubled between bucket 1 and bucket {len(p50s)} — sustained degradation detected.")
+            elif len(p50s) >= 2 and p50s[-1] < 1.2 * p50s[0]:
+                print()
+                print(f"  OK: no sustained degradation (p50 stable from start to end).")
+
 
 if __name__ == "__main__":
     main()

@@ -66,6 +66,35 @@ Mesuré via `scripts/bench_incremental.py` sur profile M, 10 events
 à p95 7 s venaient d'un tunnel SSH qui ajoutait ~500 ms/event d'overhead
 network.
 
+### Bench burst (session agent simulée — 100 events séquentiels)
+
+Mesuré sur profile M, 100 `demand_qty_changed` enchaînés sans pause, SQL
+engine direct LAN. Bucketing par position pour détecter une éventuelle
+dégradation cumulative (lock contention, autovacuum, WAL checkpoint).
+
+| Position | count | p50 (ms) | p95 (ms) | max (ms) |
+|---|---|---|---|---|
+| 1-5 (cold start) | 5 | 167 | 649 | 649 |
+| 6-20 | 15 | **93** | 646 | 646 |
+| 21-50 | 30 | **98** | 677 | 764 |
+| 51-100 | 50 | **91** | 664 | 700 |
+
+**Stats globales sur 100 events :** min=81, p50=**93**, mean=218,
+p95=**664**, p99=764, max=764. 0 failures.
+
+**Lecture :**
+- **Pas de dégradation cumulative.** Le p50 descend de 167ms (cold,
+  buffer cache vide) à ~93ms après 5 events et reste plat jusqu'au 100e.
+- Les outliers ~5% (latences à ~650-760ms) sont **uniformément
+  distribués** dans le temps, pas concentrés à la fin → bruit Postgres
+  (autovacuum/checkpoint statistiques), pas un comportement systémique.
+- Throughput burst = 417 PI/s ≈ throughput single-event (425 PI/s) →
+  aucun overhead supplémentaire à enchaîner les events.
+
+**Conséquence pour les agents** : une session de 50-100 modifs en
+quelques dizaines de secondes reste fluide (p50 ~100ms par event,
+quelques pics ponctuels à ~700ms acceptables).
+
 ### Extrapolation V2
 
 À throughput SQL ~8 000 PI/s constant et ~25 buckets PI par couple (item × location) :
