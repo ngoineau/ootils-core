@@ -58,9 +58,13 @@ jobs:
       - name: Install maturin + pytest
         run: pip install --upgrade pip maturin pytest
 
-      - name: Build + install the Rust wheel (develop mode)
+      - name: Build the Rust wheel
         working-directory: rust/ootils_kernel
-        run: maturin develop --release
+        run: maturin build --release --out dist
+
+      - name: Install the built wheel
+        shell: bash
+        run: pip install --force-reinstall rust/ootils_kernel/dist/*.whl
 
       - name: Run smoke tests
         run: pytest tests/test_rust_kernel_smoke.py -v
