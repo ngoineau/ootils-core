@@ -2060,3 +2060,367 @@ async def ingest_transfers(
     ingest_response = _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
+
+
+# ─────────────────────────────────────────────────────────────
+# 11. POST /v1/ingest/planning-params (ADR-014 D3 — SCD2 transparent)
+# ─────────────────────────────────────────────────────────────
+
+_LOT_SIZE_RULES = {"LOTFORLOT", "FIXED_QTY", "EOQ", "POQ", "MIN_MAX", "MULTIPLE"}
+_FORECAST_STRATEGIES = {"max_only", "consume_forward", "consume_backward", "consume_both"}
+
+# Fields tracked for SCD2 change detection.
+# A field omitted from the client payload is NOT compared — see ADR-014 D3
+# (partial-push semantics: omission = "keep current value").
+# NOTE: lead_time_total_days is GENERATED — derived from sourcing+mfg+transit;
+# never tracked / never inserted directly.
+_PLANNING_PARAMS_TRACKED_FIELDS = [
+    "lead_time_sourcing_days",
+    "lead_time_manufacturing_days",
+    "lead_time_transit_days",
+    "safety_stock_qty",
+    "safety_stock_days",
+    "reorder_point_qty",
+    "min_order_qty",
+    "max_order_qty",
+    "order_multiple",
+    "lot_size_rule",
+    "planning_horizon_days",
+    "is_make",
+    "preferred_supplier_id",  # resolved from preferred_supplier_external_id
+    "economic_order_qty",
+    "lot_size_poq_periods",
+    "order_multiple_qty",
+    "frozen_time_fence_days",
+    "slashed_time_fence_days",
+    "forecast_consumption_strategy",
+    "consumption_window_days",
+]
+
+
+class PlanningParamsRow(BaseModel):
+    item_external_id: str = Field(..., description="Target item external_id.")
+    location_external_id: str = Field(..., description="Target location external_id.")
+
+    # Lead times (integer days)
+    lead_time_sourcing_days: Optional[int] = Field(None, ge=0)
+    lead_time_manufacturing_days: Optional[int] = Field(None, ge=0)
+    lead_time_transit_days: Optional[int] = Field(None, ge=0)
+
+    # Safety stock
+    safety_stock_qty: Optional[float] = Field(None, ge=0)
+    safety_stock_days: Optional[float] = Field(None, ge=0)
+
+    # Reorder / lot
+    reorder_point_qty: Optional[float] = Field(None, ge=0)
+    min_order_qty: Optional[float] = Field(None, gt=0)
+    max_order_qty: Optional[float] = Field(None, gt=0)
+    order_multiple: Optional[float] = Field(None, gt=0)
+
+    # Policy
+    lot_size_rule: Optional[str] = Field(None, description="One of: LOTFORLOT/FIXED_QTY/EOQ/POQ/MIN_MAX/MULTIPLE.")
+    planning_horizon_days: Optional[int] = Field(None, gt=0)
+    is_make: Optional[bool] = Field(None)
+    preferred_supplier_external_id: Optional[str] = Field(None, description="External id of preferred supplier (optional).")
+
+    # APICS extensions (mig 021)
+    economic_order_qty: Optional[float] = Field(None, gt=0)
+    lot_size_poq_periods: Optional[int] = Field(None, gt=0)
+    order_multiple_qty: Optional[float] = Field(None, gt=0)
+    frozen_time_fence_days: Optional[int] = Field(None, ge=0)
+    slashed_time_fence_days: Optional[int] = Field(None, gt=0)
+    forecast_consumption_strategy: Optional[str] = Field(None)
+    consumption_window_days: Optional[int] = Field(None, gt=0)
+
+    @field_validator("item_external_id", "location_external_id")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("lot_size_rule")
+    @classmethod
+    def valid_lot_size_rule(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _LOT_SIZE_RULES:
+            raise ValueError(f"lot_size_rule must be one of {sorted(_LOT_SIZE_RULES)}")
+        return v
+
+    @field_validator("forecast_consumption_strategy")
+    @classmethod
+    def valid_consumption_strategy(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _FORECAST_STRATEGIES:
+            raise ValueError(f"forecast_consumption_strategy must be one of {sorted(_FORECAST_STRATEGIES)}")
+        return v
+
+
+class IngestPlanningParamsRequest(BaseModel):
+    params: list[PlanningParamsRow]
+    dry_run: bool = False
+
+
+def _planning_params_active_row(
+    db: psycopg.Connection, item_id: UUID, location_id: UUID
+) -> Optional[dict]:
+    """Return the currently active (effective_to IS NULL) row, or None."""
+    row = db.execute(
+        """
+        SELECT param_id, effective_from,
+               lead_time_sourcing_days, lead_time_manufacturing_days, lead_time_transit_days,
+               safety_stock_qty, safety_stock_days,
+               reorder_point_qty,
+               min_order_qty, max_order_qty, order_multiple,
+               lot_size_rule, planning_horizon_days, is_make,
+               preferred_supplier_id,
+               economic_order_qty, lot_size_poq_periods, order_multiple_qty,
+               frozen_time_fence_days, slashed_time_fence_days,
+               forecast_consumption_strategy, consumption_window_days
+        FROM item_planning_params
+        WHERE item_id = %s AND location_id = %s
+          AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
+        ORDER BY effective_from DESC
+        LIMIT 1
+        """,
+        (item_id, location_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _row_to_db_dict(row: PlanningParamsRow, supplier_id: Optional[UUID]) -> dict:
+    """Build the dict of (DB-column-name → pushed-value) for SCD2 comparison.
+    Keys absent from this dict mean "client did not push that field" —
+    SCD2 will not consider them in change detection. We use Pydantic's
+    `model_dump(exclude_none=False)` minus the meta fields, then drop
+    keys whose value is None *iff* the client really didn't pass them.
+    Pydantic-V2 detects unset fields via __pydantic_fields_set__.
+    """
+    sent = row.__pydantic_fields_set__
+    incoming: dict = {}
+    if "lead_time_sourcing_days" in sent:
+        incoming["lead_time_sourcing_days"] = row.lead_time_sourcing_days
+    if "lead_time_manufacturing_days" in sent:
+        incoming["lead_time_manufacturing_days"] = row.lead_time_manufacturing_days
+    if "lead_time_transit_days" in sent:
+        incoming["lead_time_transit_days"] = row.lead_time_transit_days
+    if "safety_stock_qty" in sent:
+        incoming["safety_stock_qty"] = row.safety_stock_qty
+    if "safety_stock_days" in sent:
+        incoming["safety_stock_days"] = row.safety_stock_days
+    if "reorder_point_qty" in sent:
+        incoming["reorder_point_qty"] = row.reorder_point_qty
+    if "min_order_qty" in sent:
+        incoming["min_order_qty"] = row.min_order_qty
+    if "max_order_qty" in sent:
+        incoming["max_order_qty"] = row.max_order_qty
+    if "order_multiple" in sent:
+        incoming["order_multiple"] = row.order_multiple
+    if "lot_size_rule" in sent:
+        incoming["lot_size_rule"] = row.lot_size_rule
+    if "planning_horizon_days" in sent:
+        incoming["planning_horizon_days"] = row.planning_horizon_days
+    if "is_make" in sent:
+        incoming["is_make"] = row.is_make
+    if "preferred_supplier_external_id" in sent:
+        # `supplier_id` was resolved already (None means "clear").
+        incoming["preferred_supplier_id"] = supplier_id
+    if "economic_order_qty" in sent:
+        incoming["economic_order_qty"] = row.economic_order_qty
+    if "lot_size_poq_periods" in sent:
+        incoming["lot_size_poq_periods"] = row.lot_size_poq_periods
+    if "order_multiple_qty" in sent:
+        incoming["order_multiple_qty"] = row.order_multiple_qty
+    if "frozen_time_fence_days" in sent:
+        incoming["frozen_time_fence_days"] = row.frozen_time_fence_days
+    if "slashed_time_fence_days" in sent:
+        incoming["slashed_time_fence_days"] = row.slashed_time_fence_days
+    if "forecast_consumption_strategy" in sent:
+        incoming["forecast_consumption_strategy"] = row.forecast_consumption_strategy
+    if "consumption_window_days" in sent:
+        incoming["consumption_window_days"] = row.consumption_window_days
+    return incoming
+
+
+@router.post(
+    "/planning-params",
+    response_model=IngestResponse,
+    summary="Import planning parameters (SCD2 transparent)",
+    description=(
+        "Push current state of planning params per (item, location). The endpoint "
+        "implements ADR-014 D3 transparent SCD2: the client pushes its current values, "
+        "the API compares to the active row and either no-ops, updates in place "
+        "(same-day) or rotates (closes active + inserts new with effective_from=today)."
+    ),
+)
+async def ingest_planning_params(
+    body: IngestPlanningParamsRequest,
+    request: Request,
+    response: Response,
+    db: psycopg.Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> IngestResponse:
+    """SCD2-transparent upsert of item_planning_params (ADR-014 D3)."""
+    from datetime import date
+    from ootils_core.scd2 import Scd2Action, decide_action
+
+    # 1. Resolve FKs (item/location/preferred_supplier) in batch — fail fast on missing refs
+    item_ext_ids = list({r.item_external_id for r in body.params})
+    loc_ext_ids = list({r.location_external_id for r in body.params})
+    sup_ext_ids = list({r.preferred_supplier_external_id for r in body.params if r.preferred_supplier_external_id})
+
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", loc_ext_ids)
+    sup_map = _batch_existing(db, "suppliers", "external_id", "supplier_id", sup_ext_ids) if sup_ext_ids else {}
+
+    errors: list[dict] = []
+    for i, r in enumerate(body.params):
+        row_errs = []
+        if r.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{r.item_external_id}' not found in DB")
+        if r.location_external_id not in loc_map:
+            row_errs.append(f"location_external_id '{r.location_external_id}' not found in DB")
+        if r.preferred_supplier_external_id and r.preferred_supplier_external_id not in sup_map:
+            row_errs.append(
+                f"preferred_supplier_external_id '{r.preferred_supplier_external_id}' not found in DB"
+            )
+        if row_errs:
+            errors.append({
+                "item_external_id": r.item_external_id,
+                "location_external_id": r.location_external_id,
+                "row": i, "errors": row_errs,
+            })
+
+    if errors:
+        _raise_422(errors)
+
+    today = date.today()
+
+    if body.dry_run:
+        # Show what would happen without writing
+        results = []
+        for r in body.params:
+            item_id = item_map[r.item_external_id]
+            location_id = loc_map[r.location_external_id]
+            supplier_id = sup_map.get(r.preferred_supplier_external_id) if r.preferred_supplier_external_id else None
+            active = _planning_params_active_row(db, item_id, location_id)
+            incoming = _row_to_db_dict(r, supplier_id)
+            decision = decide_action(active, incoming, _PLANNING_PARAMS_TRACKED_FIELDS, today)
+            results.append({
+                "item_external_id": r.item_external_id,
+                "location_external_id": r.location_external_id,
+                "action": decision.action.value,
+                "changed_fields": list(decision.changed_fields.keys()),
+            })
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.params), inserted=0, updated=0, errors=0),
+            results=results,
+        )
+
+    idempotency_key, request_hash, replay = _load_idempotent_response(db, "planning_params", request, response, body)
+    if replay is not None:
+        return replay
+
+    batch_id = _create_ingest_batch(
+        db, "planning_params", body.params,
+        submitted_by=getattr(request.state, "client_id", "ingest_api"),
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
+    inserted = updated = 0
+    results: list[dict] = []
+
+    for r in body.params:
+        item_id = item_map[r.item_external_id]
+        location_id = loc_map[r.location_external_id]
+        supplier_id = sup_map.get(r.preferred_supplier_external_id) if r.preferred_supplier_external_id else None
+
+        active = _planning_params_active_row(db, item_id, location_id)
+        incoming = _row_to_db_dict(r, supplier_id)
+        decision = decide_action(active, incoming, _PLANNING_PARAMS_TRACKED_FIELDS, today)
+
+        if decision.action == Scd2Action.NOOP:
+            results.append({
+                "item_external_id": r.item_external_id,
+                "location_external_id": r.location_external_id,
+                "action": "noop",
+            })
+            continue
+
+        if decision.action == Scd2Action.UPDATED_INPLACE:
+            # Same-day UPDATE on the active row's param_id
+            assignments = ", ".join(f"{k} = %s" for k in decision.changed_fields.keys())
+            params_values = list(decision.changed_fields.values()) + [active["param_id"]]
+            db.execute(
+                f"UPDATE item_planning_params SET {assignments}, updated_at = now() WHERE param_id = %s",
+                params_values,
+            )
+            updated += 1
+            results.append({
+                "item_external_id": r.item_external_id,
+                "location_external_id": r.location_external_id,
+                "action": "updated_inplace",
+                "changed_fields": list(decision.changed_fields.keys()),
+                "param_id": str(active["param_id"]),
+            })
+            continue
+
+        # CREATED or ROTATED — both need an INSERT. ROTATED also closes the active row first.
+        if decision.action == Scd2Action.ROTATED:
+            # Half-open interval: old.[effective_from, effective_to=today),
+            # new.[effective_from=today, effective_to=NULL). Matches the
+            # daterange(...) WITH && EXCLUDE constraint, and the CHECK
+            # effective_to > effective_from (strict) — even when the
+            # active row was created yesterday.
+            db.execute(
+                "UPDATE item_planning_params SET effective_to = %s, updated_at = now() WHERE param_id = %s",
+                (today, active["param_id"]),
+            )
+
+        # Build the new row from active values (carry-over) overridden by incoming fields.
+        # If no active row (CREATED), start from None values; if active exists (ROTATED),
+        # carry over the active values for unspecified fields.
+        new_row_values: dict = {}
+        for k in _PLANNING_PARAMS_TRACKED_FIELDS:
+            if k in incoming:
+                new_row_values[k] = incoming[k]
+            elif active is not None:
+                new_row_values[k] = active.get(k)
+            else:
+                new_row_values[k] = None
+
+        # lot_size_rule cannot be NULL in DB (DEFAULT 'LOTFORLOT'); enforce
+        if new_row_values.get("lot_size_rule") is None:
+            new_row_values["lot_size_rule"] = "LOTFORLOT"
+        if new_row_values.get("planning_horizon_days") is None:
+            new_row_values["planning_horizon_days"] = 90
+        if new_row_values.get("is_make") is None:
+            new_row_values["is_make"] = False
+
+        param_id = uuid4()
+        all_cols = ["param_id", "item_id", "location_id", "effective_from"] + list(new_row_values.keys())
+        all_values = [param_id, item_id, location_id, today] + list(new_row_values.values())
+        placeholders = ", ".join(["%s"] * len(all_cols))
+        col_list = ", ".join(all_cols)
+        db.execute(
+            f"INSERT INTO item_planning_params ({col_list}) VALUES ({placeholders})",
+            all_values,
+        )
+        inserted += 1
+        results.append({
+            "item_external_id": r.item_external_id,
+            "location_external_id": r.location_external_id,
+            "action": decision.action.value,
+            "changed_fields": list(decision.changed_fields.keys()),
+            "param_id": str(param_id),
+        })
+
+    logger.info(
+        "ingest.planning_params total=%d inserted=%d updated=%d noop=%d",
+        len(body.params), inserted, updated, len(body.params) - inserted - updated,
+    )
+    dq_status = _trigger_dq(db, batch_id)
+    ingest_response = _ok(inserted, updated, len(body.params), results, batch_id=batch_id, dq_status=dq_status)
+    _finalize_ingest_batch(db, batch_id, ingest_response)
+    return ingest_response
