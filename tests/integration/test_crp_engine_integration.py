@@ -6,9 +6,9 @@ Ported from tests/test_crp_engine.py — the mock-heavy test file that
 relied on a ``mock_db_connection`` fixture and scripted ``cursor.fetchall``
 side-effects. The "no mocks" rule (CLAUDE.md) means every fetch_* /
 calculate() branch is exercised by inserting real rows into the
-``items``, ``locations``, ``work_centers``, ``routings``,
-``routing_operations`` and ``planned_supply`` tables and reading back
-the engine's load profiles.
+``items``, ``locations``, ``resources`` (post-migration 034: formerly
+``work_centers``), ``routings``, ``routing_operations`` and
+``planned_supply`` tables and reading back the engine's load profiles.
 
 Each test seeds its own rows and tears them down. The function-scoped
 ``conn`` fixture rolls back any uncommitted changes; we ``commit()``
@@ -62,15 +62,24 @@ def _seed_work_center(
     efficiency: Decimal = Decimal("0.9"),
     active: bool = True,
 ) -> UUID:
+    """
+    Seed a work-center-flavoured row in the unified ``resources`` table
+    (migration 034 / ADR-014 D1). Column mapping:
+      work_center_id  → resource_id
+      code            → external_id
+      description     → name
+    Always inserts resource_type='work_center' and capacity_unit='unit'
+    to match the ADR-014 D2 defaults for migrated work_centers.
+    """
     wc_id = uuid4()
     if code is None:
         code = f"WC-{wc_id.hex[:8]}"
     conn.execute(
         """
-        INSERT INTO work_centers (
-            work_center_id, code, description,
-            capacity_per_day, efficiency, calendar_id, active
-        ) VALUES (%s, %s, %s, %s, %s, NULL, %s)
+        INSERT INTO resources (
+            resource_id, external_id, name, resource_type,
+            capacity_per_day, capacity_unit, efficiency, calendar_id, active
+        ) VALUES (%s, %s, %s, 'work_center', %s, 'unit', %s, NULL, %s)
         """,
         (wc_id, code, description, capacity_per_day, efficiency, active),
     )
@@ -107,11 +116,17 @@ def _seed_operation(
     description: str = "Test Op",
     active: bool = True,
 ) -> UUID:
+    """
+    Seed a routing_operations row. Migration 034 renamed the column
+    ``work_center_id`` to ``resource_id``; the Python kwarg name
+    ``work_center_id`` is kept as the internal helper contract so
+    callers don't have to change.
+    """
     operation_id = uuid4()
     conn.execute(
         """
         INSERT INTO routing_operations (
-            operation_id, routing_id, sequence, work_center_id,
+            operation_id, routing_id, sequence, resource_id,
             setup_time, run_time_per_unit, description, active
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
@@ -183,8 +198,12 @@ def _teardown(
     Delete every row written during the test so the DB stays clean.
     Order matters because of FK chain:
       planned_supply  → items, locations, scenarios
-      routing_operations → routings, work_centers
+      routing_operations → routings, resources (formerly work_centers)
       routings        → items
+
+    Migration 034 (ADR-014 D1): ``work_centers`` table dropped; rows
+    live in ``resources``. The ``work_centers`` kwarg name is kept for
+    helper-call compatibility.
     """
     if planned_orders:
         conn.execute(
@@ -200,7 +219,7 @@ def _teardown(
         conn.execute("DELETE FROM routings WHERE routing_id = ANY(%s)", (routings,))
     if work_centers:
         conn.execute(
-            "DELETE FROM work_centers WHERE work_center_id = ANY(%s)",
+            "DELETE FROM resources WHERE resource_id = ANY(%s)",
             (work_centers,),
         )
     if locations:
@@ -226,12 +245,11 @@ class TestCRPEngineEmpty:
         """No work centers in DB → CRPResult is empty, no SQL further runs."""
         # Make sure we don't accidentally see other test rows: we don't insert
         # any work center. CRPEngine's _fetch_work_centers filters WHERE
-        # active = true, so any leftover inactive rows wouldn't matter — but
-        # if there are residual active work_centers from other tests/modules,
-        # the engine will still return them. To be safe, deactivate all
-        # existing rows for the duration of this test (rolled back at the
-        # end by the conn fixture).
-        conn.execute("UPDATE work_centers SET active = false")
+        # active = true on `resources` (post-migration 034 / ADR-014 D1).
+        # Per ADR-014 the engine does not discriminate by resource_type, so
+        # we deactivate every resources row for the duration of this test
+        # (rolled back at the end by the conn fixture).
+        conn.execute("UPDATE resources SET active = false")
         conn.commit()
         try:
             engine = CRPEngine(db_conn=conn)
@@ -281,7 +299,9 @@ class TestFetchWorkCenters:
             work_centers = engine._fetch_work_centers([wc_id])
             assert len(work_centers) == 1
             assert wc_id in work_centers
-            assert work_centers[wc_id].capacity_per_day == Decimal("8.000000")
+            # resources.capacity_per_day is NUMERIC(18,4) (migration 009);
+            # post-034 the work_centers source — NUMERIC(18,6) — is gone.
+            assert work_centers[wc_id].capacity_per_day == Decimal("8.0000")
         finally:
             _teardown(conn, work_centers=[wc_id])
 
