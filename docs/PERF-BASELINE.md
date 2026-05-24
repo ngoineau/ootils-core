@@ -51,9 +51,11 @@ Script : `scripts/bench_engine_comparison.py`
 
 Le moteur SQL **ne régénère pas les causal chains** (explanations). Pour la traçabilité explicative (M3 / agent), le moteur Python reste nécessaire. Le SQL est donc un mode batch, pas un remplacement complet du Python.
 
-Configuration recommandée :
-- Propagation batch / recalcul horizon : `OOTILS_ENGINE=sql`
-- Propagation interactive / agent explainability : `OOTILS_ENGINE=python` (défaut)
+**Default depuis 2026-05-24** : `OOTILS_ENGINE=sql` (changement actant le speedup mesuré ; cf commit du switch).
+
+Configuration de override par déploiement :
+- Propagation batch / recalcul horizon : laisser le défaut (`sql`).
+- Propagation interactive / agent explainability : forcer `OOTILS_ENGINE=python` sur le container worker concerné. Nécessaire pour que les `causal_steps` se régénèrent à chaque propagation. Sans ce override, les explanations en DB se figent au dernier passage Python.
 
 ## Historique des runs
 

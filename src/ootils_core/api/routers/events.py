@@ -25,11 +25,19 @@ def _build_propagation_engine(db):
     """Build a PropagationEngine instance wired to the given DB connection.
 
     The implementation is selected by the OOTILS_ENGINE environment variable:
-    - 'python' (default): the in-process Python kernel + dirty-flag pipeline
-    - 'sql':              SqlPropagationEngine — window-function projection
-                          inside Postgres. ~3-6x faster on batch workloads
-                          but does not regenerate causal-chain explanations.
-                          See docs/SCALABILITY.md "Tier 3 spike" for trade-offs.
+
+    - 'sql' (DEFAULT since 2026-05-24, cf docs/PERF-BASELINE.md):
+        SqlPropagationEngine — window-function projection inside Postgres.
+        Measured 5-9× faster than the Python engine on profile S/M batches.
+        Trade-off: **does NOT regenerate causal-chain explanations**. The
+        existing `explanations` / `causal_steps` rows persist as-is in DB,
+        but new propagations under SQL won't update them. For interactive
+        explainability (M3, agent flows), set OOTILS_ENGINE=python on the
+        request scope (env var on the worker / container).
+    - 'python': the in-process Python kernel + dirty-flag pipeline.
+        Full causal-chain regeneration. Use for explainability-heavy flows.
+
+    Override at deployment time via the OOTILS_ENGINE environment variable.
     """
     from ootils_core.engine.kernel.graph.store import GraphStore
     from ootils_core.engine.kernel.graph.traversal import GraphTraversal
@@ -46,18 +54,20 @@ def _build_propagation_engine(db):
     kernel = ProjectionKernel()
     shortage_detector = ShortageDetector()
 
-    engine_flavor = os.environ.get("OOTILS_ENGINE", "python").strip().lower()
-    if engine_flavor == "sql":
+    engine_flavor = os.environ.get("OOTILS_ENGINE", "sql").strip().lower()
+    if engine_flavor in ("sql", ""):
         from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine
         engine_cls: type[PropagationEngine] = SqlPropagationEngine
-        logger.info("PropagationEngine: using SQL backend (OOTILS_ENGINE=sql)")
-    elif engine_flavor in ("python", ""):
+        logger.info("PropagationEngine: using SQL backend (default)")
+    elif engine_flavor == "python":
         engine_cls = PropagationEngine
+        logger.info("PropagationEngine: using Python backend (OOTILS_ENGINE=python)")
     else:
         logger.warning(
-            "Unknown OOTILS_ENGINE=%r — falling back to python", engine_flavor,
+            "Unknown OOTILS_ENGINE=%r — falling back to sql (default)", engine_flavor,
         )
-        engine_cls = PropagationEngine
+        from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine
+        engine_cls = SqlPropagationEngine
 
     return engine_cls(
         store=store,

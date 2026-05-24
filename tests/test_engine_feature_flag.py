@@ -34,12 +34,14 @@ def restore_env() -> None:
         os.environ["OOTILS_ENGINE"] = saved
 
 
-def test_default_returns_python_engine(mock_db: MagicMock) -> None:
+def test_default_returns_sql_engine(mock_db: MagicMock) -> None:
+    """Default since 2026-05-24 is SQL (cf docs/PERF-BASELINE.md)."""
     engine = _build_propagation_engine(mock_db)
-    assert type(engine) is PropagationEngine
+    assert isinstance(engine, SqlPropagationEngine)
 
 
 def test_python_returns_python_engine(mock_db: MagicMock) -> None:
+    """Explicit OOTILS_ENGINE=python overrides default to Python kernel."""
     os.environ["OOTILS_ENGINE"] = "python"
     engine = _build_propagation_engine(mock_db)
     assert type(engine) is PropagationEngine
@@ -59,9 +61,10 @@ def test_case_insensitive_and_whitespace(mock_db: MagicMock) -> None:
     assert isinstance(engine, SqlPropagationEngine)
 
 
-def test_unknown_value_falls_back_to_python(mock_db: MagicMock, caplog) -> None:
+def test_unknown_value_falls_back_to_sql(mock_db: MagicMock, caplog) -> None:
+    """Unknown value logs a warning and falls back to the new default (sql)."""
     os.environ["OOTILS_ENGINE"] = "rust"
     engine = _build_propagation_engine(mock_db)
-    assert type(engine) is PropagationEngine
-    # Should also log a warning so the operator knows their config didn't take.
+    assert isinstance(engine, SqlPropagationEngine)
+    # Should log a warning so the operator knows their config didn't take.
     assert any("OOTILS_ENGINE" in r.message and "rust" in r.message for r in caplog.records)
