@@ -31,6 +31,9 @@ pub struct PropagationStats {
     pub n_changed: usize,
     pub n_shortages: usize,
     pub compute_us: u64,
+    /// Per-PI deltas for the WAL + write-behind queue. Only the rows
+    /// that actually changed. Empty if nothing changed.
+    pub deltas: Vec<crate::wal::NodeDelta>,
 }
 
 /// Propagate over an explicit set of dirty PI node indices.
@@ -92,6 +95,7 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
     let mut n_processed = 0usize;
     let mut n_changed = 0usize;
     let mut n_shortages = 0usize;
+    let mut deltas: Vec<crate::wal::NodeDelta> = Vec::new();
 
     for (pi_idx, result) in results {
         n_processed += 1;
@@ -116,6 +120,15 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         node.flags &= !Node::FLAG_DIRTY;
         if changed {
             n_changed += 1;
+            deltas.push(crate::wal::NodeDelta {
+                node_id: node.node_id,
+                opening_stock: node.opening_stock,
+                inflows: node.inflows,
+                outflows: node.outflows,
+                closing_stock: node.closing_stock,
+                has_shortage: result.has_shortage,
+                shortage_qty: node.shortage_qty,
+            });
         }
     }
 
@@ -128,6 +141,7 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         n_changed,
         n_shortages,
         compute_us,
+        deltas,
     }
 }
 

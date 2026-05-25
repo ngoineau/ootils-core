@@ -23,6 +23,8 @@ mod propagator;
 mod scenario;
 mod service;
 mod state;
+mod wal;
+mod write_behind;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -49,6 +51,17 @@ struct Cli {
     /// drop them. Used by the phase-4 perf gate (Fork < 50ms target).
     #[arg(long)]
     bench_fork: Option<usize>,
+
+    /// Path to the local WAL file (phase 5). Default: `./ootils-engine.wal`
+    /// relative to CWD. Use an absolute path in production.
+    #[arg(long, env = "OOTILS_WAL_PATH", default_value = "./ootils-engine.wal")]
+    wal_path: std::path::PathBuf,
+
+    /// How often the write-behind flusher drains the queue to Postgres.
+    /// Lower = lower Postgres-lag, higher CPU cost. 100ms is the
+    /// ADR-017 default.
+    #[arg(long, env = "OOTILS_FLUSH_INTERVAL_MS", default_value = "100")]
+    flush_interval_ms: u64,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -86,7 +99,73 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let engine = service::EngineSvc::new(boot_time, graph_lock);
+    // ---- WAL + write-behind durability (phase 5) ----
+    let wal = Arc::new(wal::WalWriter::open(&cli.wal_path)?);
+    // Replay any records left over from a prior crash. They've been
+    // already-applied to RAM via Postgres if Postgres caught up, but
+    // because the WAL is only truncated AFTER PG flush succeeds, the
+    // remaining records are guaranteed durable + Postgres-pending.
+    // We replay them into the in-RAM graph and enqueue for re-flush
+    // to Postgres.
+    let recovered = wal.replay()?;
+    if !recovered.is_empty() {
+        let n_recs = recovered.len();
+        let n_deltas: usize = recovered.iter().map(|r| r.deltas.len()).sum();
+        warn!(
+            n_records = n_recs,
+            n_deltas,
+            wal = %cli.wal_path.display(),
+            "recovering from non-empty WAL — replay starting"
+        );
+        let mut g = graph_lock.write();
+        let by_id = &g.by_node_id;
+        let mut idx_pairs: Vec<(usize, wal::NodeDelta)> = Vec::with_capacity(n_deltas);
+        for rec in &recovered {
+            for d in &rec.deltas {
+                if let Some(&idx) = by_id.get(&d.node_id) {
+                    idx_pairs.push((idx as usize, d.clone()));
+                }
+            }
+        }
+        for (idx, d) in idx_pairs {
+            let n = &mut g.nodes[idx];
+            n.opening_stock = d.opening_stock;
+            n.inflows = d.inflows;
+            n.outflows = d.outflows;
+            n.closing_stock = d.closing_stock;
+            n.shortage_qty = d.shortage_qty;
+            if d.has_shortage {
+                n.flags |= state::Node::FLAG_SHORTAGE;
+            } else {
+                n.flags &= !state::Node::FLAG_SHORTAGE;
+            }
+        }
+        info!(n_records = n_recs, n_deltas, "WAL replay applied to RAM");
+    }
+
+    let queue = Arc::new(write_behind::WriteBehindQueue::new(wal.clone()));
+    let dsn_for_flusher = cli.dsn.clone();
+    let _flusher_handle = write_behind::spawn_flusher(
+        queue.clone(),
+        dsn_for_flusher,
+        cli.flush_interval_ms,
+    );
+
+    // If we recovered from WAL, also re-enqueue those deltas for
+    // Postgres flush (since they were durable in WAL but Postgres
+    // hadn't caught up).
+    if !recovered.is_empty() {
+        let mut deltas = Vec::new();
+        for rec in recovered {
+            for d in rec.deltas {
+                deltas.push(write_behind::PendingDelta::from(d));
+            }
+        }
+        queue.push(deltas);
+        info!("recovered deltas re-enqueued for Postgres flush");
+    }
+
+    let engine = service::EngineSvc::new(boot_time, graph_lock, queue);
 
     info!(addr = %cli.listen, "gRPC server listening");
     let server = Server::builder()
