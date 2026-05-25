@@ -133,8 +133,14 @@ def test_repeated_kill9_remains_consistent(engine_binary, dsn, grpc_module, tmp_
 
 
 def test_wal_truncated_after_clean_shutdown(engine_binary, dsn, tmp_path):
-    """A clean SIGTERM should trigger the bg flusher to drain + WAL
-    to truncate — on the next boot, replay should find no records."""
+    """A clean SIGTERM should trigger the bg flusher to drain + advance
+    the WAL marker — on the next boot, replay should find no records to
+    recover. With WAL v2 (Cluster A redesign) the file is not truncated
+    in-place; it grows until rotation kicks in at 256 MB. The size
+    check below remains valid because a single propagation generates
+    ~200 bytes (header 20 + record ~180), well under the slack of 1 KB.
+    The semantic invariant tested is: applied_pg_seq has advanced past
+    all records, so replay() returns empty on the next boot."""
     from ootils_core.engine_rust_service import EngineClient, EngineHarness
 
     wal = tmp_path / "clean-shutdown.wal"

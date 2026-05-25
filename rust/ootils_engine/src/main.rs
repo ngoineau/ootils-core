@@ -64,10 +64,39 @@ struct Cli {
     #[arg(long, env = "OOTILS_FLUSH_INTERVAL_MS", default_value = "100")]
     flush_interval_ms: u64,
 
-    /// Prometheus /metrics endpoint listen address. Set empty to
-    /// disable the metrics server.
+    /// Prometheus /metrics endpoint listen address. Set "off" (or
+    /// empty) to disable the metrics server. ANY other value must
+    /// parse as `host:port` or the engine refuses to boot — silent
+    /// fall-through on a misconfigured address would leave operators
+    /// flying blind during canary rollout (F-007).
     #[arg(long, env = "OOTILS_METRICS_LISTEN", default_value = "127.0.0.1:9090")]
     metrics_listen: String,
+
+    /// Hard cap on the WAL file size. Above this, Propagate returns
+    /// RESOURCE_EXHAUSTED instead of growing the WAL unboundedly
+    /// during a sustained PG outage. Default: 1 GB.
+    #[arg(long, env = "OOTILS_WAL_MAX_BYTES", default_value_t = wal::DEFAULT_WAL_MAX_BYTES)]
+    wal_max_bytes: u64,
+
+    /// Hard cap on the write-behind queue depth (number of pending
+    /// deltas in RAM). Above this, Propagate returns
+    /// RESOURCE_EXHAUSTED. Default: 1,000,000.
+    #[arg(long, env = "OOTILS_QUEUE_MAX_DEPTH", default_value_t = 1_000_000)]
+    queue_max_depth: usize,
+
+    /// Per-call gRPC timeout (milliseconds). A slow client or stuck
+    /// handler is cancelled past this deadline rather than holding
+    /// resources indefinitely (F-018). Default: 30 s.
+    #[arg(long, env = "OOTILS_REQUEST_TIMEOUT_MS", default_value_t = 30_000)]
+    request_timeout_ms: u64,
+
+    /// Allow the engine to boot even if the baseline scenario has 0
+    /// nodes or 0 PIs (F-011). Default OFF — operators see a hard
+    /// fail at startup when DATABASE_URL points at the wrong DB. CI
+    /// and tests against synthetic empty fixtures must opt in
+    /// explicitly via this flag or `OOTILS_ALLOW_EMPTY_BASELINE=1`.
+    #[arg(long, env = "OOTILS_ALLOW_EMPTY_BASELINE", default_value_t = false)]
+    allow_empty_baseline: bool,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -85,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     verify_postgres(&cli.dsn).await?;
 
-    let (graph, load_stats) = loader::load_baseline(&cli.dsn).await?;
+    let (graph, load_stats) = loader::load_baseline(&cli.dsn, cli.allow_empty_baseline).await?;
     let graph_lock = Arc::new(RwLock::new(graph));
     info!(
         nodes = load_stats.n_nodes,
@@ -105,29 +134,51 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // ---- WAL + write-behind durability (phase 5) ----
-    let wal = Arc::new(wal::WalWriter::open(&cli.wal_path)?);
-    // Replay any records left over from a prior crash. They've been
-    // already-applied to RAM via Postgres if Postgres caught up, but
-    // because the WAL is only truncated AFTER PG flush succeeds, the
-    // remaining records are guaranteed durable + Postgres-pending.
-    // We replay them into the in-RAM graph and enqueue for re-flush
-    // to Postgres.
+    // ---- WAL + write-behind durability (phase 5, v2 hardened) ----
+    // F-005: WAL is opened with explicit size caps. Default rotation
+    // threshold (256 MB) + default max bytes (1 GB) means the engine
+    // gracefully rejects new propagations during a sustained PG
+    // outage rather than filling the volume.
+    let wal = Arc::new(wal::WalWriter::open_with_caps(
+        &cli.wal_path,
+        wal::DEFAULT_ROTATION_THRESHOLD_BYTES,
+        cli.wal_max_bytes,
+    )?);
+    info!(
+        wal_max_bytes = cli.wal_max_bytes,
+        queue_max_depth = cli.queue_max_depth,
+        "WAL + queue caps configured (F-005)"
+    );
+    // Replay any records left over from a prior crash. WAL v2's
+    // `replay()` already skips records with seq <= applied_pg_seq
+    // (the durably-flushed-to-PG marker), so what we get back is
+    // exactly the set of records that are durable on disk but may NOT
+    // be in Postgres yet. We:
+    //   (a) apply them to RAM (so the in-RAM graph reflects post-crash
+    //       state)
+    //   (b) re-enqueue them for the bg flusher with their original seq
+    //   (c) let the seq-guarded PG UPDATE either insert them or skip
+    //       them if PG already has equal/newer data (F-014).
     let recovered = wal.replay()?;
     if !recovered.is_empty() {
         let n_recs = recovered.len();
-        let n_deltas: usize = recovered.iter().map(|r| r.deltas.len()).sum();
+        let n_deltas: usize = recovered.iter().map(|r| r.record.deltas.len()).sum();
+        let min_seq = recovered.first().map(|r| r.seq).unwrap_or(0);
+        let max_seq = recovered.last().map(|r| r.seq).unwrap_or(0);
         warn!(
             n_records = n_recs,
             n_deltas,
+            applied_pg_seq = wal.applied_pg_seq(),
+            seq_range_min = min_seq,
+            seq_range_max = max_seq,
             wal = %cli.wal_path.display(),
-            "recovering from non-empty WAL — replay starting"
+            "recovering from non-empty WAL — replay starting (records with seq > applied_pg_seq)"
         );
         let mut g = graph_lock.write();
         let by_id = &g.by_node_id;
         let mut idx_pairs: Vec<(usize, wal::NodeDelta)> = Vec::with_capacity(n_deltas);
-        for rec in &recovered {
-            for d in &rec.deltas {
+        for sr in &recovered {
+            for d in &sr.record.deltas {
                 if let Some(&idx) = by_id.get(&d.node_id) {
                     idx_pairs.push((idx as usize, d.clone()));
                 }
@@ -150,40 +201,70 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Item #2: Prometheus metrics — process-wide counter registry.
+    // F-007: Boot fails fast on a malformed metrics_listen. Operators
+    // who misconfigure the address learn at startup, not three weeks
+    // later during an incident. "off" (and empty for backward compat)
+    // explicitly disable the endpoint.
     let metrics_registry = Arc::new(metrics::Metrics::new());
-    if !cli.metrics_listen.is_empty() {
-        match cli.metrics_listen.parse::<std::net::SocketAddr>() {
-            Ok(addr) => {
-                let _metrics_handle =
-                    metrics::spawn_metrics_server(metrics_registry.clone(), addr);
-            }
-            Err(e) => {
-                warn!(error = %e, "invalid OOTILS_METRICS_LISTEN, metrics disabled");
-            }
-        }
+    let metrics_addr_str = cli.metrics_listen.trim();
+    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
+        || metrics_addr_str.eq_ignore_ascii_case("off")
+    {
+        info!("metrics endpoint explicitly disabled (OOTILS_METRICS_LISTEN={metrics_addr_str:?})");
+        None
     } else {
-        info!("metrics endpoint disabled (OOTILS_METRICS_LISTEN empty)");
+        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
+            anyhow::anyhow!(
+                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
+                 (use \"off\" to disable the metrics server)",
+                metrics_addr_str,
+                e
+            )
+        })?)
+    };
+    if let Some(addr) = metrics_addr {
+        let _metrics_handle =
+            metrics::spawn_metrics_server(metrics_registry.clone(), addr);
     }
 
-    let queue = Arc::new(write_behind::WriteBehindQueue::new(
+    let queue = Arc::new(write_behind::WriteBehindQueue::with_caps(
         wal.clone(),
         metrics_registry.clone(),
+        cli.queue_max_depth,
     ));
+    // Publish the configured caps as gauges so operators can see them
+    // from /metrics (vs having to dig through engine logs).
+    metrics_registry
+        .queue_max_depth
+        .store(cli.queue_max_depth as i64, std::sync::atomic::Ordering::Relaxed);
+    metrics_registry
+        .wal_max_bytes
+        .store(cli.wal_max_bytes, std::sync::atomic::Ordering::Relaxed);
+    // F-013 (Cluster F): hold the flusher's JoinHandle so we can
+    // gracefully tear it down at shutdown. The boot-time
+    // verify_postgres / loader / metrics-server tasks are detached
+    // because their lifetimes are naturally bounded (the connection
+    // future returns once the Client is dropped). The bg flusher is
+    // long-lived and worth aborting cleanly to avoid leaving a
+    // half-flushed batch in tokio's runtime when main exits.
     let dsn_for_flusher = cli.dsn.clone();
-    let _flusher_handle = write_behind::spawn_flusher(
+    let flusher_handle = write_behind::spawn_flusher(
         queue.clone(),
         dsn_for_flusher,
         cli.flush_interval_ms,
     );
 
     // If we recovered from WAL, also re-enqueue those deltas for
-    // Postgres flush (since they were durable in WAL but Postgres
-    // hadn't caught up).
+    // Postgres flush. Each delta carries the seq of the record it
+    // came from — the PG UPDATE's seq-guard (write_behind.rs A6 /
+    // F-014) ensures we never clobber newer PG state with an older
+    // replay value.
     if !recovered.is_empty() {
         let mut deltas = Vec::new();
-        for rec in recovered {
-            for d in rec.deltas {
-                deltas.push(write_behind::PendingDelta::from(d));
+        for sr in recovered {
+            let seq = sr.seq;
+            for d in sr.record.deltas {
+                deltas.push(write_behind::PendingDelta::from_delta(seq, d));
             }
         }
         queue.push(deltas);
@@ -192,11 +273,40 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = service::EngineSvc::new(boot_time, graph_lock, queue, metrics_registry);
 
-    info!(addr = %cli.listen, "gRPC server listening");
+    info!(
+        addr = %cli.listen,
+        request_timeout_ms = cli.request_timeout_ms,
+        "gRPC server listening"
+    );
+    // F-016: symmetric message-size limits with the Python client
+    // (which lifts to 256 MB in client.py). Without explicit
+    // .max_decoding_message_size on the server, tonic 0.12 defaults to
+    // 4 MB and rejects larger requests with an unhelpful
+    // RESOURCE_EXHAUSTED.
+    const MAX_MSG_BYTES: usize = 256 * 1024 * 1024;
+    let engine_svc = ootils_proto::engine::v1::engine_server::EngineServer::new(engine)
+        .max_decoding_message_size(MAX_MSG_BYTES)
+        .max_encoding_message_size(MAX_MSG_BYTES);
+    // F-018: per-call timeout via tonic's built-in helper. Past this
+    // deadline tonic cancels the handler future and returns
+    // Status::cancelled to the client. Prevents a stuck rayon worker
+    // or slow client from holding the connection indefinitely.
     let server = Server::builder()
-        .add_service(ootils_proto::engine::v1::engine_server::EngineServer::new(engine))
+        .timeout(std::time::Duration::from_millis(cli.request_timeout_ms))
+        .add_service(engine_svc)
         .serve_with_shutdown(cli.listen, shutdown_signal());
     server.await?;
+    // F-013 graceful shutdown: abort the bg flusher and join its
+    // handle. The WAL has fsync'd everything we acked to clients, so
+    // an in-flight PG batch can be safely cancelled — recovery on
+    // next boot will re-flush via replay.
+    info!("gRPC server stopped — aborting write-behind flusher");
+    flusher_handle.abort();
+    match flusher_handle.await {
+        Ok(()) => info!("flusher exited cleanly"),
+        Err(e) if e.is_cancelled() => info!("flusher cancelled (expected)"),
+        Err(e) => warn!(error = %e, "flusher join error"),
+    }
     info!("ootils-engine shut down cleanly");
     Ok(())
 }
@@ -274,6 +384,62 @@ fn init_tracing(filter: &str) {
         .with(env_filter)
         .with(fmt::layer().with_target(true).with_thread_ids(false))
         .init();
+}
+
+/// F-017: redact the password component of a Postgres DSN so logs +
+/// error messages can include the connection target without leaking
+/// credentials. Handles both URL form
+/// (`postgresql://user:PW@host/db`) and key-value form
+/// (`host=... user=... password=PW dbname=...`).
+///
+/// This function is the single allowed sink for DSN values that may
+/// land in `tracing` output. New code MUST route DSN through here
+/// before logging, never raw.
+#[allow(dead_code)]
+pub fn redact_dsn(dsn: &str) -> String {
+    // URL form: scheme://user:password@host/...
+    if let Some(scheme_end) = dsn.find("://") {
+        let after_scheme = &dsn[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let userinfo = &after_scheme[..at_pos];
+            let after_at = &after_scheme[at_pos..];
+            // userinfo = "user" | "user:password"
+            let redacted_userinfo = match userinfo.find(':') {
+                Some(colon) => format!("{}:****", &userinfo[..colon]),
+                None => userinfo.to_string(),
+            };
+            return format!(
+                "{}://{}{}",
+                &dsn[..scheme_end],
+                redacted_userinfo,
+                after_at
+            );
+        }
+    }
+    // Key-value form: ... password=... ...
+    let mut out = String::with_capacity(dsn.len());
+    let mut chars = dsn.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == 'p'
+            && dsn[out.len()..].starts_with("password=")
+        {
+            // Emit "password=****" and skip to next whitespace.
+            out.push_str("password=****");
+            // Skip past the original "password=value".
+            for _ in 0.."password=".len() - 1 {
+                chars.next();
+            }
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 async fn verify_postgres(dsn: &str) -> anyhow::Result<()> {

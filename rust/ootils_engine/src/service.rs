@@ -272,6 +272,32 @@ impl Engine for EngineSvc {
         let q = req.into_inner();
         debug!(event_id = %q.event_id, event_type = %q.event_type, "Propagate");
 
+        // F-006: until per-scenario propagation lands (ADR-018), refuse
+        // any non-baseline scenario_id. Empty string = caller asked for
+        // baseline implicitly, also accepted. Anything else → loud error
+        // instead of silent baseline corruption.
+        if !q.scenario_id.is_empty() {
+            let req_scenario = Uuid::from_str(&q.scenario_id)
+                .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+            if req_scenario != crate::loader::BASELINE_SCENARIO_ID {
+                return Err(Status::unimplemented(format!(
+                    "per-scenario propagation pending — ADR-018; only baseline ({}) is currently supported, got {}",
+                    crate::loader::BASELINE_SCENARIO_ID,
+                    req_scenario
+                )));
+            }
+        }
+
+        // F-015: event_id must parse cleanly. Empty = caller asked us to
+        // generate a calc_run_id; bad UUID = strict error (no silent
+        // fallback to a fresh v4 which would break the audit chain).
+        let cr_uuid = if q.event_id.is_empty() {
+            Uuid::new_v4()
+        } else {
+            Uuid::parse_str(&q.event_id)
+                .map_err(|e| Status::invalid_argument(format!("bad event_id: {e}")))?
+        };
+
         // Phase 3 minimal contract: trigger_node_id identifies one PI
         // (or a node whose item/loc maps to PIs). We mark the
         // associated PI series dirty + propagate. Real event-type
@@ -304,9 +330,13 @@ impl Engine for EngineSvc {
         }
 
         if dirty.is_empty() {
-            // Nothing to propagate — return an empty result, not an error.
+            // Nothing to propagate — return an empty result, not an
+            // error. Reviewer B2 fix: surface the parsed cr_uuid in
+            // calc_run_id even when there are no deltas, so the
+            // caller's event_id → calc_run_id audit chain (F-015)
+            // holds for no-op propagations too.
             return Ok(Response::new(PropagateResponse {
-                calc_run_id: String::new(),
+                calc_run_id: cr_uuid.to_string(),
                 nodes_processed: 0,
                 nodes_changed: 0,
                 shortages_detected: 0,
@@ -321,38 +351,74 @@ impl Engine for EngineSvc {
         }
 
         let t_total = Instant::now();
-        let stats = {
-            let mut g = self.baseline.write();
-            propagator::propagate(&mut g, &dirty)
-        };
 
-        // Durability barrier — phase 5. Append the deltas to the WAL
-        // (fsync), then enqueue for async Postgres flush. After this
-        // point the caller's "OK" response means: state is durable on
-        // disk, even if Postgres lags by up to flush_interval_ms.
-        let mut wal_fsync_us = 0.0;
-        if !stats.deltas.is_empty() {
-            let t_wal = Instant::now();
-            // Use the trigger event_id as calc_run_id for phase 5 — phase
-            // 6 will plumb a proper calc_run model.
-            let cr_uuid = Uuid::parse_str(&q.event_id).unwrap_or_else(|_| Uuid::new_v4());
-            let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
-            let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
-            if let Err(e) = self.writeback.wal().append(&record) {
+        // F-008 (Cluster E): the heavy stuff — write lock + rayon
+        // parallel compute + WAL fsync + queue push — is all blocking
+        // I/O or CPU-bound work that must NOT run on a tokio worker
+        // thread (would stall other handlers including Health,
+        // GetNode, and the metrics endpoint). We move it onto a
+        // dedicated blocking-task pool via spawn_blocking.
+        let baseline = self.baseline.clone();
+        let writeback = self.writeback.clone();
+        let metrics = self.metrics.clone();
+        let blocking_outcome = tokio::task::spawn_blocking(
+            move || -> Result<(propagator::PropagationStats, f64), Status> {
+                let stats = {
+                    let mut g = baseline.write();
+                    propagator::propagate(&mut g, &dirty)
+                };
+
+                let mut wal_fsync_us = 0.0;
+                if !stats.deltas.is_empty() {
+                    let t_wal = Instant::now();
+                    let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
+                    let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
+                    let assigned_seq = match writeback.wal().append(&record) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            metrics.record_failure();
+                            // F-005: WAL size cap → RESOURCE_EXHAUSTED.
+                            if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+                                return Err(Status::resource_exhausted(full.to_string()));
+                            }
+                            return Err(Status::internal(format!("WAL append failed: {e}")));
+                        }
+                    };
+                    wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+                    metrics
+                        .wal_appends_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    let pending: Vec<PendingDelta> = stats
+                        .deltas
+                        .iter()
+                        .cloned()
+                        .map(|d| PendingDelta::from_delta(assigned_seq, d))
+                        .collect();
+                    if let Err(full) = writeback.try_push(pending) {
+                        metrics.record_failure();
+                        return Err(Status::resource_exhausted(full.to_string()));
+                    }
+                }
+
+                Ok((stats, wal_fsync_us))
+            },
+        )
+        .await;
+
+        // Translate spawn_blocking JoinError → INTERNAL (the closure
+        // would panic for a hard bug). The closure's own Status
+        // errors pass through.
+        let (stats, wal_fsync_us) = match blocking_outcome {
+            Ok(Ok(tup)) => tup,
+            Ok(Err(status)) => return Err(status),
+            Err(join_err) => {
                 self.metrics.record_failure();
-                return Err(Status::internal(format!("WAL append failed: {e}")));
+                return Err(Status::internal(format!(
+                    "propagate worker task failed: {join_err}"
+                )));
             }
-            wal_fsync_us = t_wal.elapsed().as_micros() as f64;
-            self.metrics
-                .wal_appends_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Enqueue (non-blocking). The bg flusher picks it up within
-            // flush_interval_ms.
-            let pending: Vec<PendingDelta> =
-                stats.deltas.iter().cloned().map(PendingDelta::from).collect();
-            self.writeback.push(pending);
-        }
+        };
 
         let total_us = t_total.elapsed().as_micros() as f64;
 
@@ -366,7 +432,7 @@ impl Engine for EngineSvc {
         );
 
         Ok(Response::new(PropagateResponse {
-            calc_run_id: q.event_id,
+            calc_run_id: cr_uuid.to_string(),
             nodes_processed: stats.n_processed as i32,
             nodes_changed: stats.n_changed as i32,
             shortages_detected: stats.n_shortages as i32,

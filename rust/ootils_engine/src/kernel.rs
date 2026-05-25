@@ -87,9 +87,15 @@ where
                     let overlap_end = bucket_end.min(de);
                     let overlap_days = (overlap_end - overlap_start).num_days().max(0);
                     if overlap_days > 0 {
-                        let frac = d.quantity
-                            / Decimal::from(span_days)
-                            * Decimal::from(overlap_days);
+                        // F-021: multiply first, divide last, to avoid
+                        // losing low-order digits inside rust_decimal's
+                        // 28-digit fixed-point representation. The
+                        // SQL engine's numeric(50,28) has 50-digit
+                        // precision — divide-first here could drift
+                        // > TOLERANCE (1e-18) under high-quantity /
+                        // long-span demands.
+                        let frac = d.quantity * Decimal::from(overlap_days)
+                            / Decimal::from(span_days);
                         total += frac;
                     }
                 }
