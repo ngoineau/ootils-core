@@ -94,21 +94,38 @@ impl WriteBehindQueue {
 
 /// Spawn the background flush task. Returns the JoinHandle so callers
 /// (main) can wait for it during graceful shutdown.
+///
+/// Behaviour:
+/// - On the normal cadence (every `flush_interval_ms`), drain the queue
+///   and bulk-UPDATE Postgres. On success, truncate the WAL.
+/// - On flush failure (PG down, network blip), re-enqueue the batch
+///   and back off exponentially up to 30s. Restored to baseline
+///   cadence after the first success. Bounded — no CPU hot loop.
+/// - Phase 7 explicitly does NOT alert on backoff yet — that wires
+///   into OTLP/Prometheus in phase 8. For now we just log.
 pub fn spawn_flusher(
     queue: Arc<WriteBehindQueue>,
     dsn: String,
     flush_interval_ms: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(flush_interval_ms));
-        // Skip the immediate-fire on first tick — wait the full interval
-        // so we don't try to write before the engine fully booted.
-        interval.tick().await;
+        let baseline_interval = Duration::from_millis(flush_interval_ms);
+        let max_backoff = Duration::from_secs(30);
+        let mut current_interval = baseline_interval;
+        let mut consecutive_failures = 0u32;
         info!(flush_interval_ms, "write-behind flusher started");
+
         loop {
-            interval.tick().await;
+            tokio::time::sleep(current_interval).await;
             let batch = queue.drain_batch();
             if batch.is_empty() {
+                // Reset backoff if we were in failure mode but the queue
+                // is naturally empty now.
+                if consecutive_failures > 0 {
+                    info!("flusher idle, resetting backoff");
+                    consecutive_failures = 0;
+                    current_interval = baseline_interval;
+                }
                 continue;
             }
             let n = batch.len();
@@ -119,12 +136,30 @@ pub fn spawn_flusher(
                     } else {
                         debug!(n, "WriteBehindQueue: batch flushed + WAL truncated");
                     }
+                    if consecutive_failures > 0 {
+                        info!(
+                            consecutive_failures,
+                            "flusher recovered, resetting backoff"
+                        );
+                        consecutive_failures = 0;
+                        current_interval = baseline_interval;
+                    }
                 }
                 Err(e) => {
-                    error!(error = %e, n, "WriteBehindQueue: flush to Postgres FAILED, will retry next tick");
-                    // Push the batch back so the next tick retries.
-                    // NOTE: in a real prod we'd want exponential backoff +
-                    // alerting + a hard limit on retries; phase 7 work.
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    // Exponential backoff: baseline * 2^failures, capped at 30s.
+                    let shift = consecutive_failures.min(8);
+                    let multiplier = 1u32.checked_shl(shift).unwrap_or(256);
+                    let new_interval = baseline_interval.saturating_mul(multiplier);
+                    current_interval = new_interval.min(max_backoff);
+                    error!(
+                        error = %e,
+                        n,
+                        consecutive_failures,
+                        next_attempt_ms = current_interval.as_millis() as u64,
+                        "WriteBehindQueue: flush to Postgres FAILED, backing off"
+                    );
+                    // Push the batch back so the next attempt retries.
                     queue.pending.lock().extend(batch);
                 }
             }
