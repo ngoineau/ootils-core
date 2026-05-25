@@ -1,0 +1,18 @@
+[package]
+name = "ootils_proto"
+version.workspace = true
+edition.workspace = true
+description = "Shared protobuf definitions for the ootils Rust service (ADR-017)"
+publish = false
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"
+# Ship a precompiled `protoc` for the host platform so contributors and
+# CI don't need to install it separately. Adds ~5 MB to the build crate
+# graph but removes a real operational footgun.
+protoc-bin-vendored = "3.1"

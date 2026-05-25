@@ -1,0 +1,220 @@
+syntax = "proto3";
+
+package ootils.engine.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// ootils.engine.v1 — gRPC contract between Python (FastAPI) and the Rust
+// in-memory engine service (ADR-017 Architecture B).
+//
+// This is the ONLY interface between the two processes. Any new operation
+// must be added here first, then implemented on both sides. Breaking
+// changes follow the v1 → v2 evolution rule (new package, kept side by
+// side until all clients migrate).
+// ============================================================================
+
+service Engine {
+  // -------------------------------------------------------------------- //
+  //  Hot path — propagation + scenario lifecycle
+  // -------------------------------------------------------------------- //
+
+  // Propagate a single event synchronously. Returns once compute is done
+  // and the in-RAM state is updated. Postgres write-behind is fire-and-
+  // forget; the caller never waits for it.
+  rpc Propagate(PropagateRequest) returns (PropagateResponse);
+
+  // Fork a scenario via copy-on-write. Sub-50ms target on any profile.
+  rpc ForkScenario(ForkRequest) returns (ScenarioInfo);
+
+  // Merge a scenario's overlay back into the baseline. Atomic via arc-swap.
+  rpc MergeScenario(MergeRequest) returns (MergeResult);
+
+  // List active scenarios + their memory footprint.
+  rpc ListScenarios(google.protobuf.Empty) returns (ScenarioList);
+
+  // -------------------------------------------------------------------- //
+  //  Reads — bypass Postgres lag, read directly from in-RAM state
+  // -------------------------------------------------------------------- //
+
+  rpc GetNode(NodeQuery) returns (NodeState);
+  rpc QueryShortages(ShortagesQuery) returns (stream Shortage);
+
+  // -------------------------------------------------------------------- //
+  //  Real-time change stream — replaces SSE / WebSocket for the front-end
+  // -------------------------------------------------------------------- //
+
+  rpc StreamChanges(StreamRequest) returns (stream ChangeEvent);
+
+  // -------------------------------------------------------------------- //
+  //  Operational
+  // -------------------------------------------------------------------- //
+
+  rpc Health(google.protobuf.Empty) returns (HealthStatus);
+  rpc Metrics(google.protobuf.Empty) returns (EngineMetrics);
+}
+
+// ---------------------------------------------------------------------- //
+//  Messages
+// ---------------------------------------------------------------------- //
+
+message PropagateRequest {
+  string scenario_id = 1;
+  string event_id = 2;
+  string event_type = 3;
+  string trigger_node_id = 4;
+  // Optional structured payload — engine interprets per event_type
+  bytes payload = 5;
+}
+
+message PropagateResponse {
+  string calc_run_id = 1;
+  int32 nodes_processed = 2;
+  int32 nodes_changed = 3;
+  int32 shortages_detected = 4;
+  // Timing breakdown for observability
+  EngineTiming timing = 5;
+}
+
+message EngineTiming {
+  double dirty_expand_us = 1;
+  double compute_us = 2;
+  double shortage_detect_us = 3;
+  double wal_fsync_us = 4;
+  double total_us = 5;
+}
+
+message ForkRequest {
+  string parent_scenario_id = 1;
+  string name = 2;
+}
+
+message MergeRequest {
+  string scenario_id = 1;
+  string target_scenario_id = 2;
+}
+
+message MergeResult {
+  int32 nodes_merged = 1;
+  string new_baseline_generation = 2;
+}
+
+message ScenarioInfo {
+  string id = 1;
+  string name = 2;
+  string parent_id = 3;
+  google.protobuf.Timestamp created_at = 4;
+  int32 overlay_size = 5;        // # of modified nodes
+  int64 memory_bytes = 6;
+}
+
+message ScenarioList {
+  repeated ScenarioInfo scenarios = 1;
+}
+
+message NodeQuery {
+  string scenario_id = 1;
+  string node_id = 2;
+}
+
+message NodeState {
+  string node_id = 1;
+  string node_type = 2;
+  string item_id = 3;
+  string location_id = 4;
+  string opening_stock = 5;       // Decimal as string — precision parity with Python
+  string inflows = 6;
+  string outflows = 7;
+  string closing_stock = 8;
+  bool has_shortage = 9;
+  string shortage_qty = 10;
+  string time_span_start = 11;    // ISO date
+  string time_span_end = 12;
+  int32 bucket_sequence = 13;
+}
+
+message ShortagesQuery {
+  string scenario_id = 1;
+  // Filter
+  string item_id = 2;             // optional
+  string location_id = 3;         // optional
+  string severity_class = 4;      // 'stockout' | 'below_safety_stock' | both
+}
+
+message Shortage {
+  string shortage_id = 1;
+  string pi_node_id = 2;
+  string item_id = 3;
+  string location_id = 4;
+  string shortage_date = 5;
+  string shortage_qty = 6;
+  string severity_score = 7;
+  string severity_class = 8;
+}
+
+message StreamRequest {
+  string scenario_id = 1;
+  bool include_baseline_changes = 2;
+}
+
+message ChangeEvent {
+  google.protobuf.Timestamp timestamp = 1;
+  string scenario_id = 2;
+  string calc_run_id = 3;
+  oneof event {
+    NodeUpdated node_updated = 4;
+    ShortageDetected shortage_detected = 5;
+    ScenarioForked scenario_forked = 6;
+  }
+}
+
+message NodeUpdated {
+  string node_id = 1;
+  string closing_stock = 2;
+}
+
+message ShortageDetected {
+  string pi_node_id = 1;
+  string shortage_qty = 2;
+}
+
+message ScenarioForked {
+  string parent_id = 1;
+  string new_id = 2;
+}
+
+message HealthStatus {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    DEGRADED = 2;
+    NOT_SERVING = 3;
+  }
+  Status status = 1;
+  string detail = 2;
+  google.protobuf.Timestamp boot_time = 3;
+  int64 uptime_seconds = 4;
+}
+
+message EngineMetrics {
+  // Memory
+  int64 baseline_graph_bytes = 1;
+  int64 total_scenarios_bytes = 2;
+  int32 active_scenarios = 3;
+
+  // Throughput counters (since boot)
+  int64 events_processed_total = 4;
+  int64 nodes_recomputed_total = 5;
+  int64 shortages_detected_total = 6;
+
+  // Latency (microseconds)
+  double propagate_p50_us = 7;
+  double propagate_p95_us = 8;
+  double propagate_p99_us = 9;
+
+  // Write-behind queue
+  int32 pg_writeback_queue_depth = 10;
+  int64 wal_size_bytes = 11;
+  google.protobuf.Timestamp last_pg_flush = 12;
+}
