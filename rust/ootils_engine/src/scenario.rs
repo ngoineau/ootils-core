@@ -41,19 +41,42 @@ pub struct Scenario {
     pub overlay: DashMap<NodeIndex, Node, RandomState>,
     pub created_at_instant: Instant,
     pub created_at_system: SystemTime,
+    /// P2.1.c: per-scenario propagation serializer. Two propagations
+    /// on the SAME scenario are sequenced (prevents lost-update on
+    /// overlay); propagations on DIFFERENT scenarios run in parallel
+    /// (Alice and Bob don't block each other).
+    pub propagation_lock: parking_lot::Mutex<()>,
+    /// P2.1.d: last time this scenario was accessed (read OR mutated).
+    /// Used by the TTL eviction background task. Updated to "now"
+    /// on every Propagate / GetNode / merge etc.
+    pub last_accessed_at: parking_lot::Mutex<Instant>,
 }
 
 impl Scenario {
     pub fn new(name: String, parent_id: Option<Uuid>, baseline: Arc<Graph>) -> Self {
+        let now_instant = Instant::now();
         Self {
             id: Uuid::new_v4(),
             name,
             parent_id,
             baseline_snapshot: baseline,
             overlay: DashMap::with_hasher(RandomState::new()),
-            created_at_instant: Instant::now(),
+            created_at_instant: now_instant,
             created_at_system: SystemTime::now(),
+            propagation_lock: parking_lot::Mutex::new(()),
+            last_accessed_at: parking_lot::Mutex::new(now_instant),
         }
+    }
+
+    /// Touch the access timestamp — call on any read or mutation so
+    /// the TTL eviction doesn't drop an actively-used scenario.
+    pub fn touch_accessed(&self) {
+        *self.last_accessed_at.lock() = Instant::now();
+    }
+
+    /// Seconds since last access — used by the TTL eviction task.
+    pub fn idle_seconds(&self) -> u64 {
+        self.last_accessed_at.lock().elapsed().as_secs()
     }
 
     /// Look up a node, preferring the overlay. Returns an owned `Node`

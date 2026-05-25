@@ -24,9 +24,11 @@ BASELINE = UUID("00000000-0000-0000-0000-000000000001")
 
 
 def test_propagate_rejects_non_baseline_scenario_id(engine_session, grpc_module, pick_pi_node):
-    """F-006: a scenario_id that isn't baseline must NOT silently mutate
-    the baseline. Until per-scenario propagation lands (ADR-018), the
-    engine must reject the call with Unimplemented."""
+    """F-006 (post-P2.1.b): a scenario_id that isn't baseline MUST
+    reference an existing forked scenario. A bogus UUID is rejected
+    with NOT_FOUND (was UNIMPLEMENTED before P2.1.b lifted that
+    restriction). Per-scenario propagation is now supported via
+    ADR-018; see test_per_scenario_propagation.py for the happy path."""
     _, client = engine_session
     trigger, _, _ = pick_pi_node()
     non_baseline = UUID("11111111-1111-1111-1111-111111111111")
@@ -37,8 +39,8 @@ def test_propagate_rejects_non_baseline_scenario_id(engine_session, grpc_module,
             event_type="supply_qty_changed",
             trigger_node_id=trigger,
         )
-    assert exc_info.value.code() == grpc_module.StatusCode.UNIMPLEMENTED
-    assert "ADR-018" in exc_info.value.details()
+    assert exc_info.value.code() == grpc_module.StatusCode.NOT_FOUND
+    assert "scenario" in exc_info.value.details().lower()
 
 
 def test_propagate_accepts_baseline_scenario_id_explicitly(engine_session, pick_pi_node):
