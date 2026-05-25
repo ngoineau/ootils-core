@@ -10,8 +10,9 @@
 //! still return `Unimplemented` and reference the phase that will fill
 //! them in.
 
-use arc_swap::ArcSwap;
+use parking_lot::RwLock;
 use prost_types::Timestamp;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,20 +22,22 @@ use uuid::Uuid;
 
 use ootils_proto::engine::v1::{engine_server::Engine, health_status::Status as HealthEnum, *};
 
-use crate::state::Graph;
+use crate::propagator;
+use crate::state::{Graph, NodeType};
 
 pub struct EngineSvc {
     boot_time: Instant,
     boot_timestamp: Timestamp,
-    /// Baseline scenario state — atomically swappable Arc.
-    /// Cheap to clone (just bumps the refcount), so readers can hold a
-    /// snapshot for the duration of their request without blocking
-    /// writers.
-    baseline: Arc<ArcSwap<Graph>>,
+    /// Baseline scenario state — phase 3 uses an RwLock for in-place
+    /// mutation. Phase 4 will refactor to `ArcSwap<Graph>` + per-
+    /// scenario COW overlays (matching ADR-017 §3.2). For now, all
+    /// reads grab the read lock (concurrent), the propagator grabs
+    /// the write lock briefly per call.
+    baseline: Arc<RwLock<Graph>>,
 }
 
 impl EngineSvc {
-    pub fn new(boot_time: Instant, baseline: Arc<ArcSwap<Graph>>) -> Self {
+    pub fn new(boot_time: Instant, baseline: Arc<RwLock<Graph>>) -> Self {
         let now = std::time::SystemTime::now();
         Self {
             boot_time,
@@ -57,7 +60,7 @@ impl Engine for EngineSvc {
 
     async fn health(&self, _req: Request<()>) -> Result<Response<HealthStatus>, Status> {
         let uptime = self.boot_time.elapsed().as_secs() as i64;
-        let g = self.baseline.load();
+        let g = self.baseline.read();
         let detail = format!(
             "phase 2: baseline loaded ({} nodes, gen {})",
             g.len(),
@@ -72,7 +75,7 @@ impl Engine for EngineSvc {
     }
 
     async fn metrics(&self, _req: Request<()>) -> Result<Response<EngineMetrics>, Status> {
-        let g = self.baseline.load();
+        let g = self.baseline.read();
         Ok(Response::new(EngineMetrics {
             baseline_graph_bytes: g.memory_bytes() as i64,
             total_scenarios_bytes: 0,
@@ -94,7 +97,7 @@ impl Engine for EngineSvc {
         _req: Request<()>,
     ) -> Result<Response<ScenarioList>, Status> {
         // Phase 2 surfaces only the baseline. Forks land in phase 4.
-        let g = self.baseline.load();
+        let g = self.baseline.read();
         Ok(Response::new(ScenarioList {
             scenarios: vec![ScenarioInfo {
                 id: "00000000-0000-0000-0000-000000000001".into(),
@@ -115,7 +118,7 @@ impl Engine for EngineSvc {
         let node_id = Uuid::from_str(&q.node_id)
             .map_err(|e| Status::invalid_argument(format!("bad node_id: {e}")))?;
 
-        let g = self.baseline.load();
+        let g = self.baseline.read();
         let node = g
             .get_node(&node_id)
             .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?;
@@ -139,12 +142,80 @@ impl Engine for EngineSvc {
 
     async fn propagate(
         &self,
-        _req: Request<PropagateRequest>,
+        req: Request<PropagateRequest>,
     ) -> Result<Response<PropagateResponse>, Status> {
-        debug!("Propagate called (phase 2 stub — propagator lands in phase 3)");
-        Err(Status::unimplemented(
-            "propagate is not implemented yet — see ADR-017 phase 3",
-        ))
+        let q = req.into_inner();
+        debug!(event_id = %q.event_id, event_type = %q.event_type, "Propagate");
+
+        // Phase 3 minimal contract: trigger_node_id identifies one PI
+        // (or a node whose item/loc maps to PIs). We mark the
+        // associated PI series dirty + propagate. Real event-type
+        // dispatch lands in phase 6 alongside the Python client.
+        let trigger_id = Uuid::from_str(&q.trigger_node_id)
+            .map_err(|e| Status::invalid_argument(format!("bad trigger_node_id: {e}")))?;
+
+        let mut dirty = HashSet::new();
+        {
+            let g = self.baseline.read();
+            // Look up the trigger node, then enumerate PIs in the same
+            // (item, location) couple — same dirty-cascade contract as
+            // the Python/SQL/Rust-A engines.
+            if let Some(node) = g.get_node(&trigger_id) {
+                if let (Some(item), Some(loc)) = (node.item_id, node.location_id) {
+                    if let Some(pis) = g.by_item_location.get(&(item, loc)) {
+                        for &idx in pis {
+                            let n = &g.nodes[idx as usize];
+                            if n.node_type == NodeType::ProjectedInventory && n.is_active() {
+                                dirty.insert(idx);
+                            }
+                        }
+                    }
+                }
+            } else {
+                return Err(Status::not_found(format!(
+                    "trigger_node_id {trigger_id} not found"
+                )));
+            }
+        }
+
+        if dirty.is_empty() {
+            // Nothing to propagate — return an empty result, not an error.
+            return Ok(Response::new(PropagateResponse {
+                calc_run_id: String::new(),
+                nodes_processed: 0,
+                nodes_changed: 0,
+                shortages_detected: 0,
+                timing: Some(EngineTiming {
+                    dirty_expand_us: 0.0,
+                    compute_us: 0.0,
+                    shortage_detect_us: 0.0,
+                    wal_fsync_us: 0.0,
+                    total_us: 0.0,
+                }),
+            }));
+        }
+
+        let t_total = Instant::now();
+        let stats = {
+            let mut g = self.baseline.write();
+            propagator::propagate(&mut g, &dirty)
+        };
+        let total_us = t_total.elapsed().as_micros() as f64;
+
+        Ok(Response::new(PropagateResponse {
+            // Phase 3 doesn't yet generate a calc_run row — leave empty.
+            calc_run_id: String::new(),
+            nodes_processed: stats.n_processed as i32,
+            nodes_changed: stats.n_changed as i32,
+            shortages_detected: stats.n_shortages as i32,
+            timing: Some(EngineTiming {
+                dirty_expand_us: 0.0,
+                compute_us: stats.compute_us as f64,
+                shortage_detect_us: 0.0,
+                wal_fsync_us: 0.0,
+                total_us,
+            }),
+        }))
     }
 
     async fn fork_scenario(
