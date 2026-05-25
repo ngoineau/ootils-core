@@ -575,6 +575,7 @@ name = "ootils_kernel"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "once_cell",
  "postgres",
  "pyo3",
  "rust_decimal",

@@ -50,16 +50,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Crossover point: below this many dirty PIs, the SQL engine's single
-# UPDATE statement beats the Rust path (load + COPY + UPDATE + clear)
-# because Rust pays a per-query roundtrip × 4 SELECTs that the SQL
-# engine collapses into one statement. Measured on profile L:
-#   - 91 PIs  : SQL 95ms vs Rust 220ms (SQL 2.3× faster)
-#   - 5000 PIs: roughly parity
-#   - 50000+ PIs: Rust wins clearly (full prop L: Rust 9.5s vs SQL 36.8s)
-# 5000 is a conservative threshold — Rust likely wins below too once we
-# pipeline the load queries in week 5. Tune via env var if needed.
-RUST_DISPATCH_THRESHOLD = int(os.environ.get("OOTILS_RUST_MIN_DIRTY", "5000"))
+# Crossover point: below this many dirty PIs, fall back to the SQL
+# inline path. Measured on profile L after the week-5 perf optims
+# (connection pool + UNNEST writeback + combined UNION ALL load):
+#   -    91 PIs : SQL 95ms vs Rust ~40ms (warm pool)  → Rust 2.4× FASTER
+#   -  5000 PIs : Rust still wins
+#   - 50000+ PIs: Rust wins decisively (full prop L: 9.5s vs 36.8s)
+#
+# Default 0 = always use Rust (post-week-5 optims made it win at every
+# scale we've measured). Set OOTILS_RUST_MIN_DIRTY > 0 to force the
+# SQL fallback below a threshold if regressions show up.
+RUST_DISPATCH_THRESHOLD = int(os.environ.get("OOTILS_RUST_MIN_DIRTY", "0"))
 
 
 class RustPropagationEngine(PropagationEngine):
@@ -142,20 +143,28 @@ class RustPropagationEngine(PropagationEngine):
 
         logger.info(
             "RustPropagationEngine: load=%.0fms compute=%.0fms copy=%.0fms "
-            "update=%.0fms clear_dirty=%.0fms shortages=%d",
+            "update=%.0fms shortages=%.0fms clear_dirty=%.0fms detected=%d",
             stats["load_ms"],
             stats["compute_ms"],
             stats["copy_ms"],
             stats["update_ms"],
+            stats["shortages_ms"],
             stats["clear_dirty_ms"],
             stats["n_shortages_detected"],
         )
 
+        # SHORTAGES_SQL and CLEAR_DIRTY_SQL run on Python's session because
+        # Postgres caches the query plan per-session — Python's connection
+        # has the plans warm from previous calls (the SqlPropagationEngine
+        # uses the same SQL), while a fresh Rust session pays the planning
+        # cost each time. Measured: in-Rust SHORTAGES added ~2s on profile
+        # L full prop vs ~0.3s on Python's warm connection.
+        # Order matters: SHORTAGES joins on dirty_nodes, so it must run
+        # BEFORE CLEAR_DIRTY_SQL.
+        params = {
+            "scenario_id": calc_run.scenario_id,
+            "calc_run_id": calc_run.calc_run_id,
+        }
         if self._shortage_detector is not None:
-            db.execute(
-                SHORTAGES_SQL,
-                {
-                    "scenario_id": calc_run.scenario_id,
-                    "calc_run_id": calc_run.calc_run_id,
-                },
-            )
+            db.execute(SHORTAGES_SQL, params)
+        db.execute(CLEAR_DIRTY_SQL, params)

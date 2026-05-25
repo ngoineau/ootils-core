@@ -24,6 +24,7 @@
 
 mod io;
 mod kernel;
+mod pool;
 mod propagator;
 mod writeback;
 
@@ -221,10 +222,12 @@ fn propagate_and_write<'py>(
     d.set_item("n_demands", stats.n_demands)?;
     d.set_item("n_series_seeds", stats.n_series_seeds)?;
     d.set_item("n_shortages_detected", stats.n_shortages_detected)?;
+    d.set_item("writeback_path", stats.writeback_path)?;
     d.set_item("load_ms", stats.load_ms)?;
     d.set_item("compute_ms", stats.compute_ms)?;
     d.set_item("copy_ms", stats.copy_ms)?;
     d.set_item("update_ms", stats.update_ms)?;
+    d.set_item("shortages_ms", stats.shortages_ms)?;
     d.set_item("clear_dirty_ms", stats.clear_dirty_ms)?;
     Ok(d)
 }
