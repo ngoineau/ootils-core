@@ -65,6 +65,18 @@ def _build_propagation_engine(db):
         from ootils_core.engine.orchestration.propagator_rust import RustPropagationEngine
         engine_cls = RustPropagationEngine
         logger.info("PropagationEngine: using Rust backend (OOTILS_ENGINE=rust, opt-in)")
+    elif engine_flavor in ("rust-svc", "rust_svc"):
+        # Architecture B (ADR-017): delegates to the standalone Rust
+        # engine service via gRPC. The engine must be running and
+        # reachable at OOTILS_ENGINE_ADDR (default 127.0.0.1:50051).
+        from ootils_core.engine.orchestration.propagator_rust_svc import (
+            RustServicePropagationEngine,
+        )
+        engine_cls = RustServicePropagationEngine
+        logger.info(
+            "PropagationEngine: using Rust SERVICE backend (OOTILS_ENGINE=rust-svc, "
+            "ADR-017 Architecture B, opt-in)"
+        )
     else:
         logger.warning(
             "Unknown OOTILS_ENGINE=%r — falling back to sql (default)", engine_flavor,

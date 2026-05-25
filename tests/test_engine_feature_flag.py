@@ -81,6 +81,30 @@ def test_rust_returns_rust_engine_when_extension_available(mock_db: MagicMock) -
     assert engine._explanation_builder is None  # lazy strategy
 
 
+def test_rust_svc_returns_rust_service_engine(mock_db: MagicMock) -> None:
+    """OOTILS_ENGINE=rust-svc dispatches to RustServicePropagationEngine
+    (ADR-017 Architecture B). The engine class is importable even
+    without a running gRPC server — connection is lazy on first
+    propagate call."""
+    pytest.importorskip(
+        "grpc",
+        reason="grpcio not installed (required for rust-svc dispatch)",
+    )
+    from ootils_core.engine.orchestration.propagator_rust_svc import (
+        RustServicePropagationEngine,
+    )
+
+    os.environ["OOTILS_ENGINE"] = "rust-svc"
+    engine = _build_propagation_engine(mock_db)
+    assert isinstance(engine, RustServicePropagationEngine)
+    assert isinstance(engine, PropagationEngine)  # subclass
+
+    # Underscore variant should work too.
+    os.environ["OOTILS_ENGINE"] = "rust_svc"
+    engine2 = _build_propagation_engine(mock_db)
+    assert isinstance(engine2, RustServicePropagationEngine)
+
+
 def test_unknown_value_falls_back_to_sql(mock_db: MagicMock, caplog) -> None:
     """Unknown value logs a warning and falls back to the default (sql)."""
     os.environ["OOTILS_ENGINE"] = "rustacean"  # not a real backend

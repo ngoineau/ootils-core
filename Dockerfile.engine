@@ -1,0 +1,77 @@
+# ============================================================================
+# Dockerfile.engine — standalone Rust engine service image (ADR-017 phase 8)
+#
+# Multi-stage build:
+#   - Stage 1 (builder): rust:1.85-slim + cargo build --release
+#   - Stage 2 (runtime): gcr.io/distroless/cc-debian12 with just the binary
+#
+# Image size target: < 100 MB. Hardened: no shell, no package manager, no
+# root user in the runtime.
+#
+# Build:
+#     docker build -f Dockerfile.engine -t ootils-engine:0.1.0 .
+#
+# Run:
+#     docker run -d --name ootils-engine \
+#       -e DATABASE_URL=postgresql://ootils:ootils@db:5432/ootils \
+#       -e OOTILS_ENGINE_LISTEN=0.0.0.0:50051 \
+#       -e OOTILS_WAL_PATH=/var/lib/ootils-engine/wal.bin \
+#       -p 50051:50051 \
+#       -v ootils-wal:/var/lib/ootils-engine \
+#       ootils-engine:0.1.0
+# ============================================================================
+
+# ---- Stage 1: builder ------------------------------------------------------
+FROM rust:1.85-slim AS builder
+
+# We don't need clang/cmake/etc — pure Rust deps. But protoc-bin-vendored
+# expects glibc-style binaries; the slim image has them.
+WORKDIR /build
+
+# Copy ONLY the manifests first to leverage Docker layer cache. Dependencies
+# get rebuilt only when Cargo.toml / Cargo.lock change.
+COPY rust/Cargo.toml rust/Cargo.lock /build/rust/
+COPY rust/ootils_kernel/Cargo.toml /build/rust/ootils_kernel/
+COPY rust/ootils_engine/Cargo.toml /build/rust/ootils_engine/
+COPY rust/ootils_proto/Cargo.toml rust/ootils_proto/build.rs /build/rust/ootils_proto/
+COPY rust/ootils_proto/proto /build/rust/ootils_proto/proto
+
+# Pre-fetch deps (cached layer unless Cargo files change).
+WORKDIR /build/rust
+RUN mkdir -p ootils_engine/src ootils_kernel/src ootils_proto/src \
+    && echo "fn main() {}" > ootils_engine/src/main.rs \
+    && echo "" > ootils_kernel/src/lib.rs \
+    && echo "" > ootils_proto/src/lib.rs \
+    && cargo fetch --target x86_64-unknown-linux-gnu
+
+# Now copy the real sources.
+COPY rust/ootils_engine/src /build/rust/ootils_engine/src
+COPY rust/ootils_kernel/src /build/rust/ootils_kernel/src
+COPY rust/ootils_proto/src /build/rust/ootils_proto/src
+
+# Build the binary in release mode. Skip the kernel + proto crates from this
+# stage — only the engine binary is needed in the runtime image.
+RUN cargo build --release -p ootils_engine \
+    && strip /build/rust/target/release/ootils-engine
+
+# ---- Stage 2: runtime ------------------------------------------------------
+# Distroless cc has the C runtime ootils-engine needs (mimalloc, libssl-less
+# tokio-postgres NoTls). No shell, no package manager, hardened by default.
+FROM gcr.io/distroless/cc-debian12
+
+LABEL org.opencontainers.image.title="ootils-engine"
+LABEL org.opencontainers.image.description="ootils-core Rust in-memory propagation engine (ADR-017 Architecture B)"
+LABEL org.opencontainers.image.source="https://github.com/ngoineau/ootils-core"
+
+# Distroless ships a non-root `nonroot` user (UID 65532). Use it.
+USER nonroot:nonroot
+
+# Default WAL path — operator should mount a persistent volume here.
+ENV OOTILS_WAL_PATH=/var/lib/ootils-engine/wal.bin
+
+COPY --from=builder --chown=nonroot:nonroot /build/rust/target/release/ootils-engine /usr/local/bin/ootils-engine
+
+EXPOSE 50051
+
+# `distroless` is in PID 1 mode by default. Engine handles SIGTERM gracefully.
+ENTRYPOINT ["/usr/local/bin/ootils-engine"]
