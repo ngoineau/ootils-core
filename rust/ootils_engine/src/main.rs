@@ -8,9 +8,9 @@
 //!   baseline and exits, printing timing — used to validate the
 //!   ADR-017 phase-3 gate (compute < 100ms on profile L).
 
+use arc_swap::ArcSwap;
 use clap::Parser;
 use mimalloc::MiMalloc;
-use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -152,7 +152,11 @@ async fn main() -> anyhow::Result<()> {
     verify_postgres(&cli.dsn).await?;
 
     let (graph, load_stats) = loader::load_baseline(&cli.dsn, cli.allow_empty_baseline).await?;
-    let graph_lock = Arc::new(RwLock::new(graph));
+    // P2.1.a (F-026): ArcSwap baseline. Reads are zero-cost
+    // refcount bumps; writes use clone-on-write (clone the Graph,
+    // mutate, atomic-swap). Forks become O(1) — the multi-user
+    // what-if pattern this enables is the target of Phase 2.
+    let graph_lock = Arc::new(ArcSwap::from_pointee(graph));
     info!(
         nodes = load_stats.n_nodes,
         edges = load_stats.n_edges,
@@ -211,8 +215,12 @@ async fn main() -> anyhow::Result<()> {
             wal = %cli.wal_path.display(),
             "recovering from non-empty WAL — replay starting (records with seq > applied_pg_seq)"
         );
-        let mut g = graph_lock.write();
-        let by_id = &g.by_node_id;
+        // P2.1.a: clone-on-write recovery. Single-shot at boot, so
+        // the clone cost (~50ms on profile L) is well under the
+        // dominant baseline-load cost (~2s).
+        let current = graph_lock.load_full();
+        let mut new_graph: state::Graph = (*current).clone();
+        let by_id = &new_graph.by_node_id;
         let mut idx_pairs: Vec<(usize, wal::NodeDelta)> = Vec::with_capacity(n_deltas);
         for sr in &recovered {
             for d in &sr.record.deltas {
@@ -222,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         for (idx, d) in idx_pairs {
-            let n = &mut g.nodes[idx];
+            let n = &mut new_graph.nodes[idx];
             n.opening_stock = d.opening_stock;
             n.inflows = d.inflows;
             n.outflows = d.outflows;
@@ -234,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
                 n.flags &= !state::Node::FLAG_SHORTAGE;
             }
         }
+        graph_lock.store(Arc::new(new_graph));
         info!(n_records = n_recs, n_deltas, "WAL replay applied to RAM");
     }
 
@@ -333,23 +342,42 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// One-shot full propagation bench. Marks every active PI dirty, runs
-/// the propagator, prints timing. Phase 3 gate: compute < 100ms on L.
-fn run_bench(graph_lock: &Arc<RwLock<state::Graph>>) {
+/// the propagator, prints timing.
+///
+/// P2.1.a (F-026): with ArcSwap baseline, this now exercises the
+/// clone-on-write path explicitly (mark needs &mut Graph, so we
+/// clone the whole graph for the bench, mutate, and store back).
+/// The bench reports the clone cost separately so the trade-off is
+/// visible.
+fn run_bench(graph_lock: &Arc<ArcSwap<state::Graph>>) {
     info!("running full-propagation bench (phase 3 gate)");
+
+    // P2.1.a: clone-on-write — measured separately so the bench
+    // surfaces the new cost honestly.
+    let t_clone = Instant::now();
+    let current = graph_lock.load_full();
+    let mut new_graph: state::Graph = (*current).clone();
+    let clone_ms = t_clone.elapsed().as_millis();
+
     let t_mark = Instant::now();
-    let dirty = {
-        let mut g = graph_lock.write();
-        propagator::mark_all_pi_dirty(&mut g)
-    };
+    let dirty = propagator::mark_all_pi_dirty(&mut new_graph);
     let mark_ms = t_mark.elapsed().as_millis();
-    info!(n_dirty = dirty.len(), mark_ms, "marked all active PIs dirty");
+    info!(
+        n_dirty = dirty.len(),
+        clone_ms,
+        mark_ms,
+        "marked all active PIs dirty (post-CoW)"
+    );
 
     let t_prop = Instant::now();
-    let stats = {
-        let mut g = graph_lock.write();
-        propagator::propagate(&mut g, &dirty)
-    };
-    let total_ms = t_prop.elapsed().as_millis();
+    let stats = propagator::propagate(&mut new_graph, &dirty);
+    let prop_ms = t_prop.elapsed().as_millis();
+
+    let t_store = Instant::now();
+    graph_lock.store(Arc::new(new_graph));
+    let store_ms = t_store.elapsed().as_millis();
+
+    let total_ms = clone_ms + mark_ms + prop_ms + store_ms;
     info!(
         n_dirty = stats.n_dirty,
         n_processed = stats.n_processed,
@@ -357,29 +385,56 @@ fn run_bench(graph_lock: &Arc<RwLock<state::Graph>>) {
         n_shortages = stats.n_shortages,
         compute_us = stats.compute_us,
         compute_ms = stats.compute_us / 1000,
+        clone_ms,
+        store_ms,
         total_ms,
         "BENCH RESULT — full propagation (phase 3 gate)"
     );
 }
 
 /// Phase-4 gate: fork N scenarios in sequence, log per-fork timing.
-/// Validates that Fork target (< 50ms) holds — or honestly surfaces
-/// the gap if not.
-fn run_bench_fork(graph_lock: &Arc<RwLock<state::Graph>>, n: usize) {
+/// P2.1.a target: < 1ms per fork (was 40-60ms with deep clone).
+fn run_bench_fork(graph_lock: &Arc<ArcSwap<state::Graph>>, n: usize) {
     info!(n, "running fork bench (phase 4 gate)");
     let mgr = scenario::ScenarioManager::new();
-    let mut timings_ms: Vec<u64> = Vec::with_capacity(n);
+    // For sub-ms forks we need µs precision in the per-call timing.
+    let mut timings_us: Vec<u64> = Vec::with_capacity(n);
     for i in 0..n {
-        let (_s, st) = mgr.fork_from_baseline(format!("bench-fork-{}", i), graph_lock);
-        timings_ms.push(st.total_ms);
-        info!(
-            iter = i,
-            clone_ms = st.clone_ms,
-            total_ms = st.total_ms,
-            active_scenarios = mgr.len(),
-            "fork done"
-        );
+        let t = Instant::now();
+        let (_s, _st) = mgr.fork_from_baseline(format!("bench-fork-{}", i), graph_lock);
+        let us = t.elapsed().as_micros() as u64;
+        timings_us.push(us);
+        if i < 5 || i % 50 == 0 {
+            info!(
+                iter = i,
+                fork_us = us,
+                active_scenarios = mgr.len(),
+                "fork done"
+            );
+        }
     }
+    let total_us: u64 = timings_us.iter().sum();
+    let timings_ms: Vec<u64> = timings_us.iter().map(|&us| us / 1000).collect();
+    let total: u64 = timings_ms.iter().sum();
+    let avg = total as f64 / n as f64;
+    let mut sorted = timings_ms.clone();
+    sorted.sort_unstable();
+    let p50 = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64) * 0.95) as usize];
+    let max = *sorted.last().unwrap();
+    // Also report µs versions because ms is too coarse with ArcSwap.
+    let mut sorted_us = timings_us.clone();
+    sorted_us.sort_unstable();
+    let p50_us = sorted_us[sorted_us.len() / 2];
+    let p95_us = sorted_us[((sorted_us.len() as f64) * 0.95) as usize];
+    let max_us = *sorted_us.last().unwrap();
+    info!(
+        total_us,
+        p50_us,
+        p95_us,
+        max_us,
+        "BENCH (µs precision — P2.1.a ArcSwap)"
+    );
     let total: u64 = timings_ms.iter().sum();
     let avg = total as f64 / n as f64;
     let mut sorted = timings_ms.clone();

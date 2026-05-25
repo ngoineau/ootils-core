@@ -26,7 +26,6 @@
 use crate::state::{Graph, Node, NodeIndex};
 use ahash::RandomState;
 use dashmap::DashMap;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use uuid::Uuid;
@@ -111,22 +110,26 @@ impl ScenarioManager {
     }
 
     /// Fork the current baseline into a new scenario.
-    /// The clone of the Graph is the dominant cost (~100-200 ms on L).
-    /// Cheaper paths are possible with persistent data structures; see
-    /// the module-level doc and ADR-017 phase-5 notes.
+    ///
+    /// Phase 2.1.a (F-026 audit closure): switched from
+    /// `Arc<RwLock<Graph>>` deep-clone (~50ms, 76 MB per fork) to
+    /// `ArcSwap<Graph>::load_full()` (refcount bump only, sub-µs).
+    /// The scenario's `baseline_snapshot` is a refcounted Arc to the
+    /// CURRENT baseline; when the baseline gets updated via ArcSwap,
+    /// existing scenarios keep their historic snapshot consistent.
+    /// New forks pick up the new baseline. That's by design — what-if
+    /// must stay coherent with the state it was created from.
     pub fn fork_from_baseline(
         &self,
         name: String,
-        baseline_lock: &RwLock<Graph>,
+        baseline: &arc_swap::ArcSwap<Graph>,
     ) -> (Arc<Scenario>, ForkStats) {
         let t0 = Instant::now();
-        // Clone the baseline Graph under the read lock — this is the
-        // expensive bit. We MUST release the lock before allocating
-        // anything else lest we serialize all forks behind it.
-        let snapshot: Arc<Graph> = {
-            let g = baseline_lock.read();
-            Arc::new((*g).clone())
-        };
+        // O(1) refcount bump — no deep clone. The Graph data is shared
+        // with the live baseline until the baseline is mutated, at
+        // which point ArcSwap publishes a new Arc and this Scenario
+        // continues to hold the old one (still alive via refcount).
+        let snapshot: Arc<Graph> = baseline.load_full();
         let clone_ms = t0.elapsed().as_millis() as u64;
 
         let scenario = Arc::new(Scenario::new(name, None, snapshot));

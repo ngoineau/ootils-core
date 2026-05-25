@@ -10,7 +10,7 @@
 //! still return `Unimplemented` and reference the phase that will fill
 //! them in.
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use prost_types::Timestamp;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -32,12 +32,23 @@ use crate::write_behind::{PendingDelta, WriteBehindQueue};
 pub struct EngineSvc {
     boot_time: Instant,
     boot_timestamp: Timestamp,
-    /// Baseline state. F-009 (Cluster F audit response): the
-    /// propagation pipeline takes a READ lock during its parallel
-    /// compute phase + a brief WRITE lock to apply. Other handlers
-    /// (Health/GetNode/ListScenarios) can take read locks concurrently
-    /// with the compute phase.
-    baseline: Arc<RwLock<Graph>>,
+    /// Baseline state.
+    ///
+    /// Phase 2.1.a (F-026 closure): `ArcSwap<Graph>` replaces the
+    /// previous `RwLock<Graph>`. Reads take zero-cost `load_full()`
+    /// snapshots; writes clone the Graph, mutate, then atomic-swap.
+    /// Trade-off: baseline propagations are now ~clone-time slower
+    /// (~50-100 ms vs ~ms in-place) BUT scenario forks become O(1)
+    /// instead of O(N) — the multi-user what-if pattern that Phase 2
+    /// targets has scenario propagations as the hot path, baseline
+    /// updates are rare (Q3 design decision: max hourly).
+    ///
+    /// F-009 still holds: plan_compute reads via load() (no lock),
+    /// apply mutates a CLONE of the current Arc<Graph> + swaps.
+    /// The `propagation_lock` serializes baseline mutations among
+    /// themselves so two concurrent baseline propagations can't both
+    /// clone-mutate-swap and clobber.
+    baseline: Arc<ArcSwap<Graph>>,
     /// COW scenarios on top of the baseline (phase 4).
     scenarios: Arc<ScenarioManager>,
     /// WAL + write-behind queue (phase 5). After propagation we append
@@ -59,7 +70,7 @@ pub struct EngineSvc {
 impl EngineSvc {
     pub fn new(
         boot_time: Instant,
-        baseline: Arc<RwLock<Graph>>,
+        baseline: Arc<ArcSwap<Graph>>,
         writeback: Arc<WriteBehindQueue>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -92,7 +103,7 @@ impl Engine for EngineSvc {
         // overflow (uptime > 292 billion years).
         let uptime = i64::try_from(self.boot_time.elapsed().as_secs())
             .unwrap_or(i64::MAX);
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         // F-040 fix: user-facing detail — no internal "phase N"
         // nomenclature (ADR-017 implementation jargon).
         let detail = format!(
@@ -114,7 +125,7 @@ impl Engine for EngineSvc {
         // Prometheus exposition; this RPC is the typed counterpart for
         // programmatic callers.
         use std::sync::atomic::Ordering;
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         let baseline_bytes = g.memory_bytes() as i64;
         drop(g);
         let scenarios_bytes: i64 = self
@@ -164,7 +175,7 @@ impl Engine for EngineSvc {
         // Always surface the baseline + every active fork.
         let mut out: Vec<ScenarioInfo> = Vec::new();
         {
-            let g = self.baseline.read();
+            let g = self.baseline.load_full();
             out.push(ScenarioInfo {
                 id: "00000000-0000-0000-0000-000000000001".into(),
                 name: "baseline".into(),
@@ -268,18 +279,24 @@ impl Engine for EngineSvc {
             .get(&sid)
             .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
 
-        // Apply the overlay into the baseline. Single write-lock burst.
+        // Apply the overlay into the baseline. With ArcSwap (P2.1.a)
+        // this is now a clone-on-write: take a snapshot, mutate the
+        // snapshot, atomic-swap. The propagation_lock serializes with
+        // concurrent baseline propagations so we don't lose a write.
         let n_merged: i64 = {
-            let mut g = self.baseline.write();
+            let _guard = self.propagation_lock.lock();
+            let current = self.baseline.load_full();
+            let mut new_graph: Graph = (*current).clone();
             let mut n = 0i64;
             for entry in scenario.overlay.iter() {
                 let idx = *entry.key();
-                if let Some(slot) = g.nodes.get_mut(idx as usize) {
+                if let Some(slot) = new_graph.nodes.get_mut(idx as usize) {
                     *slot = entry.value().clone();
                     n += 1;
                 }
             }
-            g.generation = g.generation.wrapping_add(1);
+            new_graph.generation = new_graph.generation.wrapping_add(1);
+            self.baseline.store(Arc::new(new_graph));
             n
         };
 
@@ -291,7 +308,7 @@ impl Engine for EngineSvc {
             .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
 
         let new_gen = {
-            let g = self.baseline.read();
+            let g = self.baseline.load_full();
             g.generation.to_string()
         };
 
@@ -316,7 +333,7 @@ impl Engine for EngineSvc {
         let node_id = Uuid::from_str(&q.node_id)
             .map_err(|e| Status::invalid_argument(format!("bad node_id: {e}")))?;
 
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         let node = g
             .get_node(&node_id)
             .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?;
@@ -380,7 +397,7 @@ impl Engine for EngineSvc {
 
         let mut dirty = HashSet::new();
         {
-            let g = self.baseline.read();
+            let g = self.baseline.load_full();
             // Look up the trigger node, then enumerate PIs in the same
             // (item, location) couple — same dirty-cascade contract as
             // the Python/SQL/Rust-A engines.
@@ -442,24 +459,28 @@ impl Engine for EngineSvc {
         let prop_lock = self.propagation_lock.clone();
         let blocking_outcome = tokio::task::spawn_blocking(
             move || -> Result<(propagator::PropagationStats, f64), Status> {
-                // Serialize propagations with each other (F-009: keeps
-                // the read+write split correct under multi-tenant
-                // load — without this, two propagations could read
-                // the same state, compute conflicting deltas, then
-                // both apply and clobber each other).
+                // Serialize baseline propagations with each other
+                // (P2.1.a clone-on-write needs serialization to avoid
+                // lost updates; the WAL marker contract also assumes
+                // one writer at a time).
                 let _propagation_guard = prop_lock.lock();
 
-                // Phase 1: compute under READ lock — concurrent reads OK.
-                let computed = {
-                    let g = baseline.read();
-                    propagator::plan_compute(&g, &dirty)
-                };
+                // Phase 1: compute against a cheap snapshot of the
+                // current baseline. ArcSwap::load_full() is a
+                // refcount bump only — concurrent readers (other
+                // handlers, scenario reads, fork operations) see the
+                // same snapshot or a newer one without blocking.
+                let snapshot = baseline.load_full();
+                let computed = propagator::plan_compute(&snapshot, &dirty);
 
-                // Phase 2: apply under brief WRITE lock.
-                let stats = {
-                    let mut g = baseline.write();
-                    propagator::apply(&mut g, computed, &dirty)
-                };
+                // Phase 2: clone-on-write apply. We must not mutate
+                // the snapshot's Arc<Graph> in place (other scenarios
+                // may be holding references to it). Clone it, mutate
+                // the clone, atomic-swap as the new baseline.
+                let mut new_graph: Graph = (*snapshot).clone();
+                drop(snapshot);
+                let stats = propagator::apply(&mut new_graph, computed, &dirty);
+                baseline.store(Arc::new(new_graph));
 
                 let mut wal_fsync_us = 0.0;
                 if !stats.deltas.is_empty() {
