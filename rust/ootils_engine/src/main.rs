@@ -105,29 +105,38 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // ---- WAL + write-behind durability (phase 5) ----
+    // ---- WAL + write-behind durability (phase 5, v2 hardened) ----
     let wal = Arc::new(wal::WalWriter::open(&cli.wal_path)?);
-    // Replay any records left over from a prior crash. They've been
-    // already-applied to RAM via Postgres if Postgres caught up, but
-    // because the WAL is only truncated AFTER PG flush succeeds, the
-    // remaining records are guaranteed durable + Postgres-pending.
-    // We replay them into the in-RAM graph and enqueue for re-flush
-    // to Postgres.
+    // Replay any records left over from a prior crash. WAL v2's
+    // `replay()` already skips records with seq <= applied_pg_seq
+    // (the durably-flushed-to-PG marker), so what we get back is
+    // exactly the set of records that are durable on disk but may NOT
+    // be in Postgres yet. We:
+    //   (a) apply them to RAM (so the in-RAM graph reflects post-crash
+    //       state)
+    //   (b) re-enqueue them for the bg flusher with their original seq
+    //   (c) let the seq-guarded PG UPDATE either insert them or skip
+    //       them if PG already has equal/newer data (F-014).
     let recovered = wal.replay()?;
     if !recovered.is_empty() {
         let n_recs = recovered.len();
-        let n_deltas: usize = recovered.iter().map(|r| r.deltas.len()).sum();
+        let n_deltas: usize = recovered.iter().map(|r| r.record.deltas.len()).sum();
+        let min_seq = recovered.first().map(|r| r.seq).unwrap_or(0);
+        let max_seq = recovered.last().map(|r| r.seq).unwrap_or(0);
         warn!(
             n_records = n_recs,
             n_deltas,
+            applied_pg_seq = wal.applied_pg_seq(),
+            seq_range_min = min_seq,
+            seq_range_max = max_seq,
             wal = %cli.wal_path.display(),
-            "recovering from non-empty WAL — replay starting"
+            "recovering from non-empty WAL — replay starting (records with seq > applied_pg_seq)"
         );
         let mut g = graph_lock.write();
         let by_id = &g.by_node_id;
         let mut idx_pairs: Vec<(usize, wal::NodeDelta)> = Vec::with_capacity(n_deltas);
-        for rec in &recovered {
-            for d in &rec.deltas {
+        for sr in &recovered {
+            for d in &sr.record.deltas {
                 if let Some(&idx) = by_id.get(&d.node_id) {
                     idx_pairs.push((idx as usize, d.clone()));
                 }
@@ -177,13 +186,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // If we recovered from WAL, also re-enqueue those deltas for
-    // Postgres flush (since they were durable in WAL but Postgres
-    // hadn't caught up).
+    // Postgres flush. Each delta carries the seq of the record it
+    // came from — the PG UPDATE's seq-guard (write_behind.rs A6 /
+    // F-014) ensures we never clobber newer PG state with an older
+    // replay value.
     if !recovered.is_empty() {
         let mut deltas = Vec::new();
-        for rec in recovered {
-            for d in rec.deltas {
-                deltas.push(write_behind::PendingDelta::from(d));
+        for sr in recovered {
+            let seq = sr.seq;
+            for d in sr.record.deltas {
+                deltas.push(write_behind::PendingDelta::from_delta(seq, d));
             }
         }
         queue.push(deltas);
@@ -193,8 +205,17 @@ async fn main() -> anyhow::Result<()> {
     let engine = service::EngineSvc::new(boot_time, graph_lock, queue, metrics_registry);
 
     info!(addr = %cli.listen, "gRPC server listening");
+    // F-016: symmetric message-size limits with the Python client
+    // (which lifts to 256 MB in client.py). Without explicit
+    // .max_decoding_message_size on the server, tonic 0.12 defaults to
+    // 4 MB and rejects larger requests with an unhelpful
+    // RESOURCE_EXHAUSTED.
+    const MAX_MSG_BYTES: usize = 256 * 1024 * 1024;
+    let engine_svc = ootils_proto::engine::v1::engine_server::EngineServer::new(engine)
+        .max_decoding_message_size(MAX_MSG_BYTES)
+        .max_encoding_message_size(MAX_MSG_BYTES);
     let server = Server::builder()
-        .add_service(ootils_proto::engine::v1::engine_server::EngineServer::new(engine))
+        .add_service(engine_svc)
         .serve_with_shutdown(cli.listen, shutdown_signal());
     server.await?;
     info!("ootils-engine shut down cleanly");

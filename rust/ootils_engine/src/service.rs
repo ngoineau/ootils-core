@@ -272,6 +272,32 @@ impl Engine for EngineSvc {
         let q = req.into_inner();
         debug!(event_id = %q.event_id, event_type = %q.event_type, "Propagate");
 
+        // F-006: until per-scenario propagation lands (ADR-018), refuse
+        // any non-baseline scenario_id. Empty string = caller asked for
+        // baseline implicitly, also accepted. Anything else → loud error
+        // instead of silent baseline corruption.
+        if !q.scenario_id.is_empty() {
+            let req_scenario = Uuid::from_str(&q.scenario_id)
+                .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+            if req_scenario != crate::loader::BASELINE_SCENARIO_ID {
+                return Err(Status::unimplemented(format!(
+                    "per-scenario propagation pending — ADR-018; only baseline ({}) is currently supported, got {}",
+                    crate::loader::BASELINE_SCENARIO_ID,
+                    req_scenario
+                )));
+            }
+        }
+
+        // F-015: event_id must parse cleanly. Empty = caller asked us to
+        // generate a calc_run_id; bad UUID = strict error (no silent
+        // fallback to a fresh v4 which would break the audit chain).
+        let cr_uuid = if q.event_id.is_empty() {
+            Uuid::new_v4()
+        } else {
+            Uuid::parse_str(&q.event_id)
+                .map_err(|e| Status::invalid_argument(format!("bad event_id: {e}")))?
+        };
+
         // Phase 3 minimal contract: trigger_node_id identifies one PI
         // (or a node whose item/loc maps to PIs). We mark the
         // associated PI series dirty + propagate. Real event-type
@@ -333,24 +359,33 @@ impl Engine for EngineSvc {
         let mut wal_fsync_us = 0.0;
         if !stats.deltas.is_empty() {
             let t_wal = Instant::now();
-            // Use the trigger event_id as calc_run_id for phase 5 — phase
-            // 6 will plumb a proper calc_run model.
-            let cr_uuid = Uuid::parse_str(&q.event_id).unwrap_or_else(|_| Uuid::new_v4());
+            // Use the parsed event_id (or freshly generated above) as
+            // calc_run_id for phase 5 — phase 6 will plumb a proper
+            // calc_run model.
             let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
             let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
-            if let Err(e) = self.writeback.wal().append(&record) {
-                self.metrics.record_failure();
-                return Err(Status::internal(format!("WAL append failed: {e}")));
-            }
+            let assigned_seq = match self.writeback.wal().append(&record) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.metrics.record_failure();
+                    return Err(Status::internal(format!("WAL append failed: {e}")));
+                }
+            };
             wal_fsync_us = t_wal.elapsed().as_micros() as f64;
             self.metrics
                 .wal_appends_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // Enqueue (non-blocking). The bg flusher picks it up within
-            // flush_interval_ms.
-            let pending: Vec<PendingDelta> =
-                stats.deltas.iter().cloned().map(PendingDelta::from).collect();
+            // flush_interval_ms. Every delta carries the seq assigned
+            // to its WAL record so the PG UPDATE's seq-guard can
+            // detect stale writes (A6 / F-014).
+            let pending: Vec<PendingDelta> = stats
+                .deltas
+                .iter()
+                .cloned()
+                .map(|d| PendingDelta::from_delta(assigned_seq, d))
+                .collect();
             self.writeback.push(pending);
         }
 
@@ -366,7 +401,7 @@ impl Engine for EngineSvc {
         );
 
         Ok(Response::new(PropagateResponse {
-            calc_run_id: q.event_id,
+            calc_run_id: cr_uuid.to_string(),
             nodes_processed: stats.n_processed as i32,
             nodes_changed: stats.n_changed as i32,
             shortages_detected: stats.n_shortages as i32,
