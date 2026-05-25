@@ -41,9 +41,34 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_postgres::NoTls;
+use tokio_postgres::{IsolationLevel, NoTls, Statement};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Statement timeout applied to the cached PG client. Caps the worst
+/// case of a single flush hanging on a slow/wedged Postgres. 30 s is
+/// generous for a 10K-batch UPDATE and well under the 30 s backoff
+/// cap so a wedged flush retries quickly.
+const PG_STATEMENT_TIMEOUT_MS: u32 = 30_000;
+
+/// Bulk UPDATE for the write-behind path. Guarded by `last_calc_seq`
+/// (F-014) so older WAL records cannot clobber newer PG state.
+const FLUSH_UPDATE_SQL: &str = "\
+    UPDATE nodes \
+    SET opening_stock = u.opening_stock, \
+        inflows = u.inflows, \
+        outflows = u.outflows, \
+        closing_stock = u.closing_stock, \
+        has_shortage = u.has_shortage, \
+        shortage_qty = u.shortage_qty, \
+        last_calc_seq = u.seq, \
+        updated_at = now() \
+    FROM UNNEST($1::uuid[], $2::bigint[], $3::numeric[], $4::numeric[], \
+                $5::numeric[], $6::numeric[], $7::bool[], $8::numeric[]) \
+         AS u(node_id, seq, opening_stock, inflows, outflows, \
+              closing_stock, has_shortage, shortage_qty) \
+    WHERE nodes.node_id = u.node_id \
+      AND (nodes.last_calc_seq IS NULL OR nodes.last_calc_seq < u.seq)";
 
 /// One PI's worth of writeback state, tagged with the seq assigned at
 /// WAL-append time. Deduped by node_id (keep highest seq) on failed
@@ -244,6 +269,128 @@ fn keep_latest(map: &mut HashMap<Uuid, PendingDelta>, d: PendingDelta) {
         .or_insert(d);
 }
 
+/// Cached Postgres client + prepared statement for the write-behind
+/// path. F-012 fix: avoids the TCP+auth handshake on every flush
+/// (~10-30 ms overhead at the previous 100 ms cadence = 10-30% of the
+/// flush budget wasted). On any PG error the client is dropped and
+/// the next flush reconnects + re-prepares — bounded blast radius for
+/// transient PG hiccups.
+pub struct PgFlushClient {
+    dsn: String,
+    state: Option<(tokio_postgres::Client, Statement)>,
+}
+
+impl PgFlushClient {
+    pub fn new(dsn: String) -> Self {
+        Self { dsn, state: None }
+    }
+
+    /// Open the cached connection if not already live + prepare the
+    /// bulk UPDATE statement. Sets statement_timeout on the session.
+    async fn ensure_connected(&mut self) -> anyhow::Result<()> {
+        if self.state.is_some() {
+            return Ok(());
+        }
+        let (client, connection) = tokio_postgres::connect(&self.dsn, NoTls).await?;
+        // The connection future drives the wire protocol. When it
+        // returns, the client is dead. We spawn it detached because
+        // the client's lifetime owns the failure semantics — when we
+        // detect an error on a flush we drop the client, which makes
+        // the spawned future return Ready and exit.
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!(error = %e, "PG flush connection task ended");
+            }
+        });
+        // F-012: statement timeout caps the worst-case hang on a
+        // wedged PG.
+        client
+            .batch_execute(&format!(
+                "SET statement_timeout = {}",
+                PG_STATEMENT_TIMEOUT_MS
+            ))
+            .await?;
+        let stmt = client.prepare(FLUSH_UPDATE_SQL).await?;
+        info!(timeout_ms = PG_STATEMENT_TIMEOUT_MS, "PG flush client connected + statement prepared");
+        self.state = Some((client, stmt));
+        Ok(())
+    }
+
+    /// Drop the cached connection. Used when a flush errors so the
+    /// next call reconnects from scratch (the connection may be in a
+    /// half-broken state after a network blip or PG restart).
+    fn invalidate(&mut self) {
+        if self.state.take().is_some() {
+            debug!("PG flush client invalidated, will reconnect on next flush");
+        }
+    }
+
+    /// Run one bulk UPDATE batch inside a REPEATABLE READ tx.
+    ///
+    /// F-024 fix: explicit isolation level. The previous code relied
+    /// on PG's READ COMMITTED default, which under mixed-mode canary
+    /// (rust-svc + SQL engine writing concurrently) allowed
+    /// field-level inconsistency between the two writers. REPEATABLE
+    /// READ guarantees that the rows we update see a consistent
+    /// snapshot of last_calc_seq across the whole batch.
+    pub async fn flush(&mut self, batch: &[PendingDelta]) -> anyhow::Result<()> {
+        self.ensure_connected().await?;
+
+        let n = batch.len();
+        let mut node_ids: Vec<Uuid> = Vec::with_capacity(n);
+        let mut seqs: Vec<i64> = Vec::with_capacity(n);
+        let mut openings: Vec<Decimal> = Vec::with_capacity(n);
+        let mut inflows: Vec<Decimal> = Vec::with_capacity(n);
+        let mut outflows: Vec<Decimal> = Vec::with_capacity(n);
+        let mut closings: Vec<Decimal> = Vec::with_capacity(n);
+        let mut has_shortages: Vec<bool> = Vec::with_capacity(n);
+        let mut shortage_qtys: Vec<Decimal> = Vec::with_capacity(n);
+        for d in batch {
+            node_ids.push(d.node_id);
+            seqs.push(d.seq as i64);
+            openings.push(d.opening_stock);
+            inflows.push(d.inflows);
+            outflows.push(d.outflows);
+            closings.push(d.closing_stock);
+            has_shortages.push(d.has_shortage);
+            shortage_qtys.push(d.shortage_qty);
+        }
+
+        let result: anyhow::Result<()> = async {
+            let (client, stmt) = self.state.as_mut().expect("ensure_connected returned Ok");
+            let tx = client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await?;
+            tx.execute(
+                stmt,
+                &[
+                    &node_ids,
+                    &seqs,
+                    &openings,
+                    &inflows,
+                    &outflows,
+                    &closings,
+                    &has_shortages,
+                    &shortage_qtys,
+                ],
+            )
+            .await?;
+            tx.commit().await?;
+            debug!(n, "wrote batch to Postgres (REPEATABLE READ tx, cached client)");
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            // Conn may be wedged / closed by PG. Force reconnect next call.
+            self.invalidate();
+        }
+        result
+    }
+}
+
 /// Spawn the background flush task. Returns the JoinHandle so callers
 /// (main) can wait for it during graceful shutdown.
 ///
@@ -265,6 +412,9 @@ pub fn spawn_flusher(
         let max_backoff = Duration::from_secs(30);
         let mut current_interval = baseline_interval;
         let mut consecutive_failures = 0u32;
+        // F-012: one cached client for the lifetime of the flusher,
+        // reconnecting only on PG-side errors.
+        let mut pg = PgFlushClient::new(dsn);
         info!(flush_interval_ms, "write-behind flusher started");
 
         loop {
@@ -291,7 +441,7 @@ pub fn spawn_flusher(
                 continue;
             }
             let n = batch.len();
-            match flush_to_postgres(&dsn, &batch).await {
+            match pg.flush(&batch).await {
                 Ok(_) => {
                     queue.metrics.record_pg_flush_success();
                     if let Err(e) = queue.wal.set_applied_pg_seq(max_seq) {
@@ -441,73 +591,7 @@ mod tests {
     }
 }
 
-/// Bulk UPDATE Postgres `nodes` via UNNEST array params, guarded by
-/// `last_calc_seq` so older WAL records cannot clobber newer PG state
-/// (F-014). Sets `last_calc_seq = u.seq` on every applied row.
-///
-/// F-004 fix: no `SET session_replication_role = 'replica'` — that
-/// required SUPERUSER and the trigger has been dropped by migration.
-async fn flush_to_postgres(
-    dsn: &str,
-    batch: &[PendingDelta],
-) -> anyhow::Result<()> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            warn!(error = %e, "flush postgres connection task ended");
-        }
-    });
-
-    let n = batch.len();
-    let mut node_ids: Vec<Uuid> = Vec::with_capacity(n);
-    let mut seqs: Vec<i64> = Vec::with_capacity(n);
-    let mut openings: Vec<Decimal> = Vec::with_capacity(n);
-    let mut inflows: Vec<Decimal> = Vec::with_capacity(n);
-    let mut outflows: Vec<Decimal> = Vec::with_capacity(n);
-    let mut closings: Vec<Decimal> = Vec::with_capacity(n);
-    let mut has_shortages: Vec<bool> = Vec::with_capacity(n);
-    let mut shortage_qtys: Vec<Decimal> = Vec::with_capacity(n);
-    for d in batch {
-        node_ids.push(d.node_id);
-        seqs.push(d.seq as i64); // u64 → i64; safe up to 2^63 propagations
-        openings.push(d.opening_stock);
-        inflows.push(d.inflows);
-        outflows.push(d.outflows);
-        closings.push(d.closing_stock);
-        has_shortages.push(d.has_shortage);
-        shortage_qtys.push(d.shortage_qty);
-    }
-
-    client
-        .execute(
-            "UPDATE nodes \
-             SET opening_stock = u.opening_stock, \
-                 inflows = u.inflows, \
-                 outflows = u.outflows, \
-                 closing_stock = u.closing_stock, \
-                 has_shortage = u.has_shortage, \
-                 shortage_qty = u.shortage_qty, \
-                 last_calc_seq = u.seq, \
-                 updated_at = now() \
-             FROM UNNEST($1::uuid[], $2::bigint[], $3::numeric[], $4::numeric[], \
-                         $5::numeric[], $6::numeric[], $7::bool[], $8::numeric[]) \
-                  AS u(node_id, seq, opening_stock, inflows, outflows, \
-                       closing_stock, has_shortage, shortage_qty) \
-             WHERE nodes.node_id = u.node_id \
-               AND (nodes.last_calc_seq IS NULL OR nodes.last_calc_seq < u.seq)",
-            &[
-                &node_ids,
-                &seqs,
-                &openings,
-                &inflows,
-                &outflows,
-                &closings,
-                &has_shortages,
-                &shortage_qtys,
-            ],
-        )
-        .await?;
-
-    debug!(n, "wrote batch to Postgres");
-    Ok(())
-}
+// `flush_to_postgres` (one-shot connect-per-flush) was replaced by
+// PgFlushClient above (Cluster D, F-012). The new client caches the
+// connection + prepared statement and explicitly uses REPEATABLE READ
+// isolation (F-024).
