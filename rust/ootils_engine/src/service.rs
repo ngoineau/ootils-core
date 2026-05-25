@@ -25,6 +25,8 @@ use ootils_proto::engine::v1::{engine_server::Engine, health_status::Status as H
 use crate::propagator;
 use crate::scenario::ScenarioManager;
 use crate::state::{Graph, NodeType};
+use crate::wal::make_record;
+use crate::write_behind::{PendingDelta, WriteBehindQueue};
 
 pub struct EngineSvc {
     boot_time: Instant,
@@ -36,16 +38,25 @@ pub struct EngineSvc {
     baseline: Arc<RwLock<Graph>>,
     /// COW scenarios on top of the baseline (phase 4).
     scenarios: Arc<ScenarioManager>,
+    /// WAL + write-behind queue (phase 5). After propagation we append
+    /// deltas to the WAL synchronously (fsync) and enqueue them for
+    /// async Postgres flush.
+    writeback: Arc<WriteBehindQueue>,
 }
 
 impl EngineSvc {
-    pub fn new(boot_time: Instant, baseline: Arc<RwLock<Graph>>) -> Self {
+    pub fn new(
+        boot_time: Instant,
+        baseline: Arc<RwLock<Graph>>,
+        writeback: Arc<WriteBehindQueue>,
+    ) -> Self {
         let now = std::time::SystemTime::now();
         Self {
             boot_time,
             boot_timestamp: Timestamp::from(now),
             baseline,
             scenarios: Arc::new(ScenarioManager::new()),
+            writeback,
         }
     }
 }
@@ -301,11 +312,35 @@ impl Engine for EngineSvc {
             let mut g = self.baseline.write();
             propagator::propagate(&mut g, &dirty)
         };
+
+        // Durability barrier — phase 5. Append the deltas to the WAL
+        // (fsync), then enqueue for async Postgres flush. After this
+        // point the caller's "OK" response means: state is durable on
+        // disk, even if Postgres lags by up to flush_interval_ms.
+        let mut wal_fsync_us = 0.0;
+        if !stats.deltas.is_empty() {
+            let t_wal = Instant::now();
+            // Use the trigger event_id as calc_run_id for phase 5 — phase
+            // 6 will plumb a proper calc_run model.
+            let cr_uuid = Uuid::parse_str(&q.event_id).unwrap_or_else(|_| Uuid::new_v4());
+            let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
+            let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
+            if let Err(e) = self.writeback.wal().append(&record) {
+                return Err(Status::internal(format!("WAL append failed: {e}")));
+            }
+            wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+
+            // Enqueue (non-blocking). The bg flusher picks it up within
+            // flush_interval_ms.
+            let pending: Vec<PendingDelta> =
+                stats.deltas.iter().cloned().map(PendingDelta::from).collect();
+            self.writeback.push(pending);
+        }
+
         let total_us = t_total.elapsed().as_micros() as f64;
 
         Ok(Response::new(PropagateResponse {
-            // Phase 3 doesn't yet generate a calc_run row — leave empty.
-            calc_run_id: String::new(),
+            calc_run_id: q.event_id,
             nodes_processed: stats.n_processed as i32,
             nodes_changed: stats.n_changed as i32,
             shortages_detected: stats.n_shortages as i32,
@@ -313,7 +348,7 @@ impl Engine for EngineSvc {
                 dirty_expand_us: 0.0,
                 compute_us: stats.compute_us as f64,
                 shortage_detect_us: 0.0,
-                wal_fsync_us: 0.0,
+                wal_fsync_us,
                 total_us,
             }),
         }))
