@@ -17,23 +17,25 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use ootils_proto::engine::v1::{engine_server::Engine, health_status::Status as HealthEnum, *};
 
 use crate::propagator;
+use crate::scenario::ScenarioManager;
 use crate::state::{Graph, NodeType};
 
 pub struct EngineSvc {
     boot_time: Instant,
     boot_timestamp: Timestamp,
-    /// Baseline scenario state — phase 3 uses an RwLock for in-place
-    /// mutation. Phase 4 will refactor to `ArcSwap<Graph>` + per-
-    /// scenario COW overlays (matching ADR-017 §3.2). For now, all
-    /// reads grab the read lock (concurrent), the propagator grabs
-    /// the write lock briefly per call.
+    /// Baseline state — phase 3-4 still uses an RwLock for in-place
+    /// mutation of the baseline. Phase 5+ may swap this for
+    /// `ArcSwap<Graph>` if benchmarks of structural-sharing variants
+    /// justify it.
     baseline: Arc<RwLock<Graph>>,
+    /// COW scenarios on top of the baseline (phase 4).
+    scenarios: Arc<ScenarioManager>,
 }
 
 impl EngineSvc {
@@ -43,6 +45,7 @@ impl EngineSvc {
             boot_time,
             boot_timestamp: Timestamp::from(now),
             baseline,
+            scenarios: Arc::new(ScenarioManager::new()),
         }
     }
 }
@@ -96,17 +99,115 @@ impl Engine for EngineSvc {
         &self,
         _req: Request<()>,
     ) -> Result<Response<ScenarioList>, Status> {
-        // Phase 2 surfaces only the baseline. Forks land in phase 4.
-        let g = self.baseline.read();
-        Ok(Response::new(ScenarioList {
-            scenarios: vec![ScenarioInfo {
+        // Always surface the baseline + every active fork.
+        let mut out: Vec<ScenarioInfo> = Vec::new();
+        {
+            let g = self.baseline.read();
+            out.push(ScenarioInfo {
                 id: "00000000-0000-0000-0000-000000000001".into(),
                 name: "baseline".into(),
                 parent_id: String::new(),
                 created_at: Some(self.boot_timestamp.clone()),
                 overlay_size: 0,
                 memory_bytes: g.memory_bytes() as i64,
-            }],
+            });
+        }
+        for s in self.scenarios.list() {
+            out.push(ScenarioInfo {
+                id: s.id.to_string(),
+                name: s.name.clone(),
+                parent_id: s
+                    .parent_id
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+                created_at: Some(Timestamp::from(s.created_at_system)),
+                overlay_size: s.overlay_size() as i32,
+                memory_bytes: (s.baseline_snapshot.memory_bytes()
+                    + s.overlay_memory_bytes()) as i64,
+            });
+        }
+        Ok(Response::new(ScenarioList { scenarios: out }))
+    }
+
+    async fn fork_scenario(
+        &self,
+        req: Request<ForkRequest>,
+    ) -> Result<Response<ScenarioInfo>, Status> {
+        let q = req.into_inner();
+        let name = if q.name.is_empty() {
+            format!("fork-{}", &Uuid::new_v4().to_string()[..8])
+        } else {
+            q.name
+        };
+        // Phase 4: forks are always from baseline. Parent-scenario forks
+        // (forking a fork) is a phase-5 elaboration.
+        let (scenario, stats) = self.scenarios.fork_from_baseline(name.clone(), &self.baseline);
+        info!(
+            scenario_id = %scenario.id,
+            name = %scenario.name,
+            clone_ms = stats.clone_ms,
+            total_ms = stats.total_ms,
+            "scenario forked from baseline"
+        );
+        Ok(Response::new(ScenarioInfo {
+            id: scenario.id.to_string(),
+            name: scenario.name.clone(),
+            parent_id: scenario
+                .parent_id
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
+            created_at: Some(Timestamp::from(scenario.created_at_system)),
+            overlay_size: 0,
+            memory_bytes: scenario.baseline_snapshot.memory_bytes() as i64,
+        }))
+    }
+
+    async fn merge_scenario(
+        &self,
+        req: Request<MergeRequest>,
+    ) -> Result<Response<MergeResult>, Status> {
+        let q = req.into_inner();
+        let sid = Uuid::from_str(&q.scenario_id)
+            .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+
+        let scenario = self
+            .scenarios
+            .get(&sid)
+            .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
+
+        // Apply the overlay into the baseline. Single write-lock burst.
+        let n_merged: i64 = {
+            let mut g = self.baseline.write();
+            let mut n = 0i64;
+            for entry in scenario.overlay.iter() {
+                let idx = *entry.key();
+                if let Some(slot) = g.nodes.get_mut(idx as usize) {
+                    *slot = entry.value().clone();
+                    n += 1;
+                }
+            }
+            g.generation = g.generation.wrapping_add(1);
+            n
+        };
+
+        // Drop the scenario from the manager — merged is consumed.
+        self.scenarios.remove(&sid);
+
+        let new_gen = {
+            let g = self.baseline.read();
+            g.generation.to_string()
+        };
+
+        info!(
+            scenario_id = %sid,
+            nodes_merged = n_merged,
+            new_baseline_gen = %new_gen,
+            "scenario merged into baseline"
+        );
+
+        Ok(Response::new(MergeResult {
+            nodes_merged: n_merged as i32,
+            new_baseline_generation: new_gen,
         }))
     }
 
@@ -216,24 +317,6 @@ impl Engine for EngineSvc {
                 total_us,
             }),
         }))
-    }
-
-    async fn fork_scenario(
-        &self,
-        _req: Request<ForkRequest>,
-    ) -> Result<Response<ScenarioInfo>, Status> {
-        Err(Status::unimplemented(
-            "fork_scenario is not implemented yet — see ADR-017 phase 4",
-        ))
-    }
-
-    async fn merge_scenario(
-        &self,
-        _req: Request<MergeRequest>,
-    ) -> Result<Response<MergeResult>, Status> {
-        Err(Status::unimplemented(
-            "merge_scenario is not implemented yet — see ADR-017 phase 4",
-        ))
     }
 
     async fn query_shortages(
