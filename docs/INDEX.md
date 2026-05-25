@@ -16,6 +16,7 @@ Resolves R9 of [REVIEW-2026-05.md](REVIEW-2026-05.md).
 - [`../ROADMAP.md`](../ROADMAP.md) — V1 milestones.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — How to contribute.
 - [`STRATEGY.md`](STRATEGY.md) — Product strategy and positioning.
+- [`STRATEGY-autonomous-supply-chain-operations.md`](STRATEGY-autonomous-supply-chain-operations.md) — Agent-fleet operating model and proof plan for autonomous supply-chain operations.
 
 ## Architecture decisions (ADRs)
 
