@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 mod kernel;
 mod loader;
+mod metrics;
 mod propagator;
 mod scenario;
 mod service;
@@ -62,6 +63,11 @@ struct Cli {
     /// ADR-017 default.
     #[arg(long, env = "OOTILS_FLUSH_INTERVAL_MS", default_value = "100")]
     flush_interval_ms: u64,
+
+    /// Prometheus /metrics endpoint listen address. Set empty to
+    /// disable the metrics server.
+    #[arg(long, env = "OOTILS_METRICS_LISTEN", default_value = "127.0.0.1:9090")]
+    metrics_listen: String,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -143,7 +149,26 @@ async fn main() -> anyhow::Result<()> {
         info!(n_records = n_recs, n_deltas, "WAL replay applied to RAM");
     }
 
-    let queue = Arc::new(write_behind::WriteBehindQueue::new(wal.clone()));
+    // Item #2: Prometheus metrics — process-wide counter registry.
+    let metrics_registry = Arc::new(metrics::Metrics::new());
+    if !cli.metrics_listen.is_empty() {
+        match cli.metrics_listen.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let _metrics_handle =
+                    metrics::spawn_metrics_server(metrics_registry.clone(), addr);
+            }
+            Err(e) => {
+                warn!(error = %e, "invalid OOTILS_METRICS_LISTEN, metrics disabled");
+            }
+        }
+    } else {
+        info!("metrics endpoint disabled (OOTILS_METRICS_LISTEN empty)");
+    }
+
+    let queue = Arc::new(write_behind::WriteBehindQueue::new(
+        wal.clone(),
+        metrics_registry.clone(),
+    ));
     let dsn_for_flusher = cli.dsn.clone();
     let _flusher_handle = write_behind::spawn_flusher(
         queue.clone(),
@@ -165,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         info!("recovered deltas re-enqueued for Postgres flush");
     }
 
-    let engine = service::EngineSvc::new(boot_time, graph_lock, queue);
+    let engine = service::EngineSvc::new(boot_time, graph_lock, queue, metrics_registry);
 
     info!(addr = %cli.listen, "gRPC server listening");
     let server = Server::builder()

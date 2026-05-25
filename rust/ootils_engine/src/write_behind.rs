@@ -59,14 +59,16 @@ pub struct WriteBehindQueue {
     /// Tunable: max queue size before forcing a flush regardless of
     /// the timer.
     max_pending_before_flush: usize,
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl WriteBehindQueue {
-    pub fn new(wal: Arc<WalWriter>) -> Self {
+    pub fn new(wal: Arc<WalWriter>, metrics: Arc<crate::metrics::Metrics>) -> Self {
         Self {
             pending: Mutex::new(VecDeque::with_capacity(1024)),
             wal,
             max_pending_before_flush: 10_000,
+            metrics,
         }
     }
 
@@ -75,12 +77,20 @@ impl WriteBehindQueue {
     pub fn push(&self, deltas: impl IntoIterator<Item = PendingDelta>) -> bool {
         let mut q = self.pending.lock();
         q.extend(deltas);
-        q.len() >= self.max_pending_before_flush
+        let len = q.len();
+        self.metrics
+            .writeback_queue_depth
+            .store(len as i64, std::sync::atomic::Ordering::Relaxed);
+        len >= self.max_pending_before_flush
     }
 
     pub fn drain_batch(&self) -> Vec<PendingDelta> {
         let mut q = self.pending.lock();
-        q.drain(..).collect()
+        let out: Vec<_> = q.drain(..).collect();
+        self.metrics
+            .writeback_queue_depth
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -131,6 +141,7 @@ pub fn spawn_flusher(
             let n = batch.len();
             match flush_to_postgres(&dsn, &batch).await {
                 Ok(_) => {
+                    queue.metrics.record_pg_flush_success();
                     if let Err(e) = queue.wal.truncate_after_flush() {
                         error!(error = %e, "WAL truncate failed after PG flush");
                     } else {
@@ -146,6 +157,7 @@ pub fn spawn_flusher(
                     }
                 }
                 Err(e) => {
+                    queue.metrics.record_pg_flush_failure();
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     // Exponential backoff: baseline * 2^failures, capped at 30s.
                     let shift = consecutive_failures.min(8);

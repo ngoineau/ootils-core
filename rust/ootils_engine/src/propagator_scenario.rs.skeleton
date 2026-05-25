@@ -1,0 +1,71 @@
+//! propagator_scenario.rs.skeleton — proposed shape for per-scenario
+//! propagation (ADR-018).
+//!
+//! NOT WIRED UP. This file's extension is `.skeleton` precisely so the
+//! Rust build doesn't pick it up. When phase A of ADR-018 is taken,
+//! rename to `.rs` and include via `mod propagator_scenario;` in lib.rs.
+//!
+//! The skeleton documents the GraphAccessor trait + the pre-materialize
+//! strategy, so when implementation starts there's no design surprise.
+
+#![allow(dead_code)]
+
+use crate::scenario::Scenario;
+use crate::state::{EdgeRef, Graph, Node, NodeIndex};
+use std::collections::HashMap;
+
+/// Abstracts read+write access to either the baseline or a scenario
+/// overlay. Phase A of ADR-018 implements both impls + threads it
+/// through the propagator.
+pub trait GraphAccessor {
+    /// Borrow a node — returns Some(&Node) if accessor knows about it.
+    /// Overlay-first for scenarios; falls through to baseline snapshot.
+    fn get(&self, idx: NodeIndex) -> Option<&Node>;
+
+    /// Apply a result to the underlying store.
+    fn apply(&self, idx: NodeIndex, new: Node);
+
+    /// Read incoming edges. Edges live in the baseline (immutable);
+    /// scenarios don't currently support edge modifications.
+    fn edges_in(&self, idx: NodeIndex) -> &[EdgeRef];
+}
+
+// --- Baseline impl (today's path) ---
+// impl GraphAccessor for &mut Graph { ... }
+
+// --- Scenario impl (new in ADR-018) ---
+// Pre-materializes the dirty PIs + their incident supplies/demands
+// into a transient arena, then exposes them through GraphAccessor.
+// Cost: 1 memcpy per dirty PI at the start of propagation
+// (~150 KB for 1000 dirty PIs — well within L2 cache).
+//
+// pub struct ScenarioView<'a> {
+//     scenario: &'a Scenario,
+//     materialized: HashMap<NodeIndex, Node>,
+// }
+//
+// impl<'a> GraphAccessor for ScenarioView<'a> {
+//     fn get(&self, idx: NodeIndex) -> Option<&Node> {
+//         self.materialized.get(&idx)
+//             .or_else(|| self.scenario.baseline_snapshot.nodes.get(idx as usize))
+//     }
+//     fn apply(&self, idx: NodeIndex, new: Node) {
+//         self.scenario.write_node(idx, new);
+//     }
+//     fn edges_in(&self, idx: NodeIndex) -> &[EdgeRef] {
+//         self.scenario.baseline_snapshot.edges_in
+//             .get(&idx)
+//             .map(|v| v.as_slice())
+//             .unwrap_or(&[])
+//     }
+// }
+
+// --- Refactored propagator entry point ---
+// pub fn propagate<A: GraphAccessor>(
+//     accessor: A,
+//     dirty: &HashSet<NodeIndex>,
+// ) -> PropagationStats { ... }
+//
+// Used by both:
+//   - `service::Propagate` when scenario_id == baseline → impl on &mut Graph
+//   - `service::Propagate` when scenario_id is a fork → impl on ScenarioView
