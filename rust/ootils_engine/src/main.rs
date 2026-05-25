@@ -19,14 +19,20 @@
 //! - Phase 7: stress + observability
 //! - Phase 8: production rollout
 
+use arc_swap::ArcSwap;
 use clap::Parser;
 use mimalloc::MiMalloc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
+mod loader;
 mod service;
+mod state;
+
+use state::Graph;
 
 /// Use mimalloc as the global allocator. Bench-justified : 5-15% faster
 /// than the default on multi-threaded loads, lower fragmentation, mature.
@@ -66,7 +72,20 @@ async fn main() -> anyhow::Result<()> {
     // Saves the operator from booting a useless service if creds are wrong.
     verify_postgres(&cli.dsn).await?;
 
-    let engine = service::EngineSvc::new(boot_time);
+    // Bootstrap: load the baseline graph from Postgres into RAM.
+    // This is the heart of phase 2 — Postgres becomes a cold-start dep
+    // only, not a hot-path dep.
+    let (graph, load_stats) = loader::load_baseline(&cli.dsn).await?;
+    let baseline = Arc::new(ArcSwap::from_pointee(graph));
+    info!(
+        nodes = load_stats.n_nodes,
+        edges = load_stats.n_edges,
+        memory_mb = load_stats.memory_bytes / 1_048_576,
+        boot_load_ms = load_stats.elapsed_ms,
+        "baseline ready in RAM"
+    );
+
+    let engine = service::EngineSvc::new(boot_time, baseline);
 
     info!(addr = %cli.listen, "gRPC server listening");
     let server = Server::builder()
