@@ -43,6 +43,13 @@ pub struct Metrics {
     pub writeback_queue_depth: AtomicI64,
     /// Last sampled active scenario count (gauge).
     pub active_scenarios: AtomicI64,
+    /// Configured queue depth cap (F-005). Set once at boot.
+    pub queue_max_depth: AtomicI64,
+    /// Last sampled WAL file size in bytes (gauge, updated by the
+    /// flusher loop every flush_interval_ms).
+    pub wal_size_bytes: AtomicU64,
+    /// Configured WAL size cap in bytes (F-005). Set once at boot.
+    pub wal_max_bytes: AtomicU64,
 }
 
 impl Metrics {
@@ -62,6 +69,9 @@ impl Metrics {
             pg_flush_failure_total: AtomicU64::new(0),
             writeback_queue_depth: AtomicI64::new(0),
             active_scenarios: AtomicI64::new(0),
+            queue_max_depth: AtomicI64::new(0),
+            wal_size_bytes: AtomicU64::new(0),
+            wal_max_bytes: AtomicU64::new(0),
         }
     }
 
@@ -210,6 +220,21 @@ impl Metrics {
             "ootils_engine_active_scenarios",
             "Number of active forked scenarios (excludes baseline)",
             load_i(&self.active_scenarios)
+        );
+        gauge!(
+            "ootils_engine_queue_max_depth",
+            "Configured cap on write-behind queue depth (F-005)",
+            load_i(&self.queue_max_depth)
+        );
+        gauge!(
+            "ootils_engine_wal_size_bytes",
+            "Current WAL file size in bytes (sampled every flush interval)",
+            load(&self.wal_size_bytes)
+        );
+        gauge!(
+            "ootils_engine_wal_max_bytes",
+            "Configured cap on WAL file size in bytes (F-005)",
+            load(&self.wal_max_bytes)
         );
 
         out

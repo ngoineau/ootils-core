@@ -39,6 +39,7 @@ class EngineHarness:
         wal_path: Optional[Path] = None,
         flush_interval_ms: int = 100,
         log_level: str = "info,ootils_engine=debug",
+        extra_env: Optional[dict] = None,
     ) -> None:
         self.binary_path = Path(binary_path)
         if not self.binary_path.exists():
@@ -51,6 +52,11 @@ class EngineHarness:
         self.wal_path = wal_path or Path(tempfile.gettempdir()) / "ootils-engine-test.wal"
         self.flush_interval_ms = flush_interval_ms
         self.log_level = log_level
+        # Additional env vars layered on top of the defaults. Used by
+        # tests to set OOTILS_WAL_MAX_BYTES, OOTILS_QUEUE_MAX_DEPTH,
+        # OOTILS_METRICS_LISTEN, etc. for backpressure / failure-mode
+        # tests.
+        self.extra_env = dict(extra_env) if extra_env else {}
         self.process: Optional[subprocess.Popen] = None
         self.stdout_log: Optional[IO] = None
         self.stderr_log: Optional[IO] = None
@@ -81,6 +87,8 @@ class EngineHarness:
         env["OOTILS_WAL_PATH"] = str(self.wal_path)
         env["OOTILS_FLUSH_INTERVAL_MS"] = str(self.flush_interval_ms)
         env["RUST_LOG"] = self.log_level
+        # Test-supplied overrides last so they win over defaults.
+        env.update(self.extra_env)
 
         td = Path(tempfile.gettempdir())
         self._stdout_path = td / f"ootils-engine-stdout-{os.getpid()}.log"

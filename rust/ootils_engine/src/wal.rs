@@ -96,6 +96,10 @@ pub const DEFAULT_ROTATION_THRESHOLD_BYTES: u64 = 256 * 1024 * 1024;
 /// We only rotate when applied_pg_seq covers ≥ this fraction of records,
 /// otherwise we'd churn during a PG outage when no records are eligible.
 pub const ROTATION_APPLIED_FRACTION: f64 = 0.80;
+/// Default hard cap on WAL file size: 1 GB. Above this, append rejects
+/// with `WalFull` and the engine returns RESOURCE_EXHAUSTED to clients.
+/// F-005: bounds the blast radius of a sustained PG outage.
+pub const DEFAULT_WAL_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDelta {
@@ -138,6 +142,27 @@ pub struct SeqRecord {
     pub record: WalRecord,
 }
 
+/// Reason a WAL append was rejected. Currently only "file size cap
+/// exceeded" (F-005). Translated upward into
+/// `Status::resource_exhausted`.
+#[derive(Debug, Clone)]
+pub struct WalFull {
+    pub current_bytes: u64,
+    pub max_bytes: u64,
+}
+
+impl std::fmt::Display for WalFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WAL file size cap reached: {} >= {} bytes (Postgres flush stalled — check pg_flush_failure_total)",
+            self.current_bytes, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for WalFull {}
+
 pub struct WalWriter {
     path: PathBuf,
     /// `<path>.new` — used during rotation.
@@ -152,18 +177,35 @@ pub struct WalWriter {
     current_size: AtomicU64,
     /// Rotation threshold in bytes. Configurable via constructor.
     rotation_threshold_bytes: u64,
+    /// Hard cap on WAL file size (F-005). Append rejects above this
+    /// with `WalFull` so a sustained PG outage doesn't fill the WAL
+    /// volume and DoS the engine.
+    max_bytes: u64,
 }
 
 impl WalWriter {
-    /// Open (or create) the WAL at `path` using the default rotation
-    /// threshold. Refuses v1 files with a clear error.
+    /// Open (or create) the WAL at `path` using default rotation +
+    /// size caps. Refuses v1 files with a clear error.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::open_with_threshold(path, DEFAULT_ROTATION_THRESHOLD_BYTES)
+        Self::open_with_caps(
+            path,
+            DEFAULT_ROTATION_THRESHOLD_BYTES,
+            DEFAULT_WAL_MAX_BYTES,
+        )
     }
 
+    /// Backward-compat shim for tests that only care about rotation.
     pub fn open_with_threshold(
         path: impl AsRef<Path>,
         rotation_threshold_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_caps(path, rotation_threshold_bytes, u64::MAX)
+    }
+
+    pub fn open_with_caps(
+        path: impl AsRef<Path>,
+        rotation_threshold_bytes: u64,
+        max_bytes: u64,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let new_path = make_new_path(&path);
@@ -205,6 +247,7 @@ impl WalWriter {
             next_seq: AtomicU64::new(0), // refined below
             current_size: AtomicU64::new(size),
             rotation_threshold_bytes,
+            max_bytes,
         };
 
         // Recompute next_seq by scanning existing records. Sequences
@@ -222,6 +265,11 @@ impl WalWriter {
     }
 
     /// Append + fsync. Atomically assigns + returns the seq.
+    ///
+    /// F-005: rejects with `WalFull` when the resulting file size would
+    /// exceed `max_bytes`. The caller surfaces this as
+    /// RESOURCE_EXHAUSTED so the engine doesn't fill its WAL volume
+    /// during a sustained PG outage.
     pub fn append(&self, record: &WalRecord) -> anyhow::Result<u64> {
         let bytes = bincode::serialize(record)?;
         let len = u32::try_from(bytes.len())
@@ -234,10 +282,30 @@ impl WalWriter {
             );
         }
 
+        let record_bytes = 4u64 + 8u64 + bytes.len() as u64;
+        let current = self.current_size.load(Ordering::Relaxed);
+        if current.saturating_add(record_bytes) > self.max_bytes {
+            return Err(WalFull {
+                current_bytes: current,
+                max_bytes: self.max_bytes,
+            }
+            .into());
+        }
+
         // Acquire the seq under the file lock so on-disk order matches
         // seq order — required for `scan_highest_seq` to be accurate
         // even when appends race.
         let mut f = self.file.lock();
+        // Re-check size under the lock (another append may have raced
+        // between our load and lock acquisition).
+        let locked_current = self.current_size.load(Ordering::Relaxed);
+        if locked_current.saturating_add(record_bytes) > self.max_bytes {
+            return Err(WalFull {
+                current_bytes: locked_current,
+                max_bytes: self.max_bytes,
+            }
+            .into());
+        }
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
 
         f.seek(SeekFrom::End(0))?;
@@ -247,10 +315,13 @@ impl WalWriter {
         // Durability barrier — caller will not see success until disk has it.
         f.sync_data()?;
 
-        let total = 4 + 8 + bytes.len();
         self.current_size
-            .fetch_add(total as u64, Ordering::Relaxed);
+            .fetch_add(record_bytes, Ordering::Relaxed);
         Ok(seq)
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
     }
 
     /// Update the applied-PG-seq marker. Called by the flusher after a
@@ -869,6 +940,44 @@ mod tests {
         let recovered = w2.replay().unwrap();
         // Two good records before the garbage — we keep them.
         assert_eq!(recovered.len(), 2);
+    }
+
+    #[test]
+    fn append_rejects_when_max_bytes_exceeded() {
+        // F-005: WAL has a hard size cap. Once exceeded, append must
+        // return a WalFull error so the gRPC layer can translate to
+        // RESOURCE_EXHAUSTED instead of growing the file unboundedly.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("capped.wal");
+        // Cap is just enough for the header + 1 small record.
+        // make_dummy_record(1) serializes to ~80-120 bytes typically.
+        // 256 bytes accommodates header (20) + 1 record + overhead.
+        let w = WalWriter::open_with_caps(&path, u64::MAX, 256).unwrap();
+        // First record fits.
+        w.append(&make_dummy_record(1)).unwrap();
+        // Second record may fit, depending on overhead. Keep appending
+        // until we trip WalFull.
+        let mut tripped = false;
+        for _ in 0..10 {
+            match w.append(&make_dummy_record(1)) {
+                Ok(_) => continue,
+                Err(e) => {
+                    let full = e.downcast_ref::<WalFull>();
+                    assert!(full.is_some(), "expected WalFull, got: {e:#}");
+                    assert_eq!(full.unwrap().max_bytes, 256);
+                    tripped = true;
+                    break;
+                }
+            }
+        }
+        assert!(tripped, "expected WalFull within 10 appends past the 256B cap");
+        // File on disk has NOT grown past the cap.
+        let on_disk = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            on_disk <= 256,
+            "WAL file grew past its cap: {} > 256",
+            on_disk
+        );
     }
 
     #[test]

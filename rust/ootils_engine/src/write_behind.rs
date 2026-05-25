@@ -75,27 +75,103 @@ impl PendingDelta {
     }
 }
 
+/// Reason a push was rejected. Surfaced upward as gRPC
+/// `Status::resource_exhausted` so clients can backoff intelligently
+/// rather than crashing the engine via unbounded queue growth (F-005).
+#[derive(Debug, Clone)]
+pub struct QueueFull {
+    pub current_depth: usize,
+    pub max_depth: usize,
+}
+
+impl std::fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "write-behind queue full: {} >= {} (Postgres flush may be stalled — check pg_flush_failure_total)",
+            self.current_depth, self.max_depth
+        )
+    }
+}
+
+impl std::error::Error for QueueFull {}
+
 pub struct WriteBehindQueue {
     pending: Mutex<VecDeque<PendingDelta>>,
     wal: Arc<WalWriter>,
     /// Tunable: max queue size before forcing a flush regardless of
     /// the timer.
     max_pending_before_flush: usize,
+    /// Hard cap on queue depth (F-005). Push rejects above this with
+    /// QueueFull so the engine doesn't unboundedly grow its in-RAM
+    /// queue during a sustained PG outage.
+    max_depth: usize,
     metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl WriteBehindQueue {
     pub fn new(wal: Arc<WalWriter>, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        Self::with_caps(wal, metrics, 1_000_000)
+    }
+
+    pub fn with_caps(
+        wal: Arc<WalWriter>,
+        metrics: Arc<crate::metrics::Metrics>,
+        max_depth: usize,
+    ) -> Self {
         Self {
             pending: Mutex::new(VecDeque::with_capacity(1024)),
             wal,
             max_pending_before_flush: 10_000,
+            max_depth,
             metrics,
         }
     }
 
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+
     /// Enqueue deltas. Non-blocking. Caller has already paid the WAL
     /// fsync, so durability is guaranteed at this point.
+    ///
+    /// F-005: returns `Err(QueueFull)` when the queue is over its
+    /// configured cap. The caller (gRPC handler) should translate
+    /// that into `Status::resource_exhausted` so clients can retry
+    /// after the bg flusher drains.
+    pub fn try_push(
+        &self,
+        deltas: impl IntoIterator<Item = PendingDelta>,
+    ) -> Result<bool, QueueFull> {
+        let mut q = self.pending.lock();
+        // Check cap BEFORE extending so we never blow past it. We
+        // hold the lock for the check + extend so concurrent appenders
+        // can't race the boundary.
+        let incoming: Vec<PendingDelta> = deltas.into_iter().collect();
+        let projected = q.len() + incoming.len();
+        if projected > self.max_depth {
+            let current = q.len();
+            drop(q);
+            self.metrics
+                .writeback_queue_depth
+                .store(current as i64, std::sync::atomic::Ordering::Relaxed);
+            return Err(QueueFull {
+                current_depth: current,
+                max_depth: self.max_depth,
+            });
+        }
+        q.extend(incoming);
+        let len = q.len();
+        self.metrics
+            .writeback_queue_depth
+            .store(len as i64, std::sync::atomic::Ordering::Relaxed);
+        Ok(len >= self.max_pending_before_flush)
+    }
+
+    /// Unbounded push — kept for the bg flusher's re-enqueue path
+    /// (which has already proven it CAN fit, because the deltas were
+    /// previously in the queue). New external callers should prefer
+    /// `try_push`.
     pub fn push(&self, deltas: impl IntoIterator<Item = PendingDelta>) -> bool {
         let mut q = self.pending.lock();
         q.extend(deltas);
@@ -193,6 +269,11 @@ pub fn spawn_flusher(
 
         loop {
             tokio::time::sleep(current_interval).await;
+            // Refresh the WAL size gauge for /metrics scrapers.
+            queue.metrics.wal_size_bytes.store(
+                queue.wal.current_size_bytes(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let (batch, max_seq) = queue.drain_batch();
             if batch.is_empty() {
                 // Reset backoff if we were in failure mode but the queue
@@ -263,6 +344,101 @@ pub fn spawn_flusher(
             }
         }
     })
+}
+
+// ============================================================
+// Inline tests (Cluster B / F-005 backpressure).
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::Metrics;
+    use rust_decimal::Decimal;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn fresh_queue(max_depth: usize) -> (TempDir, Arc<WriteBehindQueue>) {
+        let dir = TempDir::new().unwrap();
+        let wal = Arc::new(WalWriter::open(dir.path().join("test.wal")).unwrap());
+        let metrics = Arc::new(Metrics::new());
+        let q = Arc::new(WriteBehindQueue::with_caps(wal, metrics, max_depth));
+        (dir, q)
+    }
+
+    fn dummy_delta(seq: u64, i: u128) -> PendingDelta {
+        PendingDelta {
+            seq,
+            node_id: Uuid::from_u128(i),
+            opening_stock: Decimal::ZERO,
+            inflows: Decimal::ZERO,
+            outflows: Decimal::ZERO,
+            closing_stock: Decimal::ZERO,
+            has_shortage: false,
+            shortage_qty: Decimal::ZERO,
+        }
+    }
+
+    #[test]
+    fn try_push_accepts_below_cap() {
+        let (_d, q) = fresh_queue(10);
+        let deltas: Vec<_> = (0..5).map(|i| dummy_delta(1, i)).collect();
+        q.try_push(deltas).unwrap();
+        assert_eq!(q.len(), 5);
+    }
+
+    #[test]
+    fn try_push_rejects_when_cap_would_be_exceeded() {
+        // F-005: queue depth cap must be enforced atomically — neither
+        // partial-push nor over-push, just an early reject so the
+        // caller can return RESOURCE_EXHAUSTED.
+        let (_d, q) = fresh_queue(10);
+        let first_batch: Vec<_> = (0..7).map(|i| dummy_delta(1, i)).collect();
+        q.try_push(first_batch).unwrap();
+        assert_eq!(q.len(), 7);
+
+        let overflow_batch: Vec<_> = (0..5).map(|i| dummy_delta(2, 100 + i)).collect();
+        let err = q.try_push(overflow_batch).unwrap_err();
+        assert_eq!(err.max_depth, 10);
+        assert_eq!(err.current_depth, 7);
+        // Queue state is unchanged after the failed push (no partial
+        // insertion).
+        assert_eq!(q.len(), 7);
+    }
+
+    #[test]
+    fn reenqueue_with_dedupe_keeps_highest_seq_per_node() {
+        // F-002 fix: failed flush merges back with dedupe-by-node_id
+        // keeping highest seq. Validates the dedupe is correct AND
+        // bounds memory.
+        let (_d, q) = fresh_queue(1000);
+        // Pre-existing pending: node 1 at seq=5, node 2 at seq=6.
+        q.try_push(vec![dummy_delta(5, 1), dummy_delta(6, 2)]).unwrap();
+
+        // Failed batch coming back from PG: node 1 at seq=2 (older),
+        // node 3 at seq=3 (new), node 2 at seq=8 (newer than current).
+        let failed = vec![
+            dummy_delta(2, 1),
+            dummy_delta(3, 3),
+            dummy_delta(8, 2),
+        ];
+        q.reenqueue_with_dedupe(failed);
+
+        // After dedupe: 3 unique nodes, with their respective highest seqs:
+        //  node 1 → max(5, 2) = 5
+        //  node 2 → max(6, 8) = 8
+        //  node 3 → 3
+        let (drained, max_seq) = q.drain_batch();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(max_seq, 8);
+        let by_node: std::collections::HashMap<Uuid, u64> = drained
+            .iter()
+            .map(|d| (d.node_id, d.seq))
+            .collect();
+        assert_eq!(by_node[&Uuid::from_u128(1)], 5);
+        assert_eq!(by_node[&Uuid::from_u128(2)], 8);
+        assert_eq!(by_node[&Uuid::from_u128(3)], 3);
+    }
 }
 
 /// Bulk UPDATE Postgres `nodes` via UNNEST array params, guarded by

@@ -64,10 +64,25 @@ struct Cli {
     #[arg(long, env = "OOTILS_FLUSH_INTERVAL_MS", default_value = "100")]
     flush_interval_ms: u64,
 
-    /// Prometheus /metrics endpoint listen address. Set empty to
-    /// disable the metrics server.
+    /// Prometheus /metrics endpoint listen address. Set "off" (or
+    /// empty) to disable the metrics server. ANY other value must
+    /// parse as `host:port` or the engine refuses to boot — silent
+    /// fall-through on a misconfigured address would leave operators
+    /// flying blind during canary rollout (F-007).
     #[arg(long, env = "OOTILS_METRICS_LISTEN", default_value = "127.0.0.1:9090")]
     metrics_listen: String,
+
+    /// Hard cap on the WAL file size. Above this, Propagate returns
+    /// RESOURCE_EXHAUSTED instead of growing the WAL unboundedly
+    /// during a sustained PG outage. Default: 1 GB.
+    #[arg(long, env = "OOTILS_WAL_MAX_BYTES", default_value_t = wal::DEFAULT_WAL_MAX_BYTES)]
+    wal_max_bytes: u64,
+
+    /// Hard cap on the write-behind queue depth (number of pending
+    /// deltas in RAM). Above this, Propagate returns
+    /// RESOURCE_EXHAUSTED. Default: 1,000,000.
+    #[arg(long, env = "OOTILS_QUEUE_MAX_DEPTH", default_value_t = 1_000_000)]
+    queue_max_depth: usize,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -106,7 +121,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- WAL + write-behind durability (phase 5, v2 hardened) ----
-    let wal = Arc::new(wal::WalWriter::open(&cli.wal_path)?);
+    // F-005: WAL is opened with explicit size caps. Default rotation
+    // threshold (256 MB) + default max bytes (1 GB) means the engine
+    // gracefully rejects new propagations during a sustained PG
+    // outage rather than filling the volume.
+    let wal = Arc::new(wal::WalWriter::open_with_caps(
+        &cli.wal_path,
+        wal::DEFAULT_ROTATION_THRESHOLD_BYTES,
+        cli.wal_max_bytes,
+    )?);
+    info!(
+        wal_max_bytes = cli.wal_max_bytes,
+        queue_max_depth = cli.queue_max_depth,
+        "WAL + queue caps configured (F-005)"
+    );
     // Replay any records left over from a prior crash. WAL v2's
     // `replay()` already skips records with seq <= applied_pg_seq
     // (the durably-flushed-to-PG marker), so what we get back is
@@ -159,25 +187,45 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Item #2: Prometheus metrics — process-wide counter registry.
+    // F-007: Boot fails fast on a malformed metrics_listen. Operators
+    // who misconfigure the address learn at startup, not three weeks
+    // later during an incident. "off" (and empty for backward compat)
+    // explicitly disable the endpoint.
     let metrics_registry = Arc::new(metrics::Metrics::new());
-    if !cli.metrics_listen.is_empty() {
-        match cli.metrics_listen.parse::<std::net::SocketAddr>() {
-            Ok(addr) => {
-                let _metrics_handle =
-                    metrics::spawn_metrics_server(metrics_registry.clone(), addr);
-            }
-            Err(e) => {
-                warn!(error = %e, "invalid OOTILS_METRICS_LISTEN, metrics disabled");
-            }
-        }
+    let metrics_addr_str = cli.metrics_listen.trim();
+    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
+        || metrics_addr_str.eq_ignore_ascii_case("off")
+    {
+        info!("metrics endpoint explicitly disabled (OOTILS_METRICS_LISTEN={metrics_addr_str:?})");
+        None
     } else {
-        info!("metrics endpoint disabled (OOTILS_METRICS_LISTEN empty)");
+        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
+            anyhow::anyhow!(
+                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
+                 (use \"off\" to disable the metrics server)",
+                metrics_addr_str,
+                e
+            )
+        })?)
+    };
+    if let Some(addr) = metrics_addr {
+        let _metrics_handle =
+            metrics::spawn_metrics_server(metrics_registry.clone(), addr);
     }
 
-    let queue = Arc::new(write_behind::WriteBehindQueue::new(
+    let queue = Arc::new(write_behind::WriteBehindQueue::with_caps(
         wal.clone(),
         metrics_registry.clone(),
+        cli.queue_max_depth,
     ));
+    // Publish the configured caps as gauges so operators can see them
+    // from /metrics (vs having to dig through engine logs).
+    metrics_registry
+        .queue_max_depth
+        .store(cli.queue_max_depth as i64, std::sync::atomic::Ordering::Relaxed);
+    metrics_registry
+        .wal_max_bytes
+        .store(cli.wal_max_bytes, std::sync::atomic::Ordering::Relaxed);
     let dsn_for_flusher = cli.dsn.clone();
     let _flusher_handle = write_behind::spawn_flusher(
         queue.clone(),

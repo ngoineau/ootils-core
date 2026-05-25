@@ -368,6 +368,11 @@ impl Engine for EngineSvc {
                 Ok(s) => s,
                 Err(e) => {
                     self.metrics.record_failure();
+                    // F-005: WAL size cap reached → RESOURCE_EXHAUSTED
+                    // (client can backoff). Any other error stays internal.
+                    if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+                        return Err(Status::resource_exhausted(full.to_string()));
+                    }
                     return Err(Status::internal(format!("WAL append failed: {e}")));
                 }
             };
@@ -380,13 +385,20 @@ impl Engine for EngineSvc {
             // flush_interval_ms. Every delta carries the seq assigned
             // to its WAL record so the PG UPDATE's seq-guard can
             // detect stale writes (A6 / F-014).
+            // F-005: try_push enforces the queue depth cap. We've
+            // already paid the WAL fsync at this point — if the queue
+            // is full we MUST surface that to the caller so they don't
+            // think the write was accepted only for it to never flush.
             let pending: Vec<PendingDelta> = stats
                 .deltas
                 .iter()
                 .cloned()
                 .map(|d| PendingDelta::from_delta(assigned_seq, d))
                 .collect();
-            self.writeback.push(pending);
+            if let Err(full) = self.writeback.try_push(pending) {
+                self.metrics.record_failure();
+                return Err(Status::resource_exhausted(full.to_string()));
+            }
         }
 
         let total_us = t_total.elapsed().as_micros() as f64;
