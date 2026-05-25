@@ -1,0 +1,5 @@
+# Cargo workspace artifacts
+target/
+# Maturin wheel output (legacy: also ignored at crate level)
+**/*.whl
+# Cargo lock kept at workspace root for binaries (engine), per Cargo convention.

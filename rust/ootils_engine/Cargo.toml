@@ -1,0 +1,54 @@
+[package]
+name = "ootils_engine"
+version.workspace = true
+edition.workspace = true
+description = "ootils-core Rust engine service (ADR-017 Architecture B)"
+publish = false
+
+[[bin]]
+name = "ootils-engine"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+ootils_proto = { path = "../ootils_proto" }
+
+# Async runtime
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+# State + concurrency
+arc-swap.workspace = true
+dashmap.workspace = true
+ahash.workspace = true
+parking_lot.workspace = true
+
+# Domain
+rust_decimal.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Postgres
+tokio-postgres.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Errors
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Compute primitives (used in later phases)
+rayon.workspace = true
+bumpalo.workspace = true
+
+# Global allocator — mimalloc beats the system allocator on multi-threaded
+# workloads (5-15% on Postgres-driven services per benchmarks).
+mimalloc = { version = "0.1", default-features = false }
+
+# Misc
+clap = { version = "4.5", features = ["derive", "env"] }

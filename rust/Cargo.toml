@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "ootils_kernel",   # PyO3 extension (Architecture A — still used by OOTILS_ENGINE=rust)
+    "ootils_engine",   # Standalone gRPC service (Architecture B — ADR-017)
+    "ootils_proto",    # Shared protobuf definitions
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["ngoineau"]
+license = "MIT"
+rust-version = "1.79"   # std::simd stabilised; we will bump to 2024 edition when 1.85+ is universal
+
+[workspace.dependencies]
+# Domain types — pinned for cross-crate consistency
+rust_decimal = { version = "1.36", features = ["serde-with-str", "db-postgres"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.10", features = ["v4", "v7", "serde"] }
+
+# Postgres clients
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-uuid-1"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Concurrency primitives (Architecture B core)
+arc-swap = "1.7"
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# Hashing
+ahash = "0.8"
+
+# Arena / parallel
+bumpalo = "3.16"
+rayon = "1.10"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# gRPC / proto
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Errors
+anyhow = "1.0"
+thiserror = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+# Faster dev builds, still optimized enough that perf stays reasonable
+opt-level = 1
+debug = true
