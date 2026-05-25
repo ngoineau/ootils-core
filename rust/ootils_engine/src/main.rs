@@ -1,41 +1,28 @@
 //! ootils-engine — standalone Rust service (ADR-017 Architecture B).
 //!
-//! Phase 1 (skeleton):
-//! - Process boots with mimalloc as global allocator.
-//! - Reads config from CLI/env (DSN, listen address).
-//! - Spins up tokio multi-threaded runtime.
-//! - Starts a tonic gRPC server with a stub `Engine` implementation
-//!   that only answers `Health` and `Metrics`. Everything else returns
-//!   `Unimplemented`.
-//! - Connects to Postgres (verifies credentials).
-//! - Exits cleanly on SIGTERM/SIGINT.
-//!
-//! Next phases (per ADR-017):
-//! - Phase 2: bootstrap the in-RAM graph from Postgres
-//! - Phase 3: port the propagator
-//! - Phase 4: scenarios
-//! - Phase 5: WAL + write-behind
-//! - Phase 6: full gRPC API
-//! - Phase 7: stress + observability
-//! - Phase 8: production rollout
+//! Phase 3 milestone:
+//! - In-RAM Graph (phase 2).
+//! - Native propagator on top of the graph (this phase).
+//! - `Propagate` RPC implemented.
+//! - One-shot CLI mode: `--bench` runs a full propagation on the loaded
+//!   baseline and exits, printing timing — used to validate the
+//!   ADR-017 phase-3 gate (compute < 100ms on profile L).
 
-use arc_swap::ArcSwap;
 use clap::Parser;
 use mimalloc::MiMalloc;
+use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
+mod kernel;
 mod loader;
+mod propagator;
 mod service;
 mod state;
 
-use state::Graph;
-
-/// Use mimalloc as the global allocator. Bench-justified : 5-15% faster
-/// than the default on multi-threaded loads, lower fragmentation, mature.
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -43,17 +30,19 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[command(name = "ootils-engine")]
 #[command(version, about = "ootils-core Rust engine service (ADR-017)")]
 struct Cli {
-    /// Postgres DSN — same shape as DATABASE_URL.
     #[arg(long, env = "DATABASE_URL")]
     dsn: String,
 
-    /// gRPC listen address.
     #[arg(long, env = "OOTILS_ENGINE_LISTEN", default_value = "127.0.0.1:50051")]
     listen: SocketAddr,
 
-    /// Log level — passed to `tracing_subscriber` env filter.
     #[arg(long, env = "RUST_LOG", default_value = "info,ootils_engine=debug")]
     log: String,
+
+    /// Run a one-shot full propagation on the loaded baseline + exit.
+    /// Used by the phase-3 perf gate.
+    #[arg(long, default_value = "false")]
+    bench: bool,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -65,18 +54,14 @@ async fn main() -> anyhow::Result<()> {
     info!(
         version = env!("CARGO_PKG_VERSION"),
         listen = %cli.listen,
+        bench = cli.bench,
         "ootils-engine starting"
     );
 
-    // Verify Postgres connectivity before binding the socket.
-    // Saves the operator from booting a useless service if creds are wrong.
     verify_postgres(&cli.dsn).await?;
 
-    // Bootstrap: load the baseline graph from Postgres into RAM.
-    // This is the heart of phase 2 — Postgres becomes a cold-start dep
-    // only, not a hot-path dep.
     let (graph, load_stats) = loader::load_baseline(&cli.dsn).await?;
-    let baseline = Arc::new(ArcSwap::from_pointee(graph));
+    let graph_lock = Arc::new(RwLock::new(graph));
     info!(
         nodes = load_stats.n_nodes,
         edges = load_stats.n_edges,
@@ -85,24 +70,55 @@ async fn main() -> anyhow::Result<()> {
         "baseline ready in RAM"
     );
 
-    let engine = service::EngineSvc::new(boot_time, baseline);
+    if cli.bench {
+        run_bench(&graph_lock);
+        return Ok(());
+    }
+
+    let engine = service::EngineSvc::new(boot_time, graph_lock);
 
     info!(addr = %cli.listen, "gRPC server listening");
     let server = Server::builder()
-        .add_service(
-            ootils_proto::engine::v1::engine_server::EngineServer::new(engine),
-        )
+        .add_service(ootils_proto::engine::v1::engine_server::EngineServer::new(engine))
         .serve_with_shutdown(cli.listen, shutdown_signal());
-
     server.await?;
     info!("ootils-engine shut down cleanly");
     Ok(())
 }
 
+/// One-shot full propagation bench. Marks every active PI dirty, runs
+/// the propagator, prints timing. Phase 3 gate: compute < 100ms on L.
+fn run_bench(graph_lock: &Arc<RwLock<state::Graph>>) {
+    info!("running full-propagation bench (phase 3 gate)");
+    let t_mark = Instant::now();
+    let dirty = {
+        let mut g = graph_lock.write();
+        propagator::mark_all_pi_dirty(&mut g)
+    };
+    let mark_ms = t_mark.elapsed().as_millis();
+    info!(n_dirty = dirty.len(), mark_ms, "marked all active PIs dirty");
+
+    let t_prop = Instant::now();
+    let stats = {
+        let mut g = graph_lock.write();
+        propagator::propagate(&mut g, &dirty)
+    };
+    let total_ms = t_prop.elapsed().as_millis();
+    info!(
+        n_dirty = stats.n_dirty,
+        n_processed = stats.n_processed,
+        n_changed = stats.n_changed,
+        n_shortages = stats.n_shortages,
+        compute_us = stats.compute_us,
+        compute_ms = stats.compute_us / 1000,
+        total_ms,
+        "BENCH RESULT — full propagation (phase 3 gate)"
+    );
+}
+
 fn init_tracing(filter: &str) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-    let env_filter = EnvFilter::try_new(filter)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt::layer().with_target(true).with_thread_ids(false))
@@ -112,7 +128,6 @@ fn init_tracing(filter: &str) {
 async fn verify_postgres(dsn: &str) -> anyhow::Result<()> {
     use tokio_postgres::NoTls;
     let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
-    // Spawn the connection driver so the client can talk.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             warn!(error = %e, "postgres connection task ended");
