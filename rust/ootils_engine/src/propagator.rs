@@ -217,15 +217,17 @@ fn compute_seed_opening_from_sorted(graph: &Graph, sorted_dirty: &[NodeIndex]) -
         return total;
     }
 
-    // Otherwise look up the prev bucket (seed_seq - 1) via the series
-    // index of the seed node.
+    // F-022 fix: the loader pre-sorts `by_series[sid]` by
+    // `bucket_sequence` so we can binary-search for `seed_seq - 1` in
+    // O(log N) instead of linearly scanning the ~90 buckets. Hot path
+    // on every incremental propagation.
     if let Some(sid) = seed_node.series_id {
         if let Some(buckets) = graph.by_series.get(&sid) {
-            for &b in buckets {
-                let n = &graph.nodes[b as usize];
-                if n.bucket_sequence == seed_seq - 1 {
-                    return n.closing_stock;
-                }
+            let target = seed_seq - 1;
+            if let Ok(pos) = buckets
+                .binary_search_by_key(&target, |&idx| graph.nodes[idx as usize].bucket_sequence)
+            {
+                return graph.nodes[buckets[pos] as usize].closing_stock;
             }
         }
     }

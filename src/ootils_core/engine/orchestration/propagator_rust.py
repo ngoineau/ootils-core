@@ -125,19 +125,40 @@ class RustPropagationEngine(PropagationEngine):
         # Commit dirty_nodes inserts so Rust (separate session) can see them.
         db.commit()
 
-        # psycopg's `info.dsn` redacts the password. Reconstruct an explicit DSN.
+        # F-017: build a DSN WITHOUT the password embedded — pass the
+        # password via PGPASSWORD instead. tokio-postgres + libpq
+        # consult that env var when the connection string omits it.
+        # An embedded password ends up in any log that includes the
+        # DSN string (PyO3 panic message, tracing field, etc.); the
+        # env-var approach is the documented safe pattern.
         info = db.info
         dsn = (
             f"host={info.host} port={info.port} "
-            f"user={info.user} password={info.password} "
+            f"user={info.user} "
             f"dbname={info.dbname}"
         )
-
-        stats = ootils_kernel.propagate_and_write(
-            dsn,
-            str(calc_run.calc_run_id),
-            str(calc_run.scenario_id),
-        )
+        if info.password:
+            # Localized scope: set + restore so we don't pollute the
+            # process env for other callers.
+            prior = os.environ.get("PGPASSWORD")
+            os.environ["PGPASSWORD"] = info.password
+            try:
+                stats = ootils_kernel.propagate_and_write(
+                    dsn,
+                    str(calc_run.calc_run_id),
+                    str(calc_run.scenario_id),
+                )
+            finally:
+                if prior is None:
+                    os.environ.pop("PGPASSWORD", None)
+                else:
+                    os.environ["PGPASSWORD"] = prior
+        else:
+            stats = ootils_kernel.propagate_and_write(
+                dsn,
+                str(calc_run.calc_run_id),
+                str(calc_run.scenario_id),
+            )
 
         calc_run.nodes_recalculated += stats["n_dirty_pis"]
 

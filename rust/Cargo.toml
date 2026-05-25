@@ -11,7 +11,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["ngoineau"]
 license = "MIT"
-rust-version = "1.79"   # std::simd stabilised; we will bump to 2024 edition when 1.85+ is universal
+rust-version = "1.82"   # F-020: aligned with tokio 1.40 + tonic 0.12 + hyper 1.4 requirements
+                        # (was "1.79" but Dockerfile.engine pins 1.85 — picking 1.82 as the real MSRV)
 
 [workspace.dependencies]
 # Domain types — pinned for cross-crate consistency

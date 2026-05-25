@@ -232,8 +232,15 @@ async fn main() -> anyhow::Result<()> {
     metrics_registry
         .wal_max_bytes
         .store(cli.wal_max_bytes, std::sync::atomic::Ordering::Relaxed);
+    // F-013 (Cluster F): hold the flusher's JoinHandle so we can
+    // gracefully tear it down at shutdown. The boot-time
+    // verify_postgres / loader / metrics-server tasks are detached
+    // because their lifetimes are naturally bounded (the connection
+    // future returns once the Client is dropped). The bg flusher is
+    // long-lived and worth aborting cleanly to avoid leaving a
+    // half-flushed batch in tokio's runtime when main exits.
     let dsn_for_flusher = cli.dsn.clone();
-    let _flusher_handle = write_behind::spawn_flusher(
+    let flusher_handle = write_behind::spawn_flusher(
         queue.clone(),
         dsn_for_flusher,
         cli.flush_interval_ms,
@@ -281,6 +288,17 @@ async fn main() -> anyhow::Result<()> {
         .add_service(engine_svc)
         .serve_with_shutdown(cli.listen, shutdown_signal());
     server.await?;
+    // F-013 graceful shutdown: abort the bg flusher and join its
+    // handle. The WAL has fsync'd everything we acked to clients, so
+    // an in-flight PG batch can be safely cancelled — recovery on
+    // next boot will re-flush via replay.
+    info!("gRPC server stopped — aborting write-behind flusher");
+    flusher_handle.abort();
+    match flusher_handle.await {
+        Ok(()) => info!("flusher exited cleanly"),
+        Err(e) if e.is_cancelled() => info!("flusher cancelled (expected)"),
+        Err(e) => warn!(error = %e, "flusher join error"),
+    }
     info!("ootils-engine shut down cleanly");
     Ok(())
 }
@@ -358,6 +376,62 @@ fn init_tracing(filter: &str) {
         .with(env_filter)
         .with(fmt::layer().with_target(true).with_thread_ids(false))
         .init();
+}
+
+/// F-017: redact the password component of a Postgres DSN so logs +
+/// error messages can include the connection target without leaking
+/// credentials. Handles both URL form
+/// (`postgresql://user:PW@host/db`) and key-value form
+/// (`host=... user=... password=PW dbname=...`).
+///
+/// This function is the single allowed sink for DSN values that may
+/// land in `tracing` output. New code MUST route DSN through here
+/// before logging, never raw.
+#[allow(dead_code)]
+pub fn redact_dsn(dsn: &str) -> String {
+    // URL form: scheme://user:password@host/...
+    if let Some(scheme_end) = dsn.find("://") {
+        let after_scheme = &dsn[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let userinfo = &after_scheme[..at_pos];
+            let after_at = &after_scheme[at_pos..];
+            // userinfo = "user" | "user:password"
+            let redacted_userinfo = match userinfo.find(':') {
+                Some(colon) => format!("{}:****", &userinfo[..colon]),
+                None => userinfo.to_string(),
+            };
+            return format!(
+                "{}://{}{}",
+                &dsn[..scheme_end],
+                redacted_userinfo,
+                after_at
+            );
+        }
+    }
+    // Key-value form: ... password=... ...
+    let mut out = String::with_capacity(dsn.len());
+    let mut chars = dsn.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == 'p'
+            && dsn[out.len()..].starts_with("password=")
+        {
+            // Emit "password=****" and skip to next whitespace.
+            out.push_str("password=****");
+            // Skip past the original "password=value".
+            for _ in 0.."password=".len() - 1 {
+                chars.next();
+            }
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 async fn verify_postgres(dsn: &str) -> anyhow::Result<()> {

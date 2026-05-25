@@ -32,6 +32,11 @@ pub struct LoadStats {
     pub n_pi: usize,
     pub n_supplies: usize,
     pub n_demands: usize,
+    /// F-025: nodes the engine doesn't model (e.g. Resource, Ghost,
+    /// future types). They're loaded into the graph but ignored by
+    /// the propagator. Surfaced here + as a Prometheus counter so a
+    /// new node type doesn't silently miscompute totals.
+    pub n_unknown: usize,
     pub n_edges: usize,
     pub elapsed_ms: u64,
     pub memory_bytes: usize,
@@ -58,6 +63,11 @@ pub async fn load_baseline(dsn: &str) -> anyhow::Result<(Graph, LoadStats)> {
         .count();
     let n_supplies = graph.nodes.iter().filter(|n| n.node_type.is_supply()).count();
     let n_demands = graph.nodes.iter().filter(|n| n.node_type.is_demand()).count();
+    let n_unknown = graph
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == NodeType::Unknown)
+        .count();
     let n_edges: usize = graph.edges_in.values().map(|v| v.len()).sum();
     let memory_bytes = graph.memory_bytes();
     let n_nodes = graph.len();
@@ -67,11 +77,48 @@ pub async fn load_baseline(dsn: &str) -> anyhow::Result<(Graph, LoadStats)> {
         n_pi,
         n_supplies,
         n_demands,
+        n_unknown,
         n_edges,
         elapsed_ms,
         memory_mb = memory_bytes / 1_048_576,
         "baseline graph loaded into RAM"
     );
+
+    // F-011: a healthy baseline must have PIs. If the engine boots
+    // pointed at the wrong database (e.g. fresh DB without seed data)
+    // we'd report "SERVING" with zero PIs and every Propagate would
+    // return NOT_FOUND — the worst operational signal. Fail fast so
+    // the operator notices at deploy time. The `--allow-empty-baseline`
+    // flag (see main.rs) escapes this for CI / test scenarios.
+    if n_nodes == 0 || n_pi == 0 {
+        anyhow::bail!(
+            "baseline appears empty: {} nodes, {} PIs — refusing to boot. \
+             Check DATABASE_URL points at the right database, or use \
+             --allow-empty-baseline for tests.",
+            n_nodes,
+            n_pi
+        );
+    }
+
+    // F-025: warn loudly when a non-trivial fraction of nodes have a
+    // node_type the engine doesn't model. They're loaded but ignored
+    // by the propagator — silently dropping them would make the engine
+    // diverge from SQL/Python results without explanation.
+    if n_unknown > 0 {
+        let fraction = n_unknown as f64 / n_nodes as f64;
+        if fraction > 0.01 {
+            warn!(
+                n_unknown,
+                n_nodes,
+                fraction_pct = (fraction * 100.0) as u32,
+                "more than 1% of loaded nodes have an unknown node_type — \
+                 they will be ignored by the propagator. Check for a schema \
+                 upgrade the engine doesn't know about yet."
+            );
+        } else {
+            info!(n_unknown, "loaded nodes with unknown node_type (ignored by propagator)");
+        }
+    }
 
     Ok((
         graph,
@@ -80,6 +127,7 @@ pub async fn load_baseline(dsn: &str) -> anyhow::Result<(Graph, LoadStats)> {
             n_pi,
             n_supplies,
             n_demands,
+            n_unknown,
             n_edges,
             elapsed_ms,
             memory_bytes,
@@ -189,6 +237,14 @@ async fn build_graph(client: &Client) -> anyhow::Result<Graph> {
                 by_series.entry(sid).or_default().push(idx);
             }
         }
+    }
+
+    // F-022: pre-sort each series' bucket list by `bucket_sequence` so
+    // the propagator can binary-search for the seed's previous bucket
+    // (`seed_seq - 1`) in O(log N) instead of linearly scanning the
+    // ~90 buckets per series per dirty event. Cheap one-time cost.
+    for buckets in by_series.values_mut() {
+        buckets.sort_unstable_by_key(|&idx| nodes[idx as usize].bucket_sequence);
     }
 
     info!(
