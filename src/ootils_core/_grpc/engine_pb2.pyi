@@ -77,6 +77,18 @@ class MergeResult(_message.Message):
     new_baseline_generation: str
     def __init__(self, nodes_merged: _Optional[int] = ..., new_baseline_generation: _Optional[str] = ...) -> None: ...
 
+class DeleteRequest(_message.Message):
+    __slots__ = ("scenario_id",)
+    SCENARIO_ID_FIELD_NUMBER: _ClassVar[int]
+    scenario_id: str
+    def __init__(self, scenario_id: _Optional[str] = ...) -> None: ...
+
+class DeleteResult(_message.Message):
+    __slots__ = ("overlay_entries_freed",)
+    OVERLAY_ENTRIES_FREED_FIELD_NUMBER: _ClassVar[int]
+    overlay_entries_freed: int
+    def __init__(self, overlay_entries_freed: _Optional[int] = ...) -> None: ...
+
 class ScenarioInfo(_message.Message):
     __slots__ = ("id", "name", "parent_id", "created_at", "overlay_size", "memory_bytes")
     ID_FIELD_NUMBER: _ClassVar[int]

@@ -26,7 +26,7 @@ from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x65ngine.proto\x12\x10ootils.engine.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"w\n\x10PropagateRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x10\n\x08\x65vent_id\x18\x02 \x01(\t\x12\x12\n\nevent_type\x18\x03 \x01(\t\x12\x17\n\x0ftrigger_node_id\x18\x04 \x01(\t\x12\x0f\n\x07payload\x18\x05 \x01(\x0c\"\xa4\x01\n\x11PropagateResponse\x12\x13\n\x0b\x63\x61lc_run_id\x18\x01 \x01(\t\x12\x17\n\x0fnodes_processed\x18\x02 \x01(\x05\x12\x15\n\rnodes_changed\x18\x03 \x01(\x05\x12\x1a\n\x12shortages_detected\x18\x04 \x01(\x05\x12.\n\x06timing\x18\x05 \x01(\x0b\x32\x1e.ootils.engine.v1.EngineTiming\"\x7f\n\x0c\x45ngineTiming\x12\x17\n\x0f\x64irty_expand_us\x18\x01 \x01(\x01\x12\x12\n\ncompute_us\x18\x02 \x01(\x01\x12\x1a\n\x12shortage_detect_us\x18\x03 \x01(\x01\x12\x14\n\x0cwal_fsync_us\x18\x04 \x01(\x01\x12\x10\n\x08total_us\x18\x05 \x01(\x01\"7\n\x0b\x46orkRequest\x12\x1a\n\x12parent_scenario_id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\"?\n\x0cMergeRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x1a\n\x12target_scenario_id\x18\x02 \x01(\t\"D\n\x0bMergeResult\x12\x14\n\x0cnodes_merged\x18\x01 \x01(\x05\x12\x1f\n\x17new_baseline_generation\x18\x02 \x01(\t\"\x97\x01\n\x0cScenarioInfo\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x11\n\tparent_id\x18\x03 \x01(\t\x12.\n\ncreated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x14\n\x0coverlay_size\x18\x05 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x06 \x01(\x03\"A\n\x0cScenarioList\x12\x31\n\tscenarios\x18\x01 \x03(\x0b\x32\x1e.ootils.engine.v1.ScenarioInfo\"1\n\tNodeQuery\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\t\"\x9b\x02\n\tNodeState\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x11\n\tnode_type\x18\x02 \x01(\t\x12\x0f\n\x07item_id\x18\x03 \x01(\t\x12\x13\n\x0blocation_id\x18\x04 \x01(\t\x12\x15\n\ropening_stock\x18\x05 \x01(\t\x12\x0f\n\x07inflows\x18\x06 \x01(\t\x12\x10\n\x08outflows\x18\x07 \x01(\t\x12\x15\n\rclosing_stock\x18\x08 \x01(\t\x12\x14\n\x0chas_shortage\x18\t \x01(\x08\x12\x14\n\x0cshortage_qty\x18\n \x01(\t\x12\x17\n\x0ftime_span_start\x18\x0b \x01(\t\x12\x15\n\rtime_span_end\x18\x0c \x01(\t\x12\x17\n\x0f\x62ucket_sequence\x18\r \x01(\x05\"c\n\x0eShortagesQuery\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x0f\n\x07item_id\x18\x02 \x01(\t\x12\x13\n\x0blocation_id\x18\x03 \x01(\t\x12\x16\n\x0eseverity_class\x18\x04 \x01(\t\"\xb6\x01\n\x08Shortage\x12\x13\n\x0bshortage_id\x18\x01 \x01(\t\x12\x12\n\npi_node_id\x18\x02 \x01(\t\x12\x0f\n\x07item_id\x18\x03 \x01(\t\x12\x13\n\x0blocation_id\x18\x04 \x01(\t\x12\x15\n\rshortage_date\x18\x05 \x01(\t\x12\x14\n\x0cshortage_qty\x18\x06 \x01(\t\x12\x16\n\x0eseverity_score\x18\x07 \x01(\t\x12\x16\n\x0eseverity_class\x18\x08 \x01(\t\"F\n\rStreamRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12 \n\x18include_baseline_changes\x18\x02 \x01(\x08\"\xa4\x02\n\x0b\x43hangeEvent\x12-\n\ttimestamp\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x13\n\x0bscenario_id\x18\x02 \x01(\t\x12\x13\n\x0b\x63\x61lc_run_id\x18\x03 \x01(\t\x12\x35\n\x0cnode_updated\x18\x04 \x01(\x0b\x32\x1d.ootils.engine.v1.NodeUpdatedH\x00\x12?\n\x11shortage_detected\x18\x05 \x01(\x0b\x32\".ootils.engine.v1.ShortageDetectedH\x00\x12;\n\x0fscenario_forked\x18\x06 \x01(\x0b\x32 .ootils.engine.v1.ScenarioForkedH\x00\x42\x07\n\x05\x65vent\"5\n\x0bNodeUpdated\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rclosing_stock\x18\x02 \x01(\t\"<\n\x10ShortageDetected\x12\x12\n\npi_node_id\x18\x01 \x01(\t\x12\x14\n\x0cshortage_qty\x18\x02 \x01(\t\"3\n\x0eScenarioForked\x12\x11\n\tparent_id\x18\x01 \x01(\t\x12\x0e\n\x06new_id\x18\x02 \x01(\t\"\xdf\x01\n\x0cHealthStatus\x12\x35\n\x06status\x18\x01 \x01(\x0e\x32%.ootils.engine.v1.HealthStatus.Status\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\x12-\n\tboot_time\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\"A\n\x06Status\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0b\n\x07SERVING\x10\x01\x12\x0c\n\x08\x44\x45GRADED\x10\x02\x12\x0f\n\x0bNOT_SERVING\x10\x03\"\x83\x03\n\rEngineMetrics\x12\x1c\n\x14\x62\x61seline_graph_bytes\x18\x01 \x01(\x03\x12\x1d\n\x15total_scenarios_bytes\x18\x02 \x01(\x03\x12\x18\n\x10\x61\x63tive_scenarios\x18\x03 \x01(\x05\x12\x1e\n\x16\x65vents_processed_total\x18\x04 \x01(\x03\x12\x1e\n\x16nodes_recomputed_total\x18\x05 \x01(\x03\x12 \n\x18shortages_detected_total\x18\x06 \x01(\x03\x12\x18\n\x10propagate_p50_us\x18\x07 \x01(\x01\x12\x18\n\x10propagate_p95_us\x18\x08 \x01(\x01\x12\x18\n\x10propagate_p99_us\x18\t \x01(\x01\x12 \n\x18pg_writeback_queue_depth\x18\n \x01(\x05\x12\x16\n\x0ewal_size_bytes\x18\x0b \x01(\x03\x12\x31\n\rlast_pg_flush\x18\x0c \x01(\x0b\x32\x1a.google.protobuf.Timestamp2\xb6\x05\n\x06\x45ngine\x12T\n\tPropagate\x12\".ootils.engine.v1.PropagateRequest\x1a#.ootils.engine.v1.PropagateResponse\x12M\n\x0c\x46orkScenario\x12\x1d.ootils.engine.v1.ForkRequest\x1a\x1e.ootils.engine.v1.ScenarioInfo\x12N\n\rMergeScenario\x12\x1e.ootils.engine.v1.MergeRequest\x1a\x1d.ootils.engine.v1.MergeResult\x12G\n\rListScenarios\x12\x16.google.protobuf.Empty\x1a\x1e.ootils.engine.v1.ScenarioList\x12\x43\n\x07GetNode\x12\x1b.ootils.engine.v1.NodeQuery\x1a\x1b.ootils.engine.v1.NodeState\x12P\n\x0eQueryShortages\x12 .ootils.engine.v1.ShortagesQuery\x1a\x1a.ootils.engine.v1.Shortage0\x01\x12Q\n\rStreamChanges\x12\x1f.ootils.engine.v1.StreamRequest\x1a\x1d.ootils.engine.v1.ChangeEvent0\x01\x12@\n\x06Health\x12\x16.google.protobuf.Empty\x1a\x1e.ootils.engine.v1.HealthStatus\x12\x42\n\x07Metrics\x12\x16.google.protobuf.Empty\x1a\x1f.ootils.engine.v1.EngineMetricsb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x65ngine.proto\x12\x10ootils.engine.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"w\n\x10PropagateRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x10\n\x08\x65vent_id\x18\x02 \x01(\t\x12\x12\n\nevent_type\x18\x03 \x01(\t\x12\x17\n\x0ftrigger_node_id\x18\x04 \x01(\t\x12\x0f\n\x07payload\x18\x05 \x01(\x0c\"\xa4\x01\n\x11PropagateResponse\x12\x13\n\x0b\x63\x61lc_run_id\x18\x01 \x01(\t\x12\x17\n\x0fnodes_processed\x18\x02 \x01(\x05\x12\x15\n\rnodes_changed\x18\x03 \x01(\x05\x12\x1a\n\x12shortages_detected\x18\x04 \x01(\x05\x12.\n\x06timing\x18\x05 \x01(\x0b\x32\x1e.ootils.engine.v1.EngineTiming\"\x7f\n\x0c\x45ngineTiming\x12\x17\n\x0f\x64irty_expand_us\x18\x01 \x01(\x01\x12\x12\n\ncompute_us\x18\x02 \x01(\x01\x12\x1a\n\x12shortage_detect_us\x18\x03 \x01(\x01\x12\x14\n\x0cwal_fsync_us\x18\x04 \x01(\x01\x12\x10\n\x08total_us\x18\x05 \x01(\x01\"7\n\x0b\x46orkRequest\x12\x1a\n\x12parent_scenario_id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\"?\n\x0cMergeRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x1a\n\x12target_scenario_id\x18\x02 \x01(\t\"D\n\x0bMergeResult\x12\x14\n\x0cnodes_merged\x18\x01 \x01(\x05\x12\x1f\n\x17new_baseline_generation\x18\x02 \x01(\t\"$\n\rDeleteRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\"-\n\x0c\x44\x65leteResult\x12\x1d\n\x15overlay_entries_freed\x18\x01 \x01(\x05\"\x97\x01\n\x0cScenarioInfo\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x11\n\tparent_id\x18\x03 \x01(\t\x12.\n\ncreated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x14\n\x0coverlay_size\x18\x05 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x06 \x01(\x03\"A\n\x0cScenarioList\x12\x31\n\tscenarios\x18\x01 \x03(\x0b\x32\x1e.ootils.engine.v1.ScenarioInfo\"1\n\tNodeQuery\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\t\"\x9b\x02\n\tNodeState\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x11\n\tnode_type\x18\x02 \x01(\t\x12\x0f\n\x07item_id\x18\x03 \x01(\t\x12\x13\n\x0blocation_id\x18\x04 \x01(\t\x12\x15\n\ropening_stock\x18\x05 \x01(\t\x12\x0f\n\x07inflows\x18\x06 \x01(\t\x12\x10\n\x08outflows\x18\x07 \x01(\t\x12\x15\n\rclosing_stock\x18\x08 \x01(\t\x12\x14\n\x0chas_shortage\x18\t \x01(\x08\x12\x14\n\x0cshortage_qty\x18\n \x01(\t\x12\x17\n\x0ftime_span_start\x18\x0b \x01(\t\x12\x15\n\rtime_span_end\x18\x0c \x01(\t\x12\x17\n\x0f\x62ucket_sequence\x18\r \x01(\x05\"c\n\x0eShortagesQuery\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x0f\n\x07item_id\x18\x02 \x01(\t\x12\x13\n\x0blocation_id\x18\x03 \x01(\t\x12\x16\n\x0eseverity_class\x18\x04 \x01(\t\"\xb6\x01\n\x08Shortage\x12\x13\n\x0bshortage_id\x18\x01 \x01(\t\x12\x12\n\npi_node_id\x18\x02 \x01(\t\x12\x0f\n\x07item_id\x18\x03 \x01(\t\x12\x13\n\x0blocation_id\x18\x04 \x01(\t\x12\x15\n\rshortage_date\x18\x05 \x01(\t\x12\x14\n\x0cshortage_qty\x18\x06 \x01(\t\x12\x16\n\x0eseverity_score\x18\x07 \x01(\t\x12\x16\n\x0eseverity_class\x18\x08 \x01(\t\"F\n\rStreamRequest\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12 \n\x18include_baseline_changes\x18\x02 \x01(\x08\"\xa4\x02\n\x0b\x43hangeEvent\x12-\n\ttimestamp\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x13\n\x0bscenario_id\x18\x02 \x01(\t\x12\x13\n\x0b\x63\x61lc_run_id\x18\x03 \x01(\t\x12\x35\n\x0cnode_updated\x18\x04 \x01(\x0b\x32\x1d.ootils.engine.v1.NodeUpdatedH\x00\x12?\n\x11shortage_detected\x18\x05 \x01(\x0b\x32\".ootils.engine.v1.ShortageDetectedH\x00\x12;\n\x0fscenario_forked\x18\x06 \x01(\x0b\x32 .ootils.engine.v1.ScenarioForkedH\x00\x42\x07\n\x05\x65vent\"5\n\x0bNodeUpdated\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x15\n\rclosing_stock\x18\x02 \x01(\t\"<\n\x10ShortageDetected\x12\x12\n\npi_node_id\x18\x01 \x01(\t\x12\x14\n\x0cshortage_qty\x18\x02 \x01(\t\"3\n\x0eScenarioForked\x12\x11\n\tparent_id\x18\x01 \x01(\t\x12\x0e\n\x06new_id\x18\x02 \x01(\t\"\xdf\x01\n\x0cHealthStatus\x12\x35\n\x06status\x18\x01 \x01(\x0e\x32%.ootils.engine.v1.HealthStatus.Status\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\x12-\n\tboot_time\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\"A\n\x06Status\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0b\n\x07SERVING\x10\x01\x12\x0c\n\x08\x44\x45GRADED\x10\x02\x12\x0f\n\x0bNOT_SERVING\x10\x03\"\x83\x03\n\rEngineMetrics\x12\x1c\n\x14\x62\x61seline_graph_bytes\x18\x01 \x01(\x03\x12\x1d\n\x15total_scenarios_bytes\x18\x02 \x01(\x03\x12\x18\n\x10\x61\x63tive_scenarios\x18\x03 \x01(\x05\x12\x1e\n\x16\x65vents_processed_total\x18\x04 \x01(\x03\x12\x1e\n\x16nodes_recomputed_total\x18\x05 \x01(\x03\x12 \n\x18shortages_detected_total\x18\x06 \x01(\x03\x12\x18\n\x10propagate_p50_us\x18\x07 \x01(\x01\x12\x18\n\x10propagate_p95_us\x18\x08 \x01(\x01\x12\x18\n\x10propagate_p99_us\x18\t \x01(\x01\x12 \n\x18pg_writeback_queue_depth\x18\n \x01(\x05\x12\x16\n\x0ewal_size_bytes\x18\x0b \x01(\x03\x12\x31\n\rlast_pg_flush\x18\x0c \x01(\x0b\x32\x1a.google.protobuf.Timestamp2\x89\x06\n\x06\x45ngine\x12T\n\tPropagate\x12\".ootils.engine.v1.PropagateRequest\x1a#.ootils.engine.v1.PropagateResponse\x12M\n\x0c\x46orkScenario\x12\x1d.ootils.engine.v1.ForkRequest\x1a\x1e.ootils.engine.v1.ScenarioInfo\x12N\n\rMergeScenario\x12\x1e.ootils.engine.v1.MergeRequest\x1a\x1d.ootils.engine.v1.MergeResult\x12Q\n\x0e\x44\x65leteScenario\x12\x1f.ootils.engine.v1.DeleteRequest\x1a\x1e.ootils.engine.v1.DeleteResult\x12G\n\rListScenarios\x12\x16.google.protobuf.Empty\x1a\x1e.ootils.engine.v1.ScenarioList\x12\x43\n\x07GetNode\x12\x1b.ootils.engine.v1.NodeQuery\x1a\x1b.ootils.engine.v1.NodeState\x12P\n\x0eQueryShortages\x12 .ootils.engine.v1.ShortagesQuery\x1a\x1a.ootils.engine.v1.Shortage0\x01\x12Q\n\rStreamChanges\x12\x1f.ootils.engine.v1.StreamRequest\x1a\x1d.ootils.engine.v1.ChangeEvent0\x01\x12@\n\x06Health\x12\x16.google.protobuf.Empty\x1a\x1e.ootils.engine.v1.HealthStatus\x12\x42\n\x07Metrics\x12\x16.google.protobuf.Empty\x1a\x1f.ootils.engine.v1.EngineMetricsb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -45,34 +45,38 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_MERGEREQUEST']._serialized_end=633
   _globals['_MERGERESULT']._serialized_start=635
   _globals['_MERGERESULT']._serialized_end=703
-  _globals['_SCENARIOINFO']._serialized_start=706
-  _globals['_SCENARIOINFO']._serialized_end=857
-  _globals['_SCENARIOLIST']._serialized_start=859
-  _globals['_SCENARIOLIST']._serialized_end=924
-  _globals['_NODEQUERY']._serialized_start=926
-  _globals['_NODEQUERY']._serialized_end=975
-  _globals['_NODESTATE']._serialized_start=978
-  _globals['_NODESTATE']._serialized_end=1261
-  _globals['_SHORTAGESQUERY']._serialized_start=1263
-  _globals['_SHORTAGESQUERY']._serialized_end=1362
-  _globals['_SHORTAGE']._serialized_start=1365
-  _globals['_SHORTAGE']._serialized_end=1547
-  _globals['_STREAMREQUEST']._serialized_start=1549
-  _globals['_STREAMREQUEST']._serialized_end=1619
-  _globals['_CHANGEEVENT']._serialized_start=1622
-  _globals['_CHANGEEVENT']._serialized_end=1914
-  _globals['_NODEUPDATED']._serialized_start=1916
-  _globals['_NODEUPDATED']._serialized_end=1969
-  _globals['_SHORTAGEDETECTED']._serialized_start=1971
-  _globals['_SHORTAGEDETECTED']._serialized_end=2031
-  _globals['_SCENARIOFORKED']._serialized_start=2033
-  _globals['_SCENARIOFORKED']._serialized_end=2084
-  _globals['_HEALTHSTATUS']._serialized_start=2087
-  _globals['_HEALTHSTATUS']._serialized_end=2310
-  _globals['_HEALTHSTATUS_STATUS']._serialized_start=2245
-  _globals['_HEALTHSTATUS_STATUS']._serialized_end=2310
-  _globals['_ENGINEMETRICS']._serialized_start=2313
-  _globals['_ENGINEMETRICS']._serialized_end=2700
-  _globals['_ENGINE']._serialized_start=2703
-  _globals['_ENGINE']._serialized_end=3397
+  _globals['_DELETEREQUEST']._serialized_start=705
+  _globals['_DELETEREQUEST']._serialized_end=741
+  _globals['_DELETERESULT']._serialized_start=743
+  _globals['_DELETERESULT']._serialized_end=788
+  _globals['_SCENARIOINFO']._serialized_start=791
+  _globals['_SCENARIOINFO']._serialized_end=942
+  _globals['_SCENARIOLIST']._serialized_start=944
+  _globals['_SCENARIOLIST']._serialized_end=1009
+  _globals['_NODEQUERY']._serialized_start=1011
+  _globals['_NODEQUERY']._serialized_end=1060
+  _globals['_NODESTATE']._serialized_start=1063
+  _globals['_NODESTATE']._serialized_end=1346
+  _globals['_SHORTAGESQUERY']._serialized_start=1348
+  _globals['_SHORTAGESQUERY']._serialized_end=1447
+  _globals['_SHORTAGE']._serialized_start=1450
+  _globals['_SHORTAGE']._serialized_end=1632
+  _globals['_STREAMREQUEST']._serialized_start=1634
+  _globals['_STREAMREQUEST']._serialized_end=1704
+  _globals['_CHANGEEVENT']._serialized_start=1707
+  _globals['_CHANGEEVENT']._serialized_end=1999
+  _globals['_NODEUPDATED']._serialized_start=2001
+  _globals['_NODEUPDATED']._serialized_end=2054
+  _globals['_SHORTAGEDETECTED']._serialized_start=2056
+  _globals['_SHORTAGEDETECTED']._serialized_end=2116
+  _globals['_SCENARIOFORKED']._serialized_start=2118
+  _globals['_SCENARIOFORKED']._serialized_end=2169
+  _globals['_HEALTHSTATUS']._serialized_start=2172
+  _globals['_HEALTHSTATUS']._serialized_end=2395
+  _globals['_HEALTHSTATUS_STATUS']._serialized_start=2330
+  _globals['_HEALTHSTATUS_STATUS']._serialized_end=2395
+  _globals['_ENGINEMETRICS']._serialized_start=2398
+  _globals['_ENGINEMETRICS']._serialized_end=2785
+  _globals['_ENGINE']._serialized_start=2788
+  _globals['_ENGINE']._serialized_end=3565
 # @@protoc_insertion_point(module_scope)

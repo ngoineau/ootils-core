@@ -28,8 +28,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 # every incremental call (~10-30ms saved per call).
 once_cell = "1.20"
 
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = "symbols"
+# F-053 audit cleanup: [profile.release] removed. Cargo ignores
+# [profile] sections in non-workspace-root manifests — this block was
+# dead config. The release profile is set once in rust/Cargo.toml
+# (the workspace root) with the same values.

@@ -1,38 +1,27 @@
 """
-parity_4way.py — byte-level parity validation across all 4 engines (item #7).
+parity_4way.py — Rust-svc ↔ Postgres baseline parity sample.
 
-Runs the SAME computation against:
-  1. Python `ProjectionKernel` (in-process)
-  2. SQL engine `SqlPropagationEngine` (PROPAGATE_SQL inside Postgres)
-  3. Architecture A `RustPropagationEngine` (rust+postgres hybrid)
-  4. Architecture B `ootils-engine` service (rust in-RAM, via gRPC)
+# Honest scope (audit F-044 closure)
 
-The 4 engines compute INDEPENDENTLY then are diff'd field-by-field on
-the same PI set. The script PASSES iff all 4 agree within Decimal
-tolerance.
+The original docstring of this script claimed it ran a 4-way parity
+check across Python / SQL / Rust-A / Rust-svc. The implementation
+never did that — it only samples 100 nodes from the Rust-svc engine
+via gRPC GetNode and diffs them against the live Postgres baseline.
+The Python and Rust-A engines were never executed. The SQL engine
+"comparison" was a tautology (PG-read vs PG-read).
 
-Procedure:
-  - Capture a snapshot of all baseline PI states ("ground truth").
-  - Reset state, run Python engine, capture results, restore snapshot.
-  - Reset, run SQL engine, capture, restore.
-  - Reset, run Rust Architecture A, capture, restore.
-  - Reset, run Rust service engine via gRPC (state in its RAM),
-    pull node states back via GetNode, restore.
-  - Diff all 4 against each other.
+This script is now correctly scoped as a SAMPLE-LEVEL SMOKE CHECK
+that the Rust-svc engine's in-RAM state matches Postgres for the
+sampled subset. The 4-way comparison (Python / SQL / Rust-A / Rust-svc)
+is covered by:
+  - chantier-A's scripts/parity_3way.py (SQL ≡ Python ≡ Rust-A) for
+    the kernel-and-writeback trio.
+  - tests/engine_service/test_pg_outage_durability.py for the
+    Rust-svc replay correctness.
 
-This is the gold-standard correctness check for the Architecture B
-launch. Phase 6's parity test was 2-way (SQL vs Rust-svc through
-gRPC) on a single Propagate; this script is N-way on a full
-propagation.
-
-Caveat — the script does NOT actually mutate underlying supply/demand
-data, so propagation results are deterministic AND identical across
-engines BECAUSE the kernel is byte-identical. The test catches three
-classes of regression:
-  - Engine-specific bugs (e.g. a divergent ordering between SQL CTE
-    and Rust series sort)
-  - Decimal precision drift across the boundaries
-  - Trigger-resolution bugs (which PIs get marked dirty)
+Together those two cover the full 4-way claim properly. This script
+remains useful as a fast post-deploy smoke ("does the Rust-svc engine
+agree with PG on a representative sample?").
 
 Usage:
     DATABASE_URL=postgresql://ootils:ootils@host:5432/ootils_bench_l \\
@@ -227,11 +216,13 @@ def main() -> int:
 
     print("\n" + "=" * 60)
     if n_diff == 0:
-        print("PARITY 4-WAY OK (sample-based)")
-        print("  SQL ≡ Python ≡ Rust-A: validated by chantier A parity scripts")
-        print("  Rust-svc ≡ Postgres baseline: 0 mismatch on 100-node sample")
+        print("RUST-SVC ↔ POSTGRES PARITY SMOKE: OK")
+        print(f"  Sampled {len(rust_svc_snap)} nodes via gRPC GetNode.")
+        print("  For full 4-way parity, also run:")
+        print("    - scripts/parity_3way.py  (SQL ≡ Python ≡ Rust-A kernel/writeback)")
+        print("    - tests/engine_service/test_pg_outage_durability.py  (Rust-svc replay)")
         return 0
-    print(f"PARITY 4-WAY FAILED: {n_diff} diffs between rust-svc + postgres")
+    print(f"RUST-SVC ↔ POSTGRES PARITY SMOKE FAILED: {n_diff} diffs")
     return 2
 
 

@@ -112,6 +112,27 @@ async fn main() -> anyhow::Result<()> {
         "ootils-engine starting"
     );
 
+    // F-007 + reviewer follow-up: validate metrics_listen FIRST,
+    // before the expensive verify_postgres + loader steps. A
+    // misconfigured address should fail in milliseconds, not after
+    // a 5-second baseline load. (The actual server is spawned later;
+    // this is just early validation of the parsed addr.)
+    let metrics_addr_str = cli.metrics_listen.trim().to_string();
+    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
+        || metrics_addr_str.eq_ignore_ascii_case("off")
+    {
+        None
+    } else {
+        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
+            anyhow::anyhow!(
+                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
+                 (use \"off\" to disable the metrics server)",
+                metrics_addr_str,
+                e
+            )
+        })?)
+    };
+
     verify_postgres(&cli.dsn).await?;
 
     let (graph, load_stats) = loader::load_baseline(&cli.dsn, cli.allow_empty_baseline).await?;
@@ -201,30 +222,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Item #2: Prometheus metrics — process-wide counter registry.
-    // F-007: Boot fails fast on a malformed metrics_listen. Operators
-    // who misconfigure the address learn at startup, not three weeks
-    // later during an incident. "off" (and empty for backward compat)
-    // explicitly disable the endpoint.
+    // Address was already parsed + validated at the top of main()
+    // (F-007 fail-fast).
     let metrics_registry = Arc::new(metrics::Metrics::new());
-    let metrics_addr_str = cli.metrics_listen.trim();
-    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
-        || metrics_addr_str.eq_ignore_ascii_case("off")
-    {
-        info!("metrics endpoint explicitly disabled (OOTILS_METRICS_LISTEN={metrics_addr_str:?})");
-        None
-    } else {
-        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
-            anyhow::anyhow!(
-                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
-                 (use \"off\" to disable the metrics server)",
-                metrics_addr_str,
-                e
-            )
-        })?)
-    };
     if let Some(addr) = metrics_addr {
         let _metrics_handle =
             metrics::spawn_metrics_server(metrics_registry.clone(), addr);
+    } else {
+        info!("metrics endpoint explicitly disabled");
     }
 
     let queue = Arc::new(write_behind::WriteBehindQueue::with_caps(
@@ -452,7 +457,33 @@ async fn verify_postgres(dsn: &str) -> anyhow::Result<()> {
     });
     let row = client.query_one("SELECT version()", &[]).await?;
     let version: String = row.get(0);
-    info!(pg_version = %version, "Postgres reachable");
+
+    // F-028: probe the schema we depend on. Pointing the engine at
+    // the wrong DB (or a DB that hasn't run migrations) used to fail
+    // deep inside the loader with an opaque "column does not exist"
+    // — much harder to debug than an early "your schema is missing X".
+    // We probe a single discriminating column (last_calc_seq, added
+    // by migration 037 which is part of the rust-svc engine's
+    // contract). Missing → bail loudly.
+    let probe = client
+        .query_opt(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = 'public' \
+               AND table_name = 'nodes' \
+               AND column_name = 'last_calc_seq'",
+            &[],
+        )
+        .await?;
+    if probe.is_none() {
+        anyhow::bail!(
+            "schema check failed: nodes.last_calc_seq column missing. \
+             Run migration 037_nodes_last_calc_seq.sql (or all pending \
+             migrations). DATABASE_URL appears correct (PG {})",
+            version
+        );
+    }
+
+    info!(pg_version = %version, "Postgres reachable + schema check OK");
     Ok(())
 }
 

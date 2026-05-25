@@ -36,12 +36,37 @@ pub struct PropagationStats {
     pub deltas: Vec<crate::wal::NodeDelta>,
 }
 
-/// Propagate over an explicit set of dirty PI node indices.
+/// Output of the read-only compute phase, ready to be applied to the
+/// graph under a brief write lock. Carries the dirty-PI count so the
+/// caller can still report `n_dirty` accurately.
+pub struct ComputedResults {
+    pub n_dirty: usize,
+    pub results: Vec<(NodeIndex, PiResult)>,
+    pub compute_us: u64,
+}
+
+/// F-009 fix (Cluster F-009 / E2 follow-up): two-phase propagate.
 ///
-/// Returns timing + counts. Mutates the `Graph` in place: the PI
-/// fields (opening/inflows/outflows/closing/shortage_qty) get the new
-/// values, `has_shortage` is updated, and `is_dirty` is cleared.
-pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationStats {
+/// Old contract: one function took `&mut Graph` and held the write
+/// lock through both the rayon parallel compute (~ms) and the apply.
+/// This blocked all concurrent readers (Health/GetNode/ListScenarios)
+/// for the entire compute duration.
+///
+/// New contract:
+/// - `plan_compute(&Graph, &dirty)` runs the parallel rayon work under
+///   a READ lock — concurrent reads of the graph (other handlers)
+///   coexist via parking_lot::RwLock's multi-reader semantics.
+/// - `apply(&mut Graph, ComputedResults, &dirty)` takes a brief write
+///   lock to write back the values + clear dirty flags + bump
+///   generation. Apply is sequential and bounded by N_dirty
+///   memory-writes — sub-millisecond.
+///
+/// Callers (service.rs) must serialize propagations among themselves
+/// via a separate non-async mutex so two simultaneous propagations
+/// don't compute against the same read state and then both apply
+/// (the second would overwrite the first's deltas with stale data).
+/// `EngineSvc::propagation_lock` is that gate.
+pub fn plan_compute(graph: &Graph, dirty: &HashSet<NodeIndex>) -> ComputedResults {
     let t0 = std::time::Instant::now();
 
     // Group dirty PIs by projection_series.
@@ -56,14 +81,13 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         }
     }
 
-    // ---- Compute phase (read-only on graph, parallel across series) ----
-    // Series are independent — closing_stock cascade is internal to one
-    // series, not cross-series. So we compute all series in parallel,
-    // collect their per-bucket (NodeIndex, PiResult) tuples, then apply
-    // mutations in a single sequential pass at the end.
+    // Series are independent — closing_stock cascade is internal to
+    // one series, not cross-series. So we compute all series in
+    // parallel, collect their per-bucket (NodeIndex, PiResult) tuples,
+    // then return them; the caller's apply phase mutates.
     //
     // This parallelization is what lets us hit sub-100ms on profile L.
-    // Empirically (8 logical cores) : 106ms → ~40ms.
+    // Empirically (8 logical cores): 106ms → ~40ms.
     let series_batches: Vec<Vec<NodeIndex>> = by_series
         .into_iter()
         .map(|(_, mut buckets)| {
@@ -72,22 +96,11 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         })
         .collect();
 
-    // F-010 + F-023 (Cluster E): each series job is wrapped in
-    // catch_unwind so a panic in compute_one_bucket (e.g. arithmetic
-    // overflow on bad data) doesn't unwind through rayon and kill the
-    // worker thread. Combined with panic="unwind" in [profile.release]
-    // (Cargo.toml) this gives the propagator a per-series fault
-    // boundary: one bad PI series fails, the rest still compute.
-    // PIs with NULL time_span_* are also skipped at compute time
-    // (compute_one_bucket returns None).
+    // F-010 + F-023: per-series catch_unwind fault boundary.
     use std::panic::{catch_unwind, AssertUnwindSafe};
     let mut results: Vec<(NodeIndex, PiResult)> = series_batches
         .par_iter()
         .flat_map_iter(|buckets| {
-            // AssertUnwindSafe is safe here because `graph` is a
-            // shared immutable reference during the compute phase
-            // (we only mutate in the apply phase below, single-threaded).
-            // A panicked series leaves no broken state to observe.
             match catch_unwind(AssertUnwindSafe(|| compute_one_series(graph, buckets))) {
                 Ok(local) => local,
                 Err(_panic) => {
@@ -103,17 +116,32 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         })
         .collect();
 
-    // ---- Apply phase (single-threaded, mutable) ----
-    // Sort by NodeIndex for cache-friendly access. Negligible vs the
-    // compute phase that dominates.
+    // Sort by NodeIndex once here, in the compute phase, so the apply
+    // phase has cache-friendly sequential writes (no cost vs sorting
+    // after — the data is already in this thread's cache).
     results.sort_unstable_by_key(|(idx, _)| *idx);
 
+    ComputedResults {
+        n_dirty: dirty.len(),
+        results,
+        compute_us: t0.elapsed().as_micros() as u64,
+    }
+}
+
+/// Apply the precomputed results to the graph under a brief write
+/// lock. F-009: this is the ONLY phase that needs an exclusive lock.
+/// Apply is sequential O(N_changed) — sub-ms on profile L.
+pub fn apply(
+    graph: &mut Graph,
+    computed: ComputedResults,
+    dirty: &HashSet<NodeIndex>,
+) -> PropagationStats {
     let mut n_processed = 0usize;
     let mut n_changed = 0usize;
     let mut n_shortages = 0usize;
     let mut deltas: Vec<crate::wal::NodeDelta> = Vec::new();
 
-    for (pi_idx, result) in results {
+    for (pi_idx, result) in computed.results {
         n_processed += 1;
         let node = &mut graph.nodes[pi_idx as usize];
         let changed = node.opening_stock != result.opening_stock
@@ -149,16 +177,25 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
     }
 
     graph.generation = graph.generation.wrapping_add(1);
-    let compute_us = t0.elapsed().as_micros() as u64;
 
     PropagationStats {
         n_dirty: dirty.len(),
         n_processed,
         n_changed,
         n_shortages,
-        compute_us,
+        compute_us: computed.compute_us,
         deltas,
     }
+}
+
+/// Compatibility shim for callers (the bench mode in main.rs) that
+/// still expect a single-call mutating propagate. Runs compute + apply
+/// back-to-back under the caller's existing write lock. Production
+/// hot path (service.rs::propagate) uses plan_compute + apply
+/// separately for the F-009 locking improvement.
+pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationStats {
+    let computed = plan_compute(graph, dirty);
+    apply(graph, computed, dirty)
 }
 
 /// Compute one series end-to-end: walk the dirty buckets in order
@@ -302,6 +339,15 @@ fn compute_one_bucket(
 
 /// Convenience for the "full propagation" bench: mark every active PI
 /// dirty, then propagate.
+///
+/// F-049: NOTE on the dirty flag's semantics. This function sets
+/// FLAG_DIRTY on the in-RAM Node so a future is_dirty() check would
+/// reflect it. The propagator's `apply` phase ALSO clears FLAG_DIRTY
+/// for every PI it processes, so by the time propagate() returns the
+/// flag is back to 0 for every entry in the returned set. The
+/// returned HashSet is the authoritative source of "what was dirty
+/// this call" — callers should not consult the flag afterwards.
+/// (See `propagator::apply` which clears `node.flags &= !FLAG_DIRTY`.)
 pub fn mark_all_pi_dirty(graph: &mut Graph) -> HashSet<NodeIndex> {
     let mut dirty = HashSet::with_capacity(graph.nodes.len() / 2);
     for (idx, n) in graph.nodes.iter_mut().enumerate() {

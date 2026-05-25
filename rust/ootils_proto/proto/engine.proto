@@ -31,6 +31,14 @@ service Engine {
   // Merge a scenario's overlay back into the baseline. Atomic via arc-swap.
   rpc MergeScenario(MergeRequest) returns (MergeResult);
 
+  // Discard a scenario without merging. F-037/F-038 audit response:
+  // the only way to dispose of a scenario used to be Merge, which
+  // forced the planner's what-if to apply to baseline. Now what-ifs
+  // can be cleanly dropped. Returns NotFound if the scenario_id
+  // doesn't exist; the baseline scenario is rejected with
+  // InvalidArgument (cannot delete the root).
+  rpc DeleteScenario(DeleteRequest) returns (DeleteResult);
+
   // List active scenarios + their memory footprint.
   rpc ListScenarios(google.protobuf.Empty) returns (ScenarioList);
 
@@ -98,6 +106,15 @@ message MergeRequest {
 message MergeResult {
   int32 nodes_merged = 1;
   string new_baseline_generation = 2;
+}
+
+message DeleteRequest {
+  string scenario_id = 1;
+}
+
+message DeleteResult {
+  // # of overlay entries dropped — useful for ops sanity.
+  int32 overlay_entries_freed = 1;
 }
 
 message ScenarioInfo {

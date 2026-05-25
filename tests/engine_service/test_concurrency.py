@@ -23,31 +23,57 @@ pytestmark = pytest.mark.slow
 
 def test_parallel_reads_during_propagation(engine_session, pick_pi_node):
     """Multiple GetNode reads should not block, even while Propagate
-    is running on the baseline. Validates the RwLock read+write
-    interleaving."""
+    is running on the baseline. Validates the F-009 lock split:
+    plan_compute holds a READ lock (concurrent readers OK), apply
+    holds the WRITE lock only briefly.
+
+    F-035 fix: baseline the reader throughput WITHOUT propagation
+    first, then assert that with-propagation throughput stays at
+    least 50% of baseline. Old assertion (read_count > 100) didn't
+    test the failure mode (severe lock contention would still pass
+    if reads were sub-ms)."""
     _, client = engine_session
     trigger, _, _ = pick_pi_node()
 
-    stop_event = threading.Event()
-    read_count = 0
-    read_lock = threading.Lock()
-    errors: list[Exception] = []
+    def run_readers(stop_event, errors, n_threads=4) -> int:
+        read_count = 0
+        read_lock = threading.Lock()
 
-    def reader():
-        nonlocal read_count
-        try:
-            while not stop_event.is_set():
-                client.get_node(BASELINE, trigger)
-                with read_lock:
-                    read_count += 1
-        except Exception as e:  # noqa: BLE001
-            errors.append(e)
+        def reader():
+            nonlocal read_count
+            try:
+                while not stop_event.is_set():
+                    client.get_node(BASELINE, trigger)
+                    with read_lock:
+                        read_count += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
 
-    readers = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
-    for t in readers:
-        t.start()
+        threads = [threading.Thread(target=reader, daemon=True) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        return threads, lambda: read_count
 
-    # Hammer Propagate from the main thread for 3 seconds.
+    # ---- Baseline pass: 4 readers, no propagation, for 1.5 s ----
+    stop_base = threading.Event()
+    base_errors: list[Exception] = []
+    base_threads, base_count_fn = run_readers(stop_base, base_errors)
+    time.sleep(1.5)
+    stop_base.set()
+    for t in base_threads:
+        t.join(timeout=2.0)
+    assert not base_errors, f"baseline readers errored: {base_errors[:3]}"
+    baseline_throughput = base_count_fn() / 1.5
+    assert baseline_throughput > 100, (
+        f"baseline throughput suspiciously low: {baseline_throughput:.0f} reads/s — "
+        "test environment issue"
+    )
+
+    # ---- Contention pass: 4 readers + hammered Propagate for 3 s ----
+    stop_c = threading.Event()
+    c_errors: list[Exception] = []
+    c_threads, c_count_fn = run_readers(stop_c, c_errors)
+
     deadline = time.perf_counter() + 3.0
     propagations = 0
     while time.perf_counter() < deadline:
@@ -59,14 +85,22 @@ def test_parallel_reads_during_propagation(engine_session, pick_pi_node):
         )
         propagations += 1
 
-    stop_event.set()
-    for t in readers:
+    stop_c.set()
+    for t in c_threads:
         t.join(timeout=2.0)
+    assert not c_errors, f"concurrent reads errored: {c_errors[:3]}"
+    contention_throughput = c_count_fn() / 3.0
 
-    assert not errors, f"concurrent reads errored: {errors[:3]}"
-    assert read_count > 100, (
-        f"only {read_count} reads completed during 3s of Propagate — "
-        "lock contention?"
+    # F-009 contract: contention throughput must stay at least 50%
+    # of baseline. A naive "write-lock-during-compute" implementation
+    # would drop this to near 0 because every propagation blocks all
+    # reads for ms. With the F-009 read/write split, reads see only
+    # the brief write lock during apply (~µs).
+    ratio = contention_throughput / baseline_throughput
+    assert ratio >= 0.50, (
+        f"reads heavily blocked during propagation: baseline={baseline_throughput:.0f}/s, "
+        f"contention={contention_throughput:.0f}/s, ratio={ratio:.2f} (need ≥ 0.50). "
+        "F-009 lock split regression?"
     )
     assert propagations > 10, f"only {propagations} propagations completed"
 
