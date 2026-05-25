@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use ootils_proto::engine::v1::{engine_server::Engine, health_status::Status as HealthEnum, *};
 
+use crate::metrics::Metrics;
 use crate::propagator;
 use crate::scenario::ScenarioManager;
 use crate::state::{Graph, NodeType};
@@ -42,6 +43,8 @@ pub struct EngineSvc {
     /// deltas to the WAL synchronously (fsync) and enqueue them for
     /// async Postgres flush.
     writeback: Arc<WriteBehindQueue>,
+    /// Prometheus metrics registry (item #2).
+    metrics: Arc<Metrics>,
 }
 
 impl EngineSvc {
@@ -49,6 +52,7 @@ impl EngineSvc {
         boot_time: Instant,
         baseline: Arc<RwLock<Graph>>,
         writeback: Arc<WriteBehindQueue>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let now = std::time::SystemTime::now();
         Self {
@@ -57,6 +61,7 @@ impl EngineSvc {
             baseline,
             scenarios: Arc::new(ScenarioManager::new()),
             writeback,
+            metrics,
         }
     }
 }
@@ -153,6 +158,10 @@ impl Engine for EngineSvc {
         // Phase 4: forks are always from baseline. Parent-scenario forks
         // (forking a fork) is a phase-5 elaboration.
         let (scenario, stats) = self.scenarios.fork_from_baseline(name.clone(), &self.baseline);
+        self.metrics.record_fork();
+        self.metrics
+            .active_scenarios
+            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
         info!(
             scenario_id = %scenario.id,
             name = %scenario.name,
@@ -203,6 +212,10 @@ impl Engine for EngineSvc {
 
         // Drop the scenario from the manager — merged is consumed.
         self.scenarios.remove(&sid);
+        self.metrics.record_merge();
+        self.metrics
+            .active_scenarios
+            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
 
         let new_gen = {
             let g = self.baseline.read();
@@ -326,9 +339,13 @@ impl Engine for EngineSvc {
             let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
             let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
             if let Err(e) = self.writeback.wal().append(&record) {
+                self.metrics.record_failure();
                 return Err(Status::internal(format!("WAL append failed: {e}")));
             }
             wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+            self.metrics
+                .wal_appends_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // Enqueue (non-blocking). The bg flusher picks it up within
             // flush_interval_ms.
@@ -338,6 +355,15 @@ impl Engine for EngineSvc {
         }
 
         let total_us = t_total.elapsed().as_micros() as f64;
+
+        // Item #2: register the propagation in metrics.
+        self.metrics.record_propagation(
+            stats.n_processed as u64,
+            stats.n_changed as u64,
+            stats.n_shortages as u64,
+            stats.compute_us,
+            wal_fsync_us as u64,
+        );
 
         Ok(Response::new(PropagateResponse {
             calc_run_id: q.event_id,

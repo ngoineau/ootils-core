@@ -61,3 +61,47 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 [dev-dependencies]
 tempfile = "3.12"
+
+# Item #2 — Prometheus exposition + Item #1 — TLS/auth + Item #3 — OTLP
+# Group dep additions here for visibility.
+[dependencies.hyper]
+version = "1.4"
+features = ["http1", "server"]
+
+[dependencies.hyper-util]
+version = "0.1"
+features = ["tokio", "server-auto"]
+
+[dependencies.http-body-util]
+version = "0.1"
+
+[dependencies.bytes]
+version = "1.7"
+
+[dependencies.tonic-tls]
+version = "0.3"
+optional = true
+
+[dependencies.tracing-opentelemetry]
+version = "0.27"
+optional = true
+
+[dependencies.opentelemetry]
+version = "0.27"
+features = ["trace"]
+optional = true
+
+[dependencies.opentelemetry_sdk]
+version = "0.27"
+features = ["trace", "rt-tokio"]
+optional = true
+
+[dependencies.opentelemetry-otlp]
+version = "0.27"
+features = ["trace", "grpc-tonic"]
+optional = true
+
+[features]
+default = []
+otlp = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+tls = ["dep:tonic-tls"]
