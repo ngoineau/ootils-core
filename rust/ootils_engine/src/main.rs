@@ -83,6 +83,12 @@ struct Cli {
     /// RESOURCE_EXHAUSTED. Default: 1,000,000.
     #[arg(long, env = "OOTILS_QUEUE_MAX_DEPTH", default_value_t = 1_000_000)]
     queue_max_depth: usize,
+
+    /// Per-call gRPC timeout (milliseconds). A slow client or stuck
+    /// handler is cancelled past this deadline rather than holding
+    /// resources indefinitely (F-018). Default: 30 s.
+    #[arg(long, env = "OOTILS_REQUEST_TIMEOUT_MS", default_value_t = 30_000)]
+    request_timeout_ms: u64,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -252,7 +258,11 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = service::EngineSvc::new(boot_time, graph_lock, queue, metrics_registry);
 
-    info!(addr = %cli.listen, "gRPC server listening");
+    info!(
+        addr = %cli.listen,
+        request_timeout_ms = cli.request_timeout_ms,
+        "gRPC server listening"
+    );
     // F-016: symmetric message-size limits with the Python client
     // (which lifts to 256 MB in client.py). Without explicit
     // .max_decoding_message_size on the server, tonic 0.12 defaults to
@@ -262,7 +272,12 @@ async fn main() -> anyhow::Result<()> {
     let engine_svc = ootils_proto::engine::v1::engine_server::EngineServer::new(engine)
         .max_decoding_message_size(MAX_MSG_BYTES)
         .max_encoding_message_size(MAX_MSG_BYTES);
+    // F-018: per-call timeout via tonic's built-in helper. Past this
+    // deadline tonic cancels the handler future and returns
+    // Status::cancelled to the client. Prevents a stuck rayon worker
+    // or slow client from holding the connection indefinitely.
     let server = Server::builder()
+        .timeout(std::time::Duration::from_millis(cli.request_timeout_ms))
         .add_service(engine_svc)
         .serve_with_shutdown(cli.listen, shutdown_signal());
     server.await?;

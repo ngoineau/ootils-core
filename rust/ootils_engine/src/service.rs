@@ -347,59 +347,74 @@ impl Engine for EngineSvc {
         }
 
         let t_total = Instant::now();
-        let stats = {
-            let mut g = self.baseline.write();
-            propagator::propagate(&mut g, &dirty)
-        };
 
-        // Durability barrier — phase 5. Append the deltas to the WAL
-        // (fsync), then enqueue for async Postgres flush. After this
-        // point the caller's "OK" response means: state is durable on
-        // disk, even if Postgres lags by up to flush_interval_ms.
-        let mut wal_fsync_us = 0.0;
-        if !stats.deltas.is_empty() {
-            let t_wal = Instant::now();
-            // Use the parsed event_id (or freshly generated above) as
-            // calc_run_id for phase 5 — phase 6 will plumb a proper
-            // calc_run model.
-            let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
-            let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
-            let assigned_seq = match self.writeback.wal().append(&record) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.metrics.record_failure();
-                    // F-005: WAL size cap reached → RESOURCE_EXHAUSTED
-                    // (client can backoff). Any other error stays internal.
-                    if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+        // F-008 (Cluster E): the heavy stuff — write lock + rayon
+        // parallel compute + WAL fsync + queue push — is all blocking
+        // I/O or CPU-bound work that must NOT run on a tokio worker
+        // thread (would stall other handlers including Health,
+        // GetNode, and the metrics endpoint). We move it onto a
+        // dedicated blocking-task pool via spawn_blocking.
+        let baseline = self.baseline.clone();
+        let writeback = self.writeback.clone();
+        let metrics = self.metrics.clone();
+        let blocking_outcome = tokio::task::spawn_blocking(
+            move || -> Result<(propagator::PropagationStats, f64), Status> {
+                let stats = {
+                    let mut g = baseline.write();
+                    propagator::propagate(&mut g, &dirty)
+                };
+
+                let mut wal_fsync_us = 0.0;
+                if !stats.deltas.is_empty() {
+                    let t_wal = Instant::now();
+                    let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
+                    let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
+                    let assigned_seq = match writeback.wal().append(&record) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            metrics.record_failure();
+                            // F-005: WAL size cap → RESOURCE_EXHAUSTED.
+                            if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+                                return Err(Status::resource_exhausted(full.to_string()));
+                            }
+                            return Err(Status::internal(format!("WAL append failed: {e}")));
+                        }
+                    };
+                    wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+                    metrics
+                        .wal_appends_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    let pending: Vec<PendingDelta> = stats
+                        .deltas
+                        .iter()
+                        .cloned()
+                        .map(|d| PendingDelta::from_delta(assigned_seq, d))
+                        .collect();
+                    if let Err(full) = writeback.try_push(pending) {
+                        metrics.record_failure();
                         return Err(Status::resource_exhausted(full.to_string()));
                     }
-                    return Err(Status::internal(format!("WAL append failed: {e}")));
                 }
-            };
-            wal_fsync_us = t_wal.elapsed().as_micros() as f64;
-            self.metrics
-                .wal_appends_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            // Enqueue (non-blocking). The bg flusher picks it up within
-            // flush_interval_ms. Every delta carries the seq assigned
-            // to its WAL record so the PG UPDATE's seq-guard can
-            // detect stale writes (A6 / F-014).
-            // F-005: try_push enforces the queue depth cap. We've
-            // already paid the WAL fsync at this point — if the queue
-            // is full we MUST surface that to the caller so they don't
-            // think the write was accepted only for it to never flush.
-            let pending: Vec<PendingDelta> = stats
-                .deltas
-                .iter()
-                .cloned()
-                .map(|d| PendingDelta::from_delta(assigned_seq, d))
-                .collect();
-            if let Err(full) = self.writeback.try_push(pending) {
+                Ok((stats, wal_fsync_us))
+            },
+        )
+        .await;
+
+        // Translate spawn_blocking JoinError → INTERNAL (the closure
+        // would panic for a hard bug). The closure's own Status
+        // errors pass through.
+        let (stats, wal_fsync_us) = match blocking_outcome {
+            Ok(Ok(tup)) => tup,
+            Ok(Err(status)) => return Err(status),
+            Err(join_err) => {
                 self.metrics.record_failure();
-                return Err(Status::resource_exhausted(full.to_string()));
+                return Err(Status::internal(format!(
+                    "propagate worker task failed: {join_err}"
+                )));
             }
-        }
+        };
 
         let total_us = t_total.elapsed().as_micros() as f64;
 

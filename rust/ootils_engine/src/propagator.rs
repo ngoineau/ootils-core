@@ -72,18 +72,34 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
         })
         .collect();
 
+    // F-010 + F-023 (Cluster E): each series job is wrapped in
+    // catch_unwind so a panic in compute_one_bucket (e.g. arithmetic
+    // overflow on bad data) doesn't unwind through rayon and kill the
+    // worker thread. Combined with panic="unwind" in [profile.release]
+    // (Cargo.toml) this gives the propagator a per-series fault
+    // boundary: one bad PI series fails, the rest still compute.
+    // PIs with NULL time_span_* are also skipped at compute time
+    // (compute_one_bucket returns None).
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     let mut results: Vec<(NodeIndex, PiResult)> = series_batches
         .par_iter()
         .flat_map_iter(|buckets| {
-            let mut local = Vec::with_capacity(buckets.len());
-            let seed_opening = compute_seed_opening_from_sorted(graph, buckets);
-            let mut prev_closing = seed_opening;
-            for &pi_idx in buckets {
-                let result = compute_one_bucket(graph, pi_idx, prev_closing);
-                prev_closing = result.closing_stock;
-                local.push((pi_idx, result));
+            // AssertUnwindSafe is safe here because `graph` is a
+            // shared immutable reference during the compute phase
+            // (we only mutate in the apply phase below, single-threaded).
+            // A panicked series leaves no broken state to observe.
+            match catch_unwind(AssertUnwindSafe(|| compute_one_series(graph, buckets))) {
+                Ok(local) => local,
+                Err(_panic) => {
+                    tracing::error!(
+                        n_buckets = buckets.len(),
+                        first_node_id = %graph.nodes[buckets[0] as usize].node_id,
+                        "rayon propagator job panicked, skipping series — \
+                         engine survives (F-023). Check upstream data quality."
+                    );
+                    Vec::new()
+                }
             }
-            local
         })
         .collect();
 
@@ -145,6 +161,34 @@ pub fn propagate(graph: &mut Graph, dirty: &HashSet<NodeIndex>) -> PropagationSt
     }
 }
 
+/// Compute one series end-to-end: walk the dirty buckets in order
+/// from the seed, chaining closing_stock → next opening. Returns a
+/// vector of (NodeIndex, PiResult) to apply in the mutation phase.
+/// Buckets with NULL time_span_* are skipped (F-010) without
+/// advancing the cascade — subsequent buckets continue from the last
+/// good closing_stock.
+fn compute_one_series(graph: &Graph, buckets: &[NodeIndex]) -> Vec<(NodeIndex, PiResult)> {
+    let mut local = Vec::with_capacity(buckets.len());
+    let seed_opening = compute_seed_opening_from_sorted(graph, buckets);
+    let mut prev_closing = seed_opening;
+    for &pi_idx in buckets {
+        match compute_one_bucket(graph, pi_idx, prev_closing) {
+            Some(result) => {
+                prev_closing = result.closing_stock;
+                local.push((pi_idx, result));
+            }
+            None => {
+                let n = &graph.nodes[pi_idx as usize];
+                tracing::warn!(
+                    node_id = %n.node_id,
+                    "skipping PI with NULL time_span_* — fix upstream data"
+                );
+            }
+        }
+    }
+    local
+}
+
 /// Compute the seed opening_stock from a pre-sorted list of dirty bucket
 /// indices for one series. Takes the first bucket's `series_id` itself
 /// (no need to pass it separately).
@@ -190,12 +234,22 @@ fn compute_seed_opening_from_sorted(graph: &Graph, sorted_dirty: &[NodeIndex]) -
 
 /// Compute one PI bucket using the kernel: collect supplies + demands
 /// from incoming edges, call `compute_pi_bucket`.
-fn compute_one_bucket(graph: &Graph, pi_idx: NodeIndex, opening_stock: Decimal) -> PiResult {
+///
+/// F-010 fix: a PI with NULL time_span_* used to panic via
+/// `expect()`. With panic=abort that meant a single bad row in PG
+/// became an infinite engine crash loop on boot+restart. Now we
+/// return `None` and the caller skips this PI cleanly. The
+/// `mark_all_pi_dirty` and dirty-set construction paths log a warn
+/// when they encounter such PIs so operators can fix the upstream
+/// data.
+fn compute_one_bucket(
+    graph: &Graph,
+    pi_idx: NodeIndex,
+    opening_stock: Decimal,
+) -> Option<PiResult> {
     let pi_node = &graph.nodes[pi_idx as usize];
-    let bucket_start = pi_node
-        .time_span_start
-        .expect("PI without time_span_start");
-    let bucket_end = pi_node.time_span_end.expect("PI without time_span_end");
+    let bucket_start = pi_node.time_span_start?;
+    let bucket_end = pi_node.time_span_end?;
 
     let edges = graph.edges_in.get(&pi_idx);
 
@@ -241,7 +295,7 @@ fn compute_one_bucket(graph: &Graph, pi_idx: NodeIndex, opening_stock: Decimal) 
         })
     });
 
-    compute_pi_bucket(opening_stock, supplies, demands, bucket_start, bucket_end)
+    Some(compute_pi_bucket(opening_stock, supplies, demands, bucket_start, bucket_end))
 }
 
 /// Convenience for the "full propagation" bench: mark every active PI
