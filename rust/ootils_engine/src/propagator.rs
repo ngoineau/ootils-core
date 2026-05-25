@@ -337,6 +337,316 @@ fn compute_one_bucket(
     Some(compute_pi_bucket(opening_stock, supplies, demands, bucket_start, bucket_end))
 }
 
+// ============================================================
+// Per-scenario propagation (P2.1.b — ADR-018 closure)
+// ============================================================
+//
+// Scenarios use a different storage model than the baseline:
+//   - The baseline (Graph) is mutated in-place during baseline propag
+//     (then atomic-swapped via ArcSwap from P2.1.a).
+//   - A Scenario has an IMMUTABLE Arc<Graph> snapshot + a sparse
+//     `overlay: DashMap<NodeIndex, Node>` of modified nodes.
+//   - All reads check overlay first, fall back to snapshot.
+//   - All writes go to overlay (snapshot is never touched).
+//
+// Edges + indexes (by_series, by_node_id, etc.) are NEVER mutated by
+// scenario propagation — they live in the snapshot and are shared
+// read-only.
+//
+// Scenario propagation is much cheaper than baseline propagation:
+//   - No graph clone (overlay writes are O(1) DashMap inserts)
+//   - No WAL append (scenarios are ephemeral by design in 2.1.b;
+//     persistence comes in P2.2)
+//   - No PG write-behind (scenarios don't reach Postgres in 2.1.b)
+//
+// The per-bucket compute is slightly costlier than baseline because
+// each source node read involves an overlay lookup + a clone. For
+// incremental propagation (1 series = ~90 PIs × ~20 source nodes =
+// ~1800 reads), that's a few µs of extra DashMap probing. Worth it
+// for the architectural simplicity.
+
+use crate::scenario::Scenario;
+
+/// Scenario equivalent of `plan_compute`. Same rayon parallelism,
+/// same per-series catch_unwind boundary, same output shape — but
+/// all node reads route through the overlay-aware view.
+pub fn plan_compute_scenario(
+    scenario: &Scenario,
+    dirty: &HashSet<NodeIndex>,
+) -> ComputedResults {
+    let t0 = std::time::Instant::now();
+    let snapshot = &scenario.baseline_snapshot;
+
+    // Group dirty PIs by projection_series. Reads via the overlay
+    // because a user may have changed the series_id (rare but
+    // legal). For node_type we trust the snapshot — node_type is
+    // not user-mutable through the engine API.
+    let mut by_series: HashMap<Uuid, Vec<NodeIndex>> = HashMap::new();
+    for &idx in dirty {
+        let n_snap = &snapshot.nodes[idx as usize];
+        if n_snap.node_type != NodeType::ProjectedInventory {
+            continue;
+        }
+        let sid_opt = scenario
+            .get_node_cloned(idx)
+            .and_then(|n| n.series_id);
+        if let Some(sid) = sid_opt {
+            by_series.entry(sid).or_default().push(idx);
+        }
+    }
+
+    // Sort each series' buckets by bucket_sequence. Read from snapshot
+    // (bucket_sequence is set at boot, immutable in practice).
+    let series_batches: Vec<Vec<NodeIndex>> = by_series
+        .into_iter()
+        .map(|(_, mut buckets)| {
+            buckets.sort_by_key(|&idx| snapshot.nodes[idx as usize].bucket_sequence);
+            buckets
+        })
+        .collect();
+
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let mut results: Vec<(NodeIndex, PiResult)> = series_batches
+        .par_iter()
+        .flat_map_iter(|buckets| {
+            match catch_unwind(AssertUnwindSafe(|| {
+                compute_one_series_scenario(scenario, buckets)
+            })) {
+                Ok(local) => local,
+                Err(_panic) => {
+                    tracing::error!(
+                        scenario_id = %scenario.id,
+                        n_buckets = buckets.len(),
+                        first_node_id = %snapshot.nodes[buckets[0] as usize].node_id,
+                        "rayon scenario propagator job panicked, skipping series \
+                         — engine survives (F-023)."
+                    );
+                    Vec::new()
+                }
+            }
+        })
+        .collect();
+
+    results.sort_unstable_by_key(|(idx, _)| *idx);
+
+    ComputedResults {
+        n_dirty: dirty.len(),
+        results,
+        compute_us: t0.elapsed().as_micros() as u64,
+    }
+}
+
+/// Apply scenario results: writes to the overlay (DashMap insert).
+/// No graph mutation. No WAL. No PG. Just overlay updates.
+pub fn apply_scenario(
+    scenario: &Scenario,
+    computed: ComputedResults,
+    dirty: &HashSet<NodeIndex>,
+) -> PropagationStats {
+    let mut n_processed = 0usize;
+    let mut n_changed = 0usize;
+    let mut n_shortages = 0usize;
+
+    for (pi_idx, result) in computed.results {
+        n_processed += 1;
+        // Start from the current scenario view (overlay or snapshot).
+        let mut node = match scenario.get_node_cloned(pi_idx) {
+            Some(n) => n,
+            None => continue, // PI not in graph (shouldn't happen, defensive)
+        };
+        let changed = node.opening_stock != result.opening_stock
+            || node.inflows != result.inflows
+            || node.outflows != result.outflows
+            || node.closing_stock != result.closing_stock
+            || node.shortage_qty != result.shortage_qty
+            || node.has_shortage() != result.has_shortage;
+        node.opening_stock = result.opening_stock;
+        node.inflows = result.inflows;
+        node.outflows = result.outflows;
+        node.closing_stock = result.closing_stock;
+        node.shortage_qty = result.shortage_qty;
+        if result.has_shortage {
+            node.flags |= Node::FLAG_SHORTAGE;
+            n_shortages += 1;
+        } else {
+            node.flags &= !Node::FLAG_SHORTAGE;
+        }
+        node.flags &= !Node::FLAG_DIRTY;
+        // ALWAYS write to overlay (even if !changed, so the overlay
+        // captures the "computed against this scenario state" intent).
+        // For perf we could skip the write when !changed AND not in
+        // overlay yet — but that's a micro-opt; DashMap insert is
+        // fast.
+        scenario.overlay.insert(pi_idx, node);
+        if changed {
+            n_changed += 1;
+        }
+    }
+
+    PropagationStats {
+        n_dirty: dirty.len(),
+        n_processed,
+        n_changed,
+        n_shortages,
+        compute_us: computed.compute_us,
+        deltas: Vec::new(), // scenarios don't go to WAL/PG in P2.1.b
+    }
+}
+
+/// Scenario equivalent of `compute_one_series`. Same chaining logic;
+/// per-bucket reads via overlay-aware path.
+fn compute_one_series_scenario(
+    scenario: &Scenario,
+    buckets: &[NodeIndex],
+) -> Vec<(NodeIndex, PiResult)> {
+    let mut local = Vec::with_capacity(buckets.len());
+    let seed_opening = compute_seed_opening_scenario(scenario, buckets);
+    let mut prev_closing = seed_opening;
+    for &pi_idx in buckets {
+        match compute_one_bucket_scenario(scenario, pi_idx, prev_closing) {
+            Some(result) => {
+                prev_closing = result.closing_stock;
+                local.push((pi_idx, result));
+            }
+            None => {
+                let node_id = scenario
+                    .get_node_cloned(pi_idx)
+                    .map(|n| n.node_id.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                tracing::warn!(
+                    scenario_id = %scenario.id,
+                    node_id = %node_id,
+                    "skipping PI with NULL time_span_* — fix upstream data"
+                );
+            }
+        }
+    }
+    local
+}
+
+/// Scenario equivalent of `compute_seed_opening_from_sorted`.
+/// PI[0] seed = sum of OnHand supplies (overlay-aware).
+/// PI[N>0] seed = previous bucket's closing_stock (overlay-aware).
+fn compute_seed_opening_scenario(
+    scenario: &Scenario,
+    sorted_dirty: &[NodeIndex],
+) -> Decimal {
+    let &seed_idx = match sorted_dirty.first() {
+        Some(x) => x,
+        None => return Decimal::ZERO,
+    };
+    let seed_node = match scenario.get_node_cloned(seed_idx) {
+        Some(n) => n,
+        None => return Decimal::ZERO,
+    };
+    let seed_seq = seed_node.bucket_sequence;
+    let snapshot = &scenario.baseline_snapshot;
+
+    if seed_seq == 0 {
+        // Sum overlay-aware OnHand supplies replenishing PI[0].
+        let mut total = Decimal::ZERO;
+        if let Some(edges) = snapshot.edges_in.get(&seed_idx) {
+            for e in edges {
+                if e.edge_type != EdgeType::Replenishes {
+                    continue;
+                }
+                let src = match scenario.get_node_cloned(e.from) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if src.node_type == NodeType::OnHandSupply && src.is_active() {
+                    total += src.quantity;
+                }
+            }
+        }
+        return total;
+    }
+
+    // Previous bucket lookup via the immutable snapshot index, but
+    // the prev bucket's CLOSING_STOCK may be in overlay.
+    if let Some(sid) = seed_node.series_id {
+        if let Some(buckets) = snapshot.by_series.get(&sid) {
+            let target = seed_seq - 1;
+            if let Ok(pos) = buckets.binary_search_by_key(&target, |&idx| {
+                snapshot.nodes[idx as usize].bucket_sequence
+            }) {
+                let prev_idx = buckets[pos];
+                if let Some(prev_node) = scenario.get_node_cloned(prev_idx) {
+                    return prev_node.closing_stock;
+                }
+            }
+        }
+    }
+    Decimal::ZERO
+}
+
+/// Scenario equivalent of `compute_one_bucket`. Reads source nodes
+/// via overlay-aware path; calls the same kernel.
+fn compute_one_bucket_scenario(
+    scenario: &Scenario,
+    pi_idx: NodeIndex,
+    opening_stock: Decimal,
+) -> Option<PiResult> {
+    let pi_node = scenario.get_node_cloned(pi_idx)?;
+    let bucket_start = pi_node.time_span_start?;
+    let bucket_end = pi_node.time_span_end?;
+    let snapshot = &scenario.baseline_snapshot;
+
+    // Pre-fetch source nodes (overlay-aware). The kernel borrows
+    // `&Decimal` from the contribs, so we need to hold these Vec'd
+    // copies for the whole kernel call. ~20-40 Node clones per
+    // bucket × 150 bytes ≈ a few KB of stack/alloc churn — well
+    // within mimalloc's fast path.
+    let edges = snapshot.edges_in.get(&pi_idx);
+    let mut active_srcs: Vec<(EdgeType, Node)> = Vec::new();
+    if let Some(es) = edges {
+        for e in es {
+            if let Some(src) = scenario.get_node_cloned(e.from) {
+                if src.is_active() {
+                    active_srcs.push((e.edge_type, src));
+                }
+            }
+        }
+    }
+
+    let supplies = active_srcs.iter().filter_map(|(et, src)| {
+        if *et != EdgeType::Replenishes {
+            return None;
+        }
+        if src.node_type == NodeType::OnHandSupply || !src.node_type.is_supply() {
+            return None;
+        }
+        let t = src.time_ref?;
+        Some(SupplyContrib {
+            quantity: &src.quantity,
+            time_ref: t,
+        })
+    });
+
+    let demands = active_srcs.iter().filter_map(|(et, src)| {
+        if *et != EdgeType::Consumes {
+            return None;
+        }
+        if !src.node_type.is_demand() {
+            return None;
+        }
+        Some(DemandContrib {
+            quantity: &src.quantity,
+            time_span_start: src.time_span_start,
+            time_span_end: src.time_span_end,
+            time_ref: src.time_ref,
+        })
+    });
+
+    Some(compute_pi_bucket(
+        opening_stock,
+        supplies,
+        demands,
+        bucket_start,
+        bucket_end,
+    ))
+}
+
 /// Convenience for the "full propagation" bench: mark every active PI
 /// dirty, then propagate.
 ///

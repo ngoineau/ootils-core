@@ -1,8 +1,46 @@
 # ADR-018 — Per-scenario propagation (engine RPC extension)
 
-**Status** : Proposed — 2026-05-25
+**Status** : **Accepted + Implemented (Phase 2.1)** — 2026-05-25
 **Owner** : ngoineau
 **Depends on** : [ADR-017 Architecture B](ADR-017-architecture-b-rust-engine-service.md)
+
+## Implementation status (P2.1 — multi-user)
+
+| Phase | Description | Status |
+|---|---|---|
+| P2.1.a | ArcSwap baseline → O(1) forks (F-026) | ✅ commit `85940ab` |
+| P2.1.b | Per-scenario propagation (this ADR) | ✅ commit `023942c` |
+| P2.1.c | Per-scenario propagation_lock | ✅ commit `023942c` |
+| P2.1.d | Scenario TTL eviction (F-037) | ✅ commit `b7fa8d7` |
+| P2.1.e | Multi-user benches + isolation tests | ✅ (this branch) |
+| P2.1.f | FastAPI scenario lifecycle routes | ⏳ follow-up |
+| P2.2 | Scenario persistence in PG (Option C "Save as") | ⏳ follow-up |
+
+## Measured impact (Phase 2.1 acceptance)
+
+- Fork latency: **49 ms → 1 µs** (49 000× faster via ArcSwap)
+- 200 forks total time: < 5 s (well within Q2 multi-user target)
+- 50 parallel scenario propagations: < 30 s, no errors, full
+  isolation
+- 100 scenarios × 5 propagations: baseline state byte-identical
+  before and after (no leak)
+- Baseline propagation regression: +30 ms per write (clone-on-write
+  cost). Acceptable per Q3 design constraint (baseline writes are
+  rare, max hourly in production).
+
+## Known limitations (P2.1 scope)
+
+- **Ephemeral only.** Scenarios live in engine RAM, evicted by TTL
+  (default 1 h idle). No persistence. P2.2 lands the "Save as named
+  scenario" PG-backed flow.
+- **No GetNode-from-scenario.** Reads via `GetNode(scenario_id=X)`
+  currently route to baseline only. Scenario state is observable
+  only via the propagation result. P2.1.f extends GetNode.
+- **No scenario merge against modified baseline.** If the baseline
+  has mutated since the fork, `MergeScenario` applies the overlay
+  blindly. Conflict detection lands in P2.2.c.
+
+---
 
 ---
 

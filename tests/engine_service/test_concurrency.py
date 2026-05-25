@@ -177,4 +177,9 @@ def test_burst_propagations_no_failures(engine_session, pick_pi_node):
     assert len(latencies) == 500
 
     p95 = sorted(latencies)[int(0.95 * len(latencies))]
-    assert p95 < 50.0, f"p95 too high: {p95:.2f} ms"
+    # P2.1.a: ArcSwap baseline → ~25-30ms clone-on-write per propag.
+    # Once P2.1.b lands per-scenario propagation, user-facing
+    # propagations bypass this cost (overlay write only). Baseline
+    # propagation as exercised by this test is rare in production
+    # (Q3: max hourly).
+    assert p95 < 80.0, f"p95 too high: {p95:.2f} ms"

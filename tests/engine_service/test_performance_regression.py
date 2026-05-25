@@ -25,8 +25,18 @@ pytestmark = pytest.mark.slow
 
 
 def test_single_propagate_p50_under_5ms(engine_session, pick_pi_node):
-    """Phase 6 measured 0.35 ms end-to-end on profile L.
-    Allow 5 ms p50 — well under but with noise headroom for CI."""
+    """Phase 6 measured 0.35 ms end-to-end on profile L (mutate-in-
+    place baseline).
+
+    P2.1.a (F-026): switched to ArcSwap baseline → clone-on-write per
+    baseline propagation costs ~20-30 ms. Trade-off acceptable per
+    Q3 design decision (baseline writes are rare, max hourly in
+    production). Forks now cost 1 µs instead of 49 ms (49000× win).
+
+    User-visible propagations move to per-scenario in P2.1.b (ADR-018)
+    where the sub-5 ms contract is restored. This test now validates
+    the baseline propagation cost stays bounded — not the original
+    sub-5 ms gate, which only applied to in-place mutation."""
     _, client = engine_session
     trigger, _, _ = pick_pi_node()
 
@@ -44,8 +54,9 @@ def test_single_propagate_p50_under_5ms(engine_session, pick_pi_node):
     latencies.sort()
     p50 = latencies[len(latencies) // 2]
     p95 = latencies[int(0.95 * len(latencies))]
-    assert p50 < 5.0, f"single-propagate p50 regressed: {p50:.2f} ms"
-    assert p95 < 20.0, f"single-propagate p95 regressed: {p95:.2f} ms"
+    # P2.1.a updated thresholds for clone-on-write baseline.
+    assert p50 < 60.0, f"baseline-propagate p50 regressed beyond ArcSwap CoW: {p50:.2f} ms"
+    assert p95 < 100.0, f"baseline-propagate p95 regressed beyond ArcSwap CoW: {p95:.2f} ms"
 
 
 # --------------------------------------------------------------------- #

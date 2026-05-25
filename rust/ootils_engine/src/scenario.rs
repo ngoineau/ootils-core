@@ -26,7 +26,6 @@
 use crate::state::{Graph, Node, NodeIndex};
 use ahash::RandomState;
 use dashmap::DashMap;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use uuid::Uuid;
@@ -42,19 +41,42 @@ pub struct Scenario {
     pub overlay: DashMap<NodeIndex, Node, RandomState>,
     pub created_at_instant: Instant,
     pub created_at_system: SystemTime,
+    /// P2.1.c: per-scenario propagation serializer. Two propagations
+    /// on the SAME scenario are sequenced (prevents lost-update on
+    /// overlay); propagations on DIFFERENT scenarios run in parallel
+    /// (Alice and Bob don't block each other).
+    pub propagation_lock: parking_lot::Mutex<()>,
+    /// P2.1.d: last time this scenario was accessed (read OR mutated).
+    /// Used by the TTL eviction background task. Updated to "now"
+    /// on every Propagate / GetNode / merge etc.
+    pub last_accessed_at: parking_lot::Mutex<Instant>,
 }
 
 impl Scenario {
     pub fn new(name: String, parent_id: Option<Uuid>, baseline: Arc<Graph>) -> Self {
+        let now_instant = Instant::now();
         Self {
             id: Uuid::new_v4(),
             name,
             parent_id,
             baseline_snapshot: baseline,
             overlay: DashMap::with_hasher(RandomState::new()),
-            created_at_instant: Instant::now(),
+            created_at_instant: now_instant,
             created_at_system: SystemTime::now(),
+            propagation_lock: parking_lot::Mutex::new(()),
+            last_accessed_at: parking_lot::Mutex::new(now_instant),
         }
+    }
+
+    /// Touch the access timestamp — call on any read or mutation so
+    /// the TTL eviction doesn't drop an actively-used scenario.
+    pub fn touch_accessed(&self) {
+        *self.last_accessed_at.lock() = Instant::now();
+    }
+
+    /// Seconds since last access — used by the TTL eviction task.
+    pub fn idle_seconds(&self) -> u64 {
+        self.last_accessed_at.lock().elapsed().as_secs()
     }
 
     /// Look up a node, preferring the overlay. Returns an owned `Node`
@@ -111,22 +133,26 @@ impl ScenarioManager {
     }
 
     /// Fork the current baseline into a new scenario.
-    /// The clone of the Graph is the dominant cost (~100-200 ms on L).
-    /// Cheaper paths are possible with persistent data structures; see
-    /// the module-level doc and ADR-017 phase-5 notes.
+    ///
+    /// Phase 2.1.a (F-026 audit closure): switched from
+    /// `Arc<RwLock<Graph>>` deep-clone (~50ms, 76 MB per fork) to
+    /// `ArcSwap<Graph>::load_full()` (refcount bump only, sub-µs).
+    /// The scenario's `baseline_snapshot` is a refcounted Arc to the
+    /// CURRENT baseline; when the baseline gets updated via ArcSwap,
+    /// existing scenarios keep their historic snapshot consistent.
+    /// New forks pick up the new baseline. That's by design — what-if
+    /// must stay coherent with the state it was created from.
     pub fn fork_from_baseline(
         &self,
         name: String,
-        baseline_lock: &RwLock<Graph>,
+        baseline: &arc_swap::ArcSwap<Graph>,
     ) -> (Arc<Scenario>, ForkStats) {
         let t0 = Instant::now();
-        // Clone the baseline Graph under the read lock — this is the
-        // expensive bit. We MUST release the lock before allocating
-        // anything else lest we serialize all forks behind it.
-        let snapshot: Arc<Graph> = {
-            let g = baseline_lock.read();
-            Arc::new((*g).clone())
-        };
+        // O(1) refcount bump — no deep clone. The Graph data is shared
+        // with the live baseline until the baseline is mutated, at
+        // which point ArcSwap publishes a new Arc and this Scenario
+        // continues to hold the old one (still alive via refcount).
+        let snapshot: Arc<Graph> = baseline.load_full();
         let clone_ms = t0.elapsed().as_millis() as u64;
 
         let scenario = Arc::new(Scenario::new(name, None, snapshot));
@@ -157,6 +183,31 @@ impl ScenarioManager {
 
     pub fn len(&self) -> usize {
         self.scenarios.len()
+    }
+
+    /// P2.1.d: scan + evict scenarios idle for longer than
+    /// `ttl_seconds`. Returns the list of evicted scenario UUIDs so
+    /// the caller can update metrics + log.
+    pub fn evict_idle(&self, ttl_seconds: u64) -> Vec<Uuid> {
+        let mut evicted = Vec::new();
+        // Collect to-evict IDs first (can't mutate DashMap during iter).
+        let to_evict: Vec<Uuid> = self
+            .scenarios
+            .iter()
+            .filter_map(|e| {
+                if e.value().idle_seconds() >= ttl_seconds {
+                    Some(*e.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in to_evict {
+            if self.scenarios.remove(&id).is_some() {
+                evicted.push(id);
+            }
+        }
+        evicted
     }
 }
 

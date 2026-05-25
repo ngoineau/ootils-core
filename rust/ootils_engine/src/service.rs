@@ -10,7 +10,7 @@
 //! still return `Unimplemented` and reference the phase that will fill
 //! them in.
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use prost_types::Timestamp;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -32,12 +32,23 @@ use crate::write_behind::{PendingDelta, WriteBehindQueue};
 pub struct EngineSvc {
     boot_time: Instant,
     boot_timestamp: Timestamp,
-    /// Baseline state. F-009 (Cluster F audit response): the
-    /// propagation pipeline takes a READ lock during its parallel
-    /// compute phase + a brief WRITE lock to apply. Other handlers
-    /// (Health/GetNode/ListScenarios) can take read locks concurrently
-    /// with the compute phase.
-    baseline: Arc<RwLock<Graph>>,
+    /// Baseline state.
+    ///
+    /// Phase 2.1.a (F-026 closure): `ArcSwap<Graph>` replaces the
+    /// previous `RwLock<Graph>`. Reads take zero-cost `load_full()`
+    /// snapshots; writes clone the Graph, mutate, then atomic-swap.
+    /// Trade-off: baseline propagations are now ~clone-time slower
+    /// (~50-100 ms vs ~ms in-place) BUT scenario forks become O(1)
+    /// instead of O(N) — the multi-user what-if pattern that Phase 2
+    /// targets has scenario propagations as the hot path, baseline
+    /// updates are rare (Q3 design decision: max hourly).
+    ///
+    /// F-009 still holds: plan_compute reads via load() (no lock),
+    /// apply mutates a CLONE of the current Arc<Graph> + swaps.
+    /// The `propagation_lock` serializes baseline mutations among
+    /// themselves so two concurrent baseline propagations can't both
+    /// clone-mutate-swap and clobber.
+    baseline: Arc<ArcSwap<Graph>>,
     /// COW scenarios on top of the baseline (phase 4).
     scenarios: Arc<ScenarioManager>,
     /// WAL + write-behind queue (phase 5). After propagation we append
@@ -59,7 +70,8 @@ pub struct EngineSvc {
 impl EngineSvc {
     pub fn new(
         boot_time: Instant,
-        baseline: Arc<RwLock<Graph>>,
+        baseline: Arc<ArcSwap<Graph>>,
+        scenarios: Arc<ScenarioManager>,
         writeback: Arc<WriteBehindQueue>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -68,7 +80,7 @@ impl EngineSvc {
             boot_time,
             boot_timestamp: Timestamp::from(now),
             baseline,
-            scenarios: Arc::new(ScenarioManager::new()),
+            scenarios,
             writeback,
             metrics,
             propagation_lock: Arc::new(parking_lot::Mutex::new(())),
@@ -92,7 +104,7 @@ impl Engine for EngineSvc {
         // overflow (uptime > 292 billion years).
         let uptime = i64::try_from(self.boot_time.elapsed().as_secs())
             .unwrap_or(i64::MAX);
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         // F-040 fix: user-facing detail — no internal "phase N"
         // nomenclature (ADR-017 implementation jargon).
         let detail = format!(
@@ -114,7 +126,7 @@ impl Engine for EngineSvc {
         // Prometheus exposition; this RPC is the typed counterpart for
         // programmatic callers.
         use std::sync::atomic::Ordering;
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         let baseline_bytes = g.memory_bytes() as i64;
         drop(g);
         let scenarios_bytes: i64 = self
@@ -164,7 +176,7 @@ impl Engine for EngineSvc {
         // Always surface the baseline + every active fork.
         let mut out: Vec<ScenarioInfo> = Vec::new();
         {
-            let g = self.baseline.read();
+            let g = self.baseline.load_full();
             out.push(ScenarioInfo {
                 id: "00000000-0000-0000-0000-000000000001".into(),
                 name: "baseline".into(),
@@ -268,18 +280,24 @@ impl Engine for EngineSvc {
             .get(&sid)
             .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
 
-        // Apply the overlay into the baseline. Single write-lock burst.
+        // Apply the overlay into the baseline. With ArcSwap (P2.1.a)
+        // this is now a clone-on-write: take a snapshot, mutate the
+        // snapshot, atomic-swap. The propagation_lock serializes with
+        // concurrent baseline propagations so we don't lose a write.
         let n_merged: i64 = {
-            let mut g = self.baseline.write();
+            let _guard = self.propagation_lock.lock();
+            let current = self.baseline.load_full();
+            let mut new_graph: Graph = (*current).clone();
             let mut n = 0i64;
             for entry in scenario.overlay.iter() {
                 let idx = *entry.key();
-                if let Some(slot) = g.nodes.get_mut(idx as usize) {
+                if let Some(slot) = new_graph.nodes.get_mut(idx as usize) {
                     *slot = entry.value().clone();
                     n += 1;
                 }
             }
-            g.generation = g.generation.wrapping_add(1);
+            new_graph.generation = new_graph.generation.wrapping_add(1);
+            self.baseline.store(Arc::new(new_graph));
             n
         };
 
@@ -291,7 +309,7 @@ impl Engine for EngineSvc {
             .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
 
         let new_gen = {
-            let g = self.baseline.read();
+            let g = self.baseline.load_full();
             g.generation.to_string()
         };
 
@@ -316,7 +334,7 @@ impl Engine for EngineSvc {
         let node_id = Uuid::from_str(&q.node_id)
             .map_err(|e| Status::invalid_argument(format!("bad node_id: {e}")))?;
 
-        let g = self.baseline.read();
+        let g = self.baseline.load_full();
         let node = g
             .get_node(&node_id)
             .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?;
@@ -345,21 +363,25 @@ impl Engine for EngineSvc {
         let q = req.into_inner();
         debug!(event_id = %q.event_id, event_type = %q.event_type, "Propagate");
 
-        // F-006: until per-scenario propagation lands (ADR-018), refuse
-        // any non-baseline scenario_id. Empty string = caller asked for
-        // baseline implicitly, also accepted. Anything else → loud error
-        // instead of silent baseline corruption.
-        if !q.scenario_id.is_empty() {
+        // P2.1.b (ADR-018 closure): determine target scenario.
+        // - Empty string OR baseline UUID → baseline propagation
+        //   (clone-on-write via ArcSwap, writes to WAL + PG).
+        // - Any other UUID → per-scenario propagation (overlay
+        //   write only, ephemeral, no WAL/PG).
+        let target_scenario: Option<Arc<crate::scenario::Scenario>> = if q.scenario_id.is_empty() {
+            None
+        } else {
             let req_scenario = Uuid::from_str(&q.scenario_id)
                 .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
-            if req_scenario != crate::loader::BASELINE_SCENARIO_ID {
-                return Err(Status::unimplemented(format!(
-                    "per-scenario propagation pending — ADR-018; only baseline ({}) is currently supported, got {}",
-                    crate::loader::BASELINE_SCENARIO_ID,
-                    req_scenario
-                )));
+            if req_scenario == crate::loader::BASELINE_SCENARIO_ID {
+                None
+            } else {
+                let s = self.scenarios.get(&req_scenario).ok_or_else(|| {
+                    Status::not_found(format!("scenario {req_scenario} not found"))
+                })?;
+                Some(s)
             }
-        }
+        };
 
         // F-015: event_id must parse cleanly. Empty = caller asked us to
         // generate a calc_run_id; bad UUID = strict error (no silent
@@ -378,12 +400,18 @@ impl Engine for EngineSvc {
         let trigger_id = Uuid::from_str(&q.trigger_node_id)
             .map_err(|e| Status::invalid_argument(format!("bad trigger_node_id: {e}")))?;
 
+        // Compute the dirty set: look up trigger_node_id, then
+        // enumerate PIs in the same (item, location) couple. For
+        // scenarios we read via the snapshot (item/location/series_id
+        // are immutable in practice). The `active` and `node_type`
+        // fields come from snapshot as well — those don't change in
+        // overlay either.
         let mut dirty = HashSet::new();
         {
-            let g = self.baseline.read();
-            // Look up the trigger node, then enumerate PIs in the same
-            // (item, location) couple — same dirty-cascade contract as
-            // the Python/SQL/Rust-A engines.
+            let g = match &target_scenario {
+                Some(s) => s.baseline_snapshot.clone(),
+                None => self.baseline.load_full(),
+            };
             if let Some(node) = g.get_node(&trigger_id) {
                 if let (Some(item), Some(loc)) = (node.item_id, node.location_id) {
                     if let Some(pis) = g.by_item_location.get(&(item, loc)) {
@@ -425,79 +453,87 @@ impl Engine for EngineSvc {
 
         let t_total = Instant::now();
 
-        // F-008 + F-009 (Cluster E + F audit response): the heavy
-        // stuff — rayon compute + WAL fsync + queue push — runs in
-        // spawn_blocking so tokio workers stay free for other RPCs.
-        // Inside, the propagation pipeline is split:
-        //   1. propagation_lock serializes propagations (one at a
-        //      time end-to-end).
-        //   2. plan_compute runs under a READ lock → other handlers
-        //      (Health/GetNode/ListScenarios) take their own read
-        //      locks concurrently and aren't blocked by the ~ms
-        //      compute phase.
-        //   3. apply runs under a brief WRITE lock (sub-ms).
-        let baseline = self.baseline.clone();
-        let writeback = self.writeback.clone();
+        // Dispatch on baseline vs scenario propagation.
+        // - Baseline: F-008/F-009 spawn_blocking + ArcSwap CoW + WAL/PG.
+        // - Scenario (P2.1.b ADR-018): spawn_blocking for rayon compute,
+        //   overlay write only — no WAL/PG. Per-scenario propagation
+        //   lock so parallel propags on DIFFERENT scenarios don't
+        //   serialize against each other.
         let metrics = self.metrics.clone();
-        let prop_lock = self.propagation_lock.clone();
-        let blocking_outcome = tokio::task::spawn_blocking(
-            move || -> Result<(propagator::PropagationStats, f64), Status> {
-                // Serialize propagations with each other (F-009: keeps
-                // the read+write split correct under multi-tenant
-                // load — without this, two propagations could read
-                // the same state, compute conflicting deltas, then
-                // both apply and clobber each other).
-                let _propagation_guard = prop_lock.lock();
+        let blocking_outcome = if let Some(scenario) = target_scenario.clone() {
+            // ---- Scenario propagation path ----
+            tokio::task::spawn_blocking(
+                move || -> Result<(propagator::PropagationStats, f64), Status> {
+                    // P2.1.c: per-scenario lock. Two propagations on
+                    // the same scenario serialize; propagations on
+                    // different scenarios run in parallel.
+                    let _scenario_guard = scenario.propagation_lock.lock();
+                    scenario.touch_accessed();
 
-                // Phase 1: compute under READ lock — concurrent reads OK.
-                let computed = {
-                    let g = baseline.read();
-                    propagator::plan_compute(&g, &dirty)
-                };
+                    let computed = propagator::plan_compute_scenario(&scenario, &dirty);
+                    let stats = propagator::apply_scenario(&scenario, computed, &dirty);
 
-                // Phase 2: apply under brief WRITE lock.
-                let stats = {
-                    let mut g = baseline.write();
-                    propagator::apply(&mut g, computed, &dirty)
-                };
+                    // Scenarios don't write to WAL or PG in P2.1.b
+                    // (they're ephemeral; P2.2 will persist them).
+                    Ok((stats, 0.0))
+                },
+            )
+            .await
+        } else {
+            // ---- Baseline propagation path ----
+            let baseline = self.baseline.clone();
+            let writeback = self.writeback.clone();
+            let metrics_inner = self.metrics.clone();
+            let prop_lock = self.propagation_lock.clone();
+            tokio::task::spawn_blocking(
+                move || -> Result<(propagator::PropagationStats, f64), Status> {
+                    let _propagation_guard = prop_lock.lock();
 
-                let mut wal_fsync_us = 0.0;
-                if !stats.deltas.is_empty() {
-                    let t_wal = Instant::now();
-                    let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
-                    let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
-                    let assigned_seq = match writeback.wal().append(&record) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            metrics.record_failure();
-                            // F-005: WAL size cap → RESOURCE_EXHAUSTED.
-                            if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
-                                return Err(Status::resource_exhausted(full.to_string()));
+                    let snapshot = baseline.load_full();
+                    let computed = propagator::plan_compute(&snapshot, &dirty);
+
+                    let mut new_graph: Graph = (*snapshot).clone();
+                    drop(snapshot);
+                    let stats = propagator::apply(&mut new_graph, computed, &dirty);
+                    baseline.store(Arc::new(new_graph));
+
+                    let mut wal_fsync_us = 0.0;
+                    if !stats.deltas.is_empty() {
+                        let t_wal = Instant::now();
+                        let scenario_uuid = crate::loader::BASELINE_SCENARIO_ID;
+                        let record = make_record(cr_uuid, scenario_uuid, stats.deltas.clone());
+                        let assigned_seq = match writeback.wal().append(&record) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                metrics_inner.record_failure();
+                                if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+                                    return Err(Status::resource_exhausted(full.to_string()));
+                                }
+                                return Err(Status::internal(format!("WAL append failed: {e}")));
                             }
-                            return Err(Status::internal(format!("WAL append failed: {e}")));
+                        };
+                        wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+                        metrics_inner
+                            .wal_appends_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        let pending: Vec<PendingDelta> = stats
+                            .deltas
+                            .iter()
+                            .cloned()
+                            .map(|d| PendingDelta::from_delta(assigned_seq, d))
+                            .collect();
+                        if let Err(full) = writeback.try_push(pending) {
+                            metrics_inner.record_failure();
+                            return Err(Status::resource_exhausted(full.to_string()));
                         }
-                    };
-                    wal_fsync_us = t_wal.elapsed().as_micros() as f64;
-                    metrics
-                        .wal_appends_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    let pending: Vec<PendingDelta> = stats
-                        .deltas
-                        .iter()
-                        .cloned()
-                        .map(|d| PendingDelta::from_delta(assigned_seq, d))
-                        .collect();
-                    if let Err(full) = writeback.try_push(pending) {
-                        metrics.record_failure();
-                        return Err(Status::resource_exhausted(full.to_string()));
                     }
-                }
 
-                Ok((stats, wal_fsync_us))
-            },
-        )
-        .await;
+                    Ok((stats, wal_fsync_us))
+                },
+            )
+            .await
+        };
 
         // Translate spawn_blocking JoinError → INTERNAL (the closure
         // would panic for a hard bug). The closure's own Status
