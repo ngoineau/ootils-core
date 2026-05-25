@@ -54,6 +54,7 @@ markers = [
     "smoke: marks tests as smoke tests",
     "critical: marks tests as critical path",
     "requires_db: marks tests that require a live DB connection",
+    "live_db: tests that need a real Postgres + ootils-engine binary (engine_service battery)",
 ]
 
 [tool.coverage.run]
