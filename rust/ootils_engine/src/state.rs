@@ -176,8 +176,14 @@ pub struct EdgeRef {
 }
 
 /// The complete in-RAM graph state for ONE scenario (baseline initially;
-/// phase 4 adds COW forks). Owned via `Arc<ArcSwap<Graph>>` so reads are
-/// lock-free and writes swap atomically.
+/// phase 4 adds COW forks via `scenario::Scenario`). Holding it behind
+/// `Arc<RwLock<Graph>>` (engine) or `Arc<Graph>` (scenario snapshot)
+/// is the caller's choice.
+///
+/// `Clone` is implemented (auto-derived) to support taking a deep
+/// snapshot at scenario fork time. The clone is ~76 MB on profile L
+/// and ~100-200 ms — paid at fork time, not on the hot path.
+#[derive(Clone)]
 pub struct Graph {
     /// Arena of nodes — `NodeIndex` indexes directly into this Vec.
     pub nodes: Vec<Node>,

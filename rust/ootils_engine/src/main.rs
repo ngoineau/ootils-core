@@ -20,6 +20,7 @@ use tracing::{info, warn};
 mod kernel;
 mod loader;
 mod propagator;
+mod scenario;
 mod service;
 mod state;
 
@@ -43,6 +44,11 @@ struct Cli {
     /// Used by the phase-3 perf gate.
     #[arg(long, default_value = "false")]
     bench: bool,
+
+    /// Run a fork-stress bench: fork N scenarios from baseline, then
+    /// drop them. Used by the phase-4 perf gate (Fork < 50ms target).
+    #[arg(long)]
+    bench_fork: Option<usize>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -72,6 +78,11 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.bench {
         run_bench(&graph_lock);
+        return Ok(());
+    }
+
+    if let Some(n) = cli.bench_fork {
+        run_bench_fork(&graph_lock, n);
         return Ok(());
     }
 
@@ -113,6 +124,42 @@ fn run_bench(graph_lock: &Arc<RwLock<state::Graph>>) {
         compute_ms = stats.compute_us / 1000,
         total_ms,
         "BENCH RESULT — full propagation (phase 3 gate)"
+    );
+}
+
+/// Phase-4 gate: fork N scenarios in sequence, log per-fork timing.
+/// Validates that Fork target (< 50ms) holds — or honestly surfaces
+/// the gap if not.
+fn run_bench_fork(graph_lock: &Arc<RwLock<state::Graph>>, n: usize) {
+    info!(n, "running fork bench (phase 4 gate)");
+    let mgr = scenario::ScenarioManager::new();
+    let mut timings_ms: Vec<u64> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (_s, st) = mgr.fork_from_baseline(format!("bench-fork-{}", i), graph_lock);
+        timings_ms.push(st.total_ms);
+        info!(
+            iter = i,
+            clone_ms = st.clone_ms,
+            total_ms = st.total_ms,
+            active_scenarios = mgr.len(),
+            "fork done"
+        );
+    }
+    let total: u64 = timings_ms.iter().sum();
+    let avg = total as f64 / n as f64;
+    let mut sorted = timings_ms.clone();
+    sorted.sort_unstable();
+    let p50 = sorted[sorted.len() / 2];
+    let p95 = sorted[((sorted.len() as f64) * 0.95) as usize];
+    let max = *sorted.last().unwrap();
+    info!(
+        n,
+        total_ms = total,
+        avg_ms = avg,
+        p50_ms = p50,
+        p95_ms = p95,
+        max_ms = max,
+        "BENCH RESULT — fork bench (phase 4 gate)"
     );
 }
 
