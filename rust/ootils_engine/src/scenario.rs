@@ -184,6 +184,31 @@ impl ScenarioManager {
     pub fn len(&self) -> usize {
         self.scenarios.len()
     }
+
+    /// P2.1.d: scan + evict scenarios idle for longer than
+    /// `ttl_seconds`. Returns the list of evicted scenario UUIDs so
+    /// the caller can update metrics + log.
+    pub fn evict_idle(&self, ttl_seconds: u64) -> Vec<Uuid> {
+        let mut evicted = Vec::new();
+        // Collect to-evict IDs first (can't mutate DashMap during iter).
+        let to_evict: Vec<Uuid> = self
+            .scenarios
+            .iter()
+            .filter_map(|e| {
+                if e.value().idle_seconds() >= ttl_seconds {
+                    Some(*e.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in to_evict {
+            if self.scenarios.remove(&id).is_some() {
+                evicted.push(id);
+            }
+        }
+        evicted
+    }
 }
 
 impl Default for ScenarioManager {

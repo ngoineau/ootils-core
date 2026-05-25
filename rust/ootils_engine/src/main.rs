@@ -113,6 +113,15 @@ struct Cli {
     /// wired; this flag activates it.
     #[arg(long, env = "OOTILS_LOG_FORMAT", default_value = "text")]
     log_format: String,
+
+    /// P2.1.d: scenarios idle longer than this are evicted by the
+    /// background scanner (frees their overlay RAM). Default 1 hour;
+    /// set to 0 to disable eviction (e.g. for tests or short-lived
+    /// processes). With Q3 design (200 active users), this caps the
+    /// engine's accumulated overlay memory regardless of how many
+    /// abandoned what-if scenarios pile up.
+    #[arg(long, env = "OOTILS_SCENARIO_TTL_SEC", default_value_t = 3600)]
+    scenario_ttl_sec: u64,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -301,7 +310,49 @@ async fn main() -> anyhow::Result<()> {
         info!("recovered deltas re-enqueued for Postgres flush");
     }
 
-    let engine = service::EngineSvc::new(boot_time, graph_lock, queue, metrics_registry);
+    // P2.1.d: ScenarioManager is constructed here (instead of inside
+    // EngineSvc::new) so we can hand an Arc to the eviction task too.
+    let scenarios = Arc::new(scenario::ScenarioManager::new());
+
+    // Spawn the TTL eviction background task if ttl > 0.
+    let eviction_handle: Option<tokio::task::JoinHandle<()>> = if cli.scenario_ttl_sec > 0 {
+        let scenarios_for_evict = scenarios.clone();
+        let metrics_for_evict = metrics_registry.clone();
+        let ttl = cli.scenario_ttl_sec;
+        // Scan every (ttl/4) seconds so we catch evictions ~ttl after
+        // last access on average. Floor at 30 s for very short TTLs.
+        let scan_interval_sec = (ttl / 4).max(30);
+        info!(
+            scenario_ttl_sec = ttl,
+            scan_interval_sec,
+            "scenario TTL eviction task spawned (P2.1.d)"
+        );
+        Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(scan_interval_sec));
+            // Skip first immediate fire — give the engine a moment to settle.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let evicted = scenarios_for_evict.evict_idle(ttl);
+                if !evicted.is_empty() {
+                    info!(
+                        n_evicted = evicted.len(),
+                        active_remaining = scenarios_for_evict.len(),
+                        "TTL eviction freed idle scenarios"
+                    );
+                    metrics_for_evict.active_scenarios.store(
+                        scenarios_for_evict.len() as i64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            }
+        }))
+    } else {
+        info!("scenario TTL eviction disabled (OOTILS_SCENARIO_TTL_SEC=0)");
+        None
+    };
+
+    let engine = service::EngineSvc::new(boot_time, graph_lock, scenarios, queue, metrics_registry);
 
     info!(
         addr = %cli.listen,
@@ -336,6 +387,11 @@ async fn main() -> anyhow::Result<()> {
         Ok(()) => info!("flusher exited cleanly"),
         Err(e) if e.is_cancelled() => info!("flusher cancelled (expected)"),
         Err(e) => warn!(error = %e, "flusher join error"),
+    }
+    // P2.1.d: tear down the eviction task too.
+    if let Some(h) = eviction_handle {
+        h.abort();
+        let _ = h.await;
     }
     info!("ootils-engine shut down cleanly");
     Ok(())

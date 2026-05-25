@@ -71,6 +71,7 @@ impl EngineSvc {
     pub fn new(
         boot_time: Instant,
         baseline: Arc<ArcSwap<Graph>>,
+        scenarios: Arc<ScenarioManager>,
         writeback: Arc<WriteBehindQueue>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -79,7 +80,7 @@ impl EngineSvc {
             boot_time,
             boot_timestamp: Timestamp::from(now),
             baseline,
-            scenarios: Arc::new(ScenarioManager::new()),
+            scenarios,
             writeback,
             metrics,
             propagation_lock: Arc::new(parking_lot::Mutex::new(())),
