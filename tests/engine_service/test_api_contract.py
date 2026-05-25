@@ -80,7 +80,8 @@ def test_propagate_rejects_malformed_event_id(engine_session, grpc_module, pick_
 def test_propagate_empty_event_id_generates_calc_run_id(engine_session, pick_pi_node):
     """F-015: an empty event_id is the documented 'engine, generate one
     for me' shortcut. The response's calc_run_id must be populated with
-    the generated value, not echo back the empty string."""
+    the generated value — including on no-op propagations
+    (reviewer B2: audit chain must hold even when nothing was dirty)."""
     from ootils_core._grpc import engine_pb2
 
     _, client = engine_session
@@ -93,18 +94,17 @@ def test_propagate_empty_event_id_generates_calc_run_id(engine_session, pick_pi_
         payload=b"",
     )
     resp = client._stub.Propagate(req, timeout=5.0)
-    # If the propagation actually did work (deltas non-empty), the
-    # engine must surface a real UUID it generated. If deltas were
-    # empty, calc_run_id is left empty by design (no calc_run to attribute).
-    if resp.nodes_processed > 0:
-        assert resp.calc_run_id, "engine generated no calc_run_id for a non-empty propagation"
-        # Parse-able UUID.
-        UUID(resp.calc_run_id)
+    # B2 contract: calc_run_id ALWAYS populated when the engine
+    # generated one, regardless of nodes_processed.
+    assert resp.calc_run_id, "engine generated no calc_run_id"
+    UUID(resp.calc_run_id)  # parse-able
 
 
 def test_propagate_event_id_round_trips_when_valid(engine_session, pick_pi_node):
-    """F-015 sanity: when a valid event_id is supplied, the engine
-    returns the SAME UUID as calc_run_id (not a fresh random one)."""
+    """F-015 + reviewer B2: a valid event_id is echoed verbatim as
+    calc_run_id regardless of whether the propagation produced
+    deltas. The audit chain (event → calc_run) must hold for no-op
+    events too."""
     _, client = engine_session
     trigger, _, _ = pick_pi_node()
     event_id = uuid4()
@@ -114,10 +114,9 @@ def test_propagate_event_id_round_trips_when_valid(engine_session, pick_pi_node)
         event_type="supply_qty_changed",
         trigger_node_id=trigger,
     )
-    if res.nodes_processed > 0:
-        assert UUID(res.calc_run_id) == event_id, (
-            f"calc_run_id changed: expected {event_id}, got {res.calc_run_id}"
-        )
+    assert UUID(res.calc_run_id) == event_id, (
+        f"calc_run_id changed: expected {event_id}, got {res.calc_run_id}"
+    )
 
 
 def test_propagate_large_payload_accepted(engine_session, pick_pi_node):

@@ -407,8 +407,9 @@ impl WalWriter {
 
     /// One-pass scan of the file to find the highest seq currently
     /// stored. Used on open() to set next_seq correctly. Returns
-    /// `None` on an empty WAL (no records, header-only) so the caller
-    /// can leave next_seq at 0; first append then takes seq 0.
+    /// `None` on an empty WAL (no records, header-only) so the
+    /// caller maps None → next_seq = 1 (sequences are 1-indexed,
+    /// applied_pg_seq = 0 unambiguously means "nothing applied").
     fn scan_highest_seq(&self) -> anyhow::Result<Option<u64>> {
         let mut f = self.file.lock();
         f.seek(SeekFrom::Start(HEADER_LEN))?;
@@ -526,21 +527,33 @@ impl WalWriter {
         let new_size = new_file.seek(SeekFrom::End(0))?;
         drop(new_file);
 
-        // Atomic rename. On Windows this uses MoveFileEx with
-        // MOVEFILE_REPLACE_EXISTING and is atomic at the FS level.
-        // On POSIX `rename` over an open file is also fine — the open
-        // handle on `live` keeps the inode alive but new opens see the
-        // new file. We then drop `live` and reopen.
-        drop(live); // Release before rename so Windows can replace the file.
+        // Reviewer B1 fix: hold the file lock through rename + reopen
+        // so a concurrent append() cannot grab the old File handle
+        // during the swap window and land bytes on the soon-to-be-
+        // orphaned inode.
+        //
+        // Why this is safe on both platforms:
+        //   POSIX  : rename-over-open-file is allowed; the open handle
+        //            on `live` keeps the old inode alive but any new
+        //            opens of <path> see the new file. We then drop
+        //            the old handle (it's about to be discarded
+        //            anyway) and reopen to pick up the new inode.
+        //   Windows: std::fs::rename uses MoveFileExW with
+        //            MOVEFILE_REPLACE_EXISTING. The target file may be
+        //            open if it was opened with FILE_SHARE_DELETE,
+        //            which Rust's std::fs::OpenOptions sets by default.
+        //            Same drop-and-reopen pattern then applies.
         std::fs::rename(&self.new_path, &self.path)?;
 
-        // Reopen the rotated file as the new live handle.
+        // Reopen the rotated file and swap it into the MutexGuard's
+        // slot WITHOUT releasing the lock. Any append() that was
+        // waiting on the lock now sees the new file handle.
         let mut reopened = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&self.path)?;
         reopened.seek(SeekFrom::End(0))?;
-        *self.file.lock() = reopened;
+        *live = reopened;
         self.current_size.store(new_size, Ordering::Relaxed);
 
         let reclaimed = pre_size.saturating_sub(new_size);

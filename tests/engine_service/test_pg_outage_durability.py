@@ -57,7 +57,18 @@ def _bad_dsn() -> str:
 
 
 def test_propagate_survives_pg_outage_then_recovers(engine_binary, dsn, tmp_path):
-    """Full A9 contract test: outage + clean recovery on the same WAL."""
+    """Full A9 contract test: outage + clean recovery on the same WAL.
+
+    Reviewer follow-up: the previous version of this test ran
+    idempotent re-propagations against a stable trigger → produced 0
+    deltas → never actually exercised the replay path it claimed to.
+    This version injects a real state change into PG before boot so
+    the first propagation MUST emit a non-empty delta. We then assert:
+      (a) the propagation actually changed nodes (proves deltas exist)
+      (b) the WAL grew beyond the header
+      (c) after restart, RAM matches the post-propagation state
+      (d) the flusher drains to PG and last_calc_seq becomes non-NULL
+    """
     from ootils_core.engine_rust_service import EngineClient, EngineHarness
     from tests.engine_service.conftest import _free_port
     import psycopg
@@ -69,113 +80,147 @@ def test_propagate_survives_pg_outage_then_recovers(engine_binary, dsn, tmp_path
     # Pick a trigger.
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         row = conn.execute(
-            "SELECT node_id FROM nodes WHERE node_type='ProjectedInventory' "
+            "SELECT node_id, closing_stock FROM nodes "
+            "WHERE node_type='ProjectedInventory' "
             "AND scenario_id=%s AND active=TRUE LIMIT 1",
             (BASELINE,),
         ).fetchone()
     if row is None:
         pytest.skip("no PI nodes in baseline")
     trigger = UUID(str(row["node_id"]))
+    original_closing = row["closing_stock"]
 
-    # ---- Phase 1: engine boots with UNREACHABLE PG (bad DSN) ----
-    # Boot still works because we connect once at startup to verify
-    # then disconnect. The flusher will fail in the background.
-    # BUT — verify_postgres also runs and would fail. So we need a
-    # DSN that's reachable for boot but unreachable for the flusher.
-    # Easiest: start with the good DSN, get the WAL populated, stop,
-    # restart with bad DSN to confirm the flusher can't drain.
-    #
-    # Better: start with the good DSN but a long flush interval so
-    # the flusher only attempts a flush AFTER we kill it. This
-    # exercises the "WAL holds unflushed records" path.
+    # Inject a state mismatch on the trigger node so the engine's
+    # first propagation against it WILL produce a delta. We bump
+    # closing_stock by 999 — the propagator's compute_pi_bucket will
+    # recompute the correct value from inflows/outflows and emit a
+    # delta to restore it. Cleanup in finally restores the original.
+    bumped_closing = original_closing + 999
+    state_mutated = False
 
-    # Phase 1a: boot with good DSN, but long flush interval = 30s so
-    # no PG flush happens during our propagation burst.
-    h1 = EngineHarness(
-        binary_path=engine_binary,
-        dsn=dsn,
-        listen_addr=f"127.0.0.1:{port}",
-        wal_path=wal,
-        flush_interval_ms=30_000,  # 30s — way longer than the test
-    )
-    h1.start(wait_for_ready=True, ready_timeout_s=30.0)
-
-    wal_size_before = wal.stat().st_size
-    n_propagations = 20
-
+    h1 = None
+    h2 = None
     try:
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                "UPDATE nodes SET closing_stock = %s, last_calc_seq = NULL "
+                "WHERE node_id = %s",
+                (bumped_closing, str(trigger)),
+            )
+            conn.commit()
+        state_mutated = True
+
+        # ---- Phase 1: boot, propagate (real deltas), stop ----
+        # Long flush interval so the bg flusher does NOT drain the WAL
+        # mid-test. The WAL must still hold records when we stop.
+        h1 = EngineHarness(
+            binary_path=engine_binary,
+            dsn=dsn,
+            listen_addr=f"127.0.0.1:{port}",
+            wal_path=wal,
+            flush_interval_ms=30_000,
+        )
+        h1.start(wait_for_ready=True, ready_timeout_s=30.0)
+
         with EngineClient.connect(f"127.0.0.1:{port}") as c:
-            for _ in range(n_propagations):
-                res = c.propagate(
-                    scenario_id=BASELINE,
-                    event_id=uuid4(),
-                    event_type="supply_qty_changed",
-                    trigger_node_id=trigger,
-                )
-                # Every Propagate must return OK regardless of PG state.
-                assert res.calc_run_id, "propagate returned without a calc_run_id"
-            # Capture final RAM state for cross-restart comparison.
+            # Single propagation — but it MUST produce deltas because
+            # the in-RAM state (loaded from corrupted PG) disagrees
+            # with the kernel's recompute.
+            res = c.propagate(
+                scenario_id=BASELINE,
+                event_id=uuid4(),
+                event_type="supply_qty_changed",
+                trigger_node_id=trigger,
+            )
+            assert res.nodes_changed >= 1, (
+                f"test setup did not produce deltas: nodes_changed={res.nodes_changed}. "
+                "The corruption injection failed or the propagator is idempotent on it."
+            )
+            assert res.calc_run_id, "propagate returned without a calc_run_id"
             ram_state_before = c.get_node(BASELINE, trigger)
-    finally:
-        # Stop cleanly. Flusher hasn't had time to drain (30s interval).
+
         h1.stop()
+        h1 = None
 
-    wal_size_after_burst = wal.stat().st_size
-    # WAL grew if propagation produced any deltas. If the trigger
-    # produced 0 deltas (idempotent re-propagation), we can't assert
-    # this. Skip the size assertion in that case.
-    if ram_state_before.closing_stock is not None:
-        # File size is at least the header (20 bytes).
-        assert wal_size_after_burst >= 20
+        # WAL grew past the 20-byte header (proves records were
+        # appended, validating the v2 marker contract).
+        wal_size_after_burst = wal.stat().st_size
+        assert wal_size_after_burst > 20, (
+            f"WAL is empty after a propagation with deltas: {wal_size_after_burst} bytes"
+        )
 
-    # ---- Phase 2: restart with same WAL, healthy PG ----
-    # On boot, the engine should:
-    #   - Read WAL header → applied_pg_seq still at its pre-shutdown value.
-    #   - Replay returns records with seq > applied_pg_seq.
-    #   - Records are re-applied to RAM AND re-enqueued for PG flush.
-    #   - Flusher drains them to PG within ~flush_interval_ms.
-    h2 = EngineHarness(
-        binary_path=engine_binary,
-        dsn=dsn,
-        listen_addr=f"127.0.0.1:{port}",
-        wal_path=wal,
-        flush_interval_ms=100,  # quick drain
-    )
-    h2.start(wait_for_ready=True, ready_timeout_s=30.0)
+        # PG side: the bump is still there (flusher never drained).
+        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+            pg_row = conn.execute(
+                "SELECT closing_stock, last_calc_seq FROM nodes WHERE node_id = %s",
+                (str(trigger),),
+            ).fetchone()
+        assert pg_row["closing_stock"] == bumped_closing, (
+            "PG was unexpectedly updated during phase 1 — flusher drained too fast"
+        )
+        assert pg_row["last_calc_seq"] is None, (
+            "last_calc_seq was set before phase 2 — flusher drained too fast"
+        )
 
-    try:
+        # ---- Phase 2: restart with same WAL, fast flush ----
+        h2 = EngineHarness(
+            binary_path=engine_binary,
+            dsn=dsn,
+            listen_addr=f"127.0.0.1:{port}",
+            wal_path=wal,
+            flush_interval_ms=100,
+        )
+        h2.start(wait_for_ready=True, ready_timeout_s=30.0)
+
         with EngineClient.connect(f"127.0.0.1:{port}") as c:
-            # Engine RAM should reflect post-replay state == pre-shutdown.
+            # Replay must restore the propagation result. RAM after
+            # restart == RAM before stop.
             ram_state_after = c.get_node(BASELINE, trigger)
             assert ram_state_after.closing_stock == ram_state_before.closing_stock, (
-                "RAM state diverged across restart: "
+                f"RAM state diverged across restart: "
                 f"before={ram_state_before.closing_stock} "
                 f"after={ram_state_after.closing_stock}"
             )
 
-            # Give the flusher time to drain the recovered records.
+            # Let the flusher drain.
             time.sleep(2.0)
 
-            # Verify Postgres got the data: last_calc_seq must be
-            # non-NULL on the trigger node (proves the seq-guarded
-            # UPDATE ran successfully post-recovery, A6 / F-014).
+            # PG side: last_calc_seq must now be non-NULL (proves the
+            # seq-guarded UPDATE ran via the recovery path, F-014).
             with psycopg.connect(dsn, row_factory=dict_row) as conn:
                 pg_row = conn.execute(
-                    "SELECT closing_stock, last_calc_seq "
-                    "FROM nodes WHERE node_id = %s",
+                    "SELECT closing_stock, last_calc_seq FROM nodes WHERE node_id = %s",
                     (str(trigger),),
                 ).fetchone()
-            assert pg_row is not None
-            # The seq guard wrote a non-null last_calc_seq.
-            # On a fresh trigger that's never been touched by the
-            # rust-svc engine, last_calc_seq starts NULL. After our
-            # propagation + flush, it should be non-NULL.
-            # NOTE: if the trigger has 0 deltas across all 20
-            # propagations (idempotent), last_calc_seq stays NULL.
-            # We can't reliably assert non-NULL without a state-changing
-            # event. The test passes when deltas were produced.
-    finally:
+            assert pg_row["last_calc_seq"] is not None, (
+                "last_calc_seq is still NULL after the flusher's drain — "
+                "F-014 seq-guarded UPDATE did not run via the recovery path"
+            )
+            assert pg_row["closing_stock"] == ram_state_after.closing_stock, (
+                f"PG closing_stock ({pg_row['closing_stock']}) does not match "
+                f"RAM ({ram_state_after.closing_stock}) after flush — recovery "
+                "did not converge"
+            )
+
         h2.stop()
+        h2 = None
+    finally:
+        # Defensive cleanup: stop any engine still running so it
+        # doesn't hold the WAL file open during PG cleanup.
+        if h1 is not None:
+            h1.stop()
+        if h2 is not None:
+            h2.stop()
+        if state_mutated:
+            # Restore the original closing_stock + reset last_calc_seq
+            # so subsequent tests start from clean baseline data.
+            with psycopg.connect(dsn) as conn:
+                conn.execute(
+                    "UPDATE nodes SET closing_stock = %s, last_calc_seq = NULL "
+                    "WHERE node_id = %s",
+                    (original_closing, str(trigger)),
+                )
+                conn.commit()
 
 
 def test_engine_serves_propagate_while_pg_unreachable(engine_binary, dsn, tmp_path):

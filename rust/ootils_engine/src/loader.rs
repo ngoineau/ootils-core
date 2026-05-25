@@ -43,7 +43,15 @@ pub struct LoadStats {
 }
 
 /// Open one connection, load the baseline graph in full, return it.
-pub async fn load_baseline(dsn: &str) -> anyhow::Result<(Graph, LoadStats)> {
+///
+/// `allow_empty` (F-011): defaults to false in production — the
+/// loader bails if the baseline has 0 nodes or 0 PIs (wrong DSN
+/// pointing at an empty DB). Set to true for CI / test fixtures
+/// that intentionally start from an empty schema.
+pub async fn load_baseline(
+    dsn: &str,
+    allow_empty: bool,
+) -> anyhow::Result<(Graph, LoadStats)> {
     let t0 = Instant::now();
 
     let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
@@ -91,13 +99,21 @@ pub async fn load_baseline(dsn: &str) -> anyhow::Result<(Graph, LoadStats)> {
     // the operator notices at deploy time. The `--allow-empty-baseline`
     // flag (see main.rs) escapes this for CI / test scenarios.
     if n_nodes == 0 || n_pi == 0 {
-        anyhow::bail!(
-            "baseline appears empty: {} nodes, {} PIs — refusing to boot. \
-             Check DATABASE_URL points at the right database, or use \
-             --allow-empty-baseline for tests.",
-            n_nodes,
-            n_pi
-        );
+        if allow_empty {
+            warn!(
+                n_nodes,
+                n_pi,
+                "baseline is empty but --allow-empty-baseline was set — booting anyway"
+            );
+        } else {
+            anyhow::bail!(
+                "baseline appears empty: {} nodes, {} PIs — refusing to boot. \
+                 Check DATABASE_URL points at the right database, or pass \
+                 --allow-empty-baseline (OOTILS_ALLOW_EMPTY_BASELINE=1) for tests.",
+                n_nodes,
+                n_pi
+            );
+        }
     }
 
     // F-025: warn loudly when a non-trivial fraction of nodes have a

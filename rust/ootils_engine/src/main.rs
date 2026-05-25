@@ -89,6 +89,14 @@ struct Cli {
     /// resources indefinitely (F-018). Default: 30 s.
     #[arg(long, env = "OOTILS_REQUEST_TIMEOUT_MS", default_value_t = 30_000)]
     request_timeout_ms: u64,
+
+    /// Allow the engine to boot even if the baseline scenario has 0
+    /// nodes or 0 PIs (F-011). Default OFF — operators see a hard
+    /// fail at startup when DATABASE_URL points at the wrong DB. CI
+    /// and tests against synthetic empty fixtures must opt in
+    /// explicitly via this flag or `OOTILS_ALLOW_EMPTY_BASELINE=1`.
+    #[arg(long, env = "OOTILS_ALLOW_EMPTY_BASELINE", default_value_t = false)]
+    allow_empty_baseline: bool,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -106,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     verify_postgres(&cli.dsn).await?;
 
-    let (graph, load_stats) = loader::load_baseline(&cli.dsn).await?;
+    let (graph, load_stats) = loader::load_baseline(&cli.dsn, cli.allow_empty_baseline).await?;
     let graph_lock = Arc::new(RwLock::new(graph));
     info!(
         nodes = load_stats.n_nodes,

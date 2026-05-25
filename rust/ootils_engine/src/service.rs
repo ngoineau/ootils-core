@@ -330,9 +330,13 @@ impl Engine for EngineSvc {
         }
 
         if dirty.is_empty() {
-            // Nothing to propagate — return an empty result, not an error.
+            // Nothing to propagate — return an empty result, not an
+            // error. Reviewer B2 fix: surface the parsed cr_uuid in
+            // calc_run_id even when there are no deltas, so the
+            // caller's event_id → calc_run_id audit chain (F-015)
+            // holds for no-op propagations too.
             return Ok(Response::new(PropagateResponse {
-                calc_run_id: String::new(),
+                calc_run_id: cr_uuid.to_string(),
                 nodes_processed: 0,
                 nodes_changed: 0,
                 shortages_detected: 0,
