@@ -64,9 +64,28 @@ def test_case_insensitive_and_whitespace(mock_db: MagicMock) -> None:
     assert isinstance(engine, SqlPropagationEngine)
 
 
-def test_unknown_value_falls_back_to_sql(mock_db: MagicMock, caplog) -> None:
-    """Unknown value logs a warning and falls back to the new default (sql)."""
+def test_rust_returns_rust_engine_when_extension_available(mock_db: MagicMock) -> None:
+    """OOTILS_ENGINE=rust dispatches to RustPropagationEngine if the
+    `ootils_kernel` extension is importable. Skipped on CI cells that
+    didn't build the wheel."""
+    pytest.importorskip(
+        "ootils_kernel",
+        reason="Rust kernel extension not installed in this environment",
+    )
+    from ootils_core.engine.orchestration.propagator_rust import RustPropagationEngine
+
     os.environ["OOTILS_ENGINE"] = "rust"
     engine = _build_propagation_engine(mock_db)
+    assert isinstance(engine, RustPropagationEngine)
+    assert isinstance(engine, PropagationEngine)  # hybrid dispatch wrapper
+    assert engine._explanation_builder is None  # lazy strategy
+
+
+def test_unknown_value_falls_back_to_sql(mock_db: MagicMock, caplog) -> None:
+    """Unknown value logs a warning and falls back to the default (sql)."""
+    os.environ["OOTILS_ENGINE"] = "rustacean"  # not a real backend
+    engine = _build_propagation_engine(mock_db)
     assert isinstance(engine, SqlPropagationEngine)
-    assert any("OOTILS_ENGINE" in r.message and "rust" in r.message for r in caplog.records)
+    assert any(
+        "OOTILS_ENGINE" in r.message and "rustacean" in r.message for r in caplog.records
+    )

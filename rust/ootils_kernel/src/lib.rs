@@ -25,6 +25,7 @@
 mod io;
 mod kernel;
 mod propagator;
+mod writeback;
 
 use chrono::NaiveDate;
 use pyo3::prelude::*;
@@ -186,6 +187,48 @@ fn project_subgraph<'py>(
     Ok((out, stats))
 }
 
+/// Week 4: full propagate-and-write — load dirty subgraph, compute every
+/// PI in memory, COPY the projection into a temp table, UPDATE FROM
+/// the temp table, and clear `dirty_nodes` for this calc_run. Everything
+/// happens inside one transaction (atomic — same contract as the SQL
+/// engine).
+///
+/// Returns a dict with timing breakdown + counts:
+///   - n_dirty_pis, n_supplies, n_demands, n_series_seeds
+///   - n_shortages_detected (PIs with closing_stock < 0)
+///   - load_ms, compute_ms, copy_ms, update_ms, clear_dirty_ms
+///
+/// Note: shortage *detection* in the `shortages` table (safety-stock
+/// based, severity score) is intentionally left to the Python wrapper
+/// which calls SHORTAGES_SQL afterwards. The Rust side only persists
+/// the projection results onto `nodes`.
+#[pyfunction]
+fn propagate_and_write<'py>(
+    py: Python<'py>,
+    dsn: &str,
+    calc_run_id_str: &str,
+    scenario_id_str: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let calc_run_id = parse_uuid(calc_run_id_str)?;
+    let scenario_id = parse_uuid(scenario_id_str)?;
+
+    let stats = writeback::propagate_and_write(dsn, calc_run_id, scenario_id)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("propagate_and_write failed: {e}")))?;
+
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("n_dirty_pis", stats.n_dirty_pis)?;
+    d.set_item("n_supplies", stats.n_supplies)?;
+    d.set_item("n_demands", stats.n_demands)?;
+    d.set_item("n_series_seeds", stats.n_series_seeds)?;
+    d.set_item("n_shortages_detected", stats.n_shortages_detected)?;
+    d.set_item("load_ms", stats.load_ms)?;
+    d.set_item("compute_ms", stats.compute_ms)?;
+    d.set_item("copy_ms", stats.copy_ms)?;
+    d.set_item("update_ms", stats.update_ms)?;
+    d.set_item("clear_dirty_ms", stats.clear_dirty_ms)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn ootils_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(echo, m)?)?;
@@ -194,5 +237,6 @@ fn ootils_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(load_subgraph_stats, m)?)?;
     m.add_function(wrap_pyfunction!(project_subgraph, m)?)?;
+    m.add_function(wrap_pyfunction!(propagate_and_write, m)?)?;
     Ok(())
 }

@@ -109,7 +109,7 @@ def main():
     p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
     p.add_argument("--n", type=int, default=20, help="Number of measured events")
     p.add_argument("--warmup", type=int, default=5, help="Warmup events (discarded)")
-    p.add_argument("--engine", choices=["sql", "python"], default="sql")
+    p.add_argument("--engine", choices=["sql", "python", "rust"], default="sql")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     if not args.dsn:

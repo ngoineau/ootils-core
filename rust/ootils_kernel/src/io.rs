@@ -102,10 +102,23 @@ impl Loader {
         calc_run_id: Uuid,
         scenario_id: Uuid,
     ) -> Result<Subgraph, postgres::Error> {
-        let mut sg = Subgraph::default();
+        load_subgraph(&mut self.client, calc_run_id, scenario_id)
+    }
+}
 
-        // ----- 1. Dirty PIs (mirror of `dirty_pi` CTE) ----------------
-        let rows = self.client.query(
+/// Free function variant — accepts an existing `Client`, no new
+/// connection. Used by `propagate_and_write` so that load + write share
+/// the same TCP session, saving ~50ms of connection setup per call.
+/// Critical for incremental events where the dirty set is small.
+pub fn load_subgraph(
+    client: &mut Client,
+    calc_run_id: Uuid,
+    scenario_id: Uuid,
+) -> Result<Subgraph, postgres::Error> {
+    let mut sg = Subgraph::default();
+
+    // ----- 1. Dirty PIs (mirror of `dirty_pi` CTE) ----------------
+    let rows = client.query(
             "SELECT pi.node_id, pi.projection_series_id, pi.bucket_sequence, \
                     pi.time_span_start, pi.time_span_end \
              FROM nodes pi \
@@ -136,7 +149,7 @@ impl Loader {
         let dirty_ids: Vec<Uuid> = sg.dirty_pis.iter().map(|p| p.node_id).collect();
 
         // ----- 2. Incoming supplies (replenishes edges) ---------------
-        let rows = self.client.query(
+        let rows = client.query(
             "SELECT e.to_node_id, s.quantity, s.time_ref \
              FROM edges e \
              JOIN nodes s ON s.node_id = e.from_node_id \
@@ -158,7 +171,7 @@ impl Loader {
         }
 
         // ----- 3. Incoming demands (consumes edges) -------------------
-        let rows = self.client.query(
+        let rows = client.query(
             "SELECT e.to_node_id, d.quantity, d.time_span_start, d.time_span_end, d.time_ref \
              FROM edges e \
              JOIN nodes d ON d.node_id = e.from_node_id \
@@ -187,7 +200,7 @@ impl Loader {
         //   - else            : prev.closing_stock at seed_seq - 1
         // The SQL engine does this in one CTE; in Rust we do it
         // explicitly with one round-trip.
-        let rows = self.client.query(
+        let rows = client.query(
             "WITH dirty_pi AS ( \
                 SELECT pi.node_id, pi.projection_series_id, pi.bucket_sequence \
                 FROM nodes pi \
@@ -234,15 +247,14 @@ impl Loader {
              FROM series_first_dirty sfd",
             &[&calc_run_id, &scenario_id],
         )?;
-        for r in rows {
-            let sid: Uuid = r.get(0);
-            let seed_seq: i32 = r.get(1);
-            let opening: Decimal = r.get(2);
-            sg.seed_openings.insert(sid, (seed_seq, opening));
-        }
-
-        Ok(sg)
+    for r in rows {
+        let sid: Uuid = r.get(0);
+        let seed_seq: i32 = r.get(1);
+        let opening: Decimal = r.get(2);
+        sg.seed_openings.insert(sid, (seed_seq, opening));
     }
+
+    Ok(sg)
 }
 
 // -------------------------------------------------------------------- //
