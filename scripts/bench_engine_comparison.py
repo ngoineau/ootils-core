@@ -69,6 +69,9 @@ def _build_engine(conn, engine_flavor: str):
     if engine_flavor == "sql":
         from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine
         engine_cls = SqlPropagationEngine
+    elif engine_flavor == "rust":
+        from ootils_core.engine.orchestration.propagator_rust import RustPropagationEngine
+        engine_cls = RustPropagationEngine
     else:
         engine_cls = PropagationEngine
 
@@ -143,6 +146,11 @@ def _run_full_propagation(dsn: str, engine_flavor: str) -> dict:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
+    p.add_argument(
+        "--skip-python",
+        action="store_true",
+        help="Skip the Python engine (saturates on profile L 227K PIs).",
+    )
     args = p.parse_args()
     if not args.dsn:
         print("ERROR: set DATABASE_URL or pass --dsn", file=sys.stderr)
@@ -155,11 +163,16 @@ def main():
             print(f"  {k:30s} {v:>10d}")
         print()
 
-    print("=== Engine: python ===")
-    py = _run_full_propagation(args.dsn, "python")
-    for k, v in py.items():
-        print(f"  {k:30s} {v!r}")
-    print()
+    if args.skip_python:
+        print("=== Engine: python ===  SKIPPED (--skip-python)")
+        print()
+        py = None
+    else:
+        print("=== Engine: python ===")
+        py = _run_full_propagation(args.dsn, "python")
+        for k, v in py.items():
+            print(f"  {k:30s} {v!r}")
+        print()
 
     print("=== Engine: sql ===")
     sql = _run_full_propagation(args.dsn, "sql")
@@ -167,10 +180,30 @@ def main():
         print(f"  {k:30s} {v!r}")
     print()
 
-    if "error" not in py and "error" not in sql:
-        speedup = py["elapsed_sec"] / sql["elapsed_sec"] if sql["elapsed_sec"] > 0 else 0
-        print(f"=== Speedup sql vs python : {speedup:.2f}x  ===")
-        print("    (throughput compared on dirty_node_count — unbiased across engines)")
+    # Rust engine — only if the extension is installed.
+    rust = None
+    try:
+        import ootils_kernel  # noqa: F401
+    except ImportError:
+        print("=== Engine: rust ===  SKIPPED (ootils_kernel not installed)")
+        print()
+    else:
+        print("=== Engine: rust ===")
+        rust = _run_full_propagation(args.dsn, "rust")
+        for k, v in rust.items():
+            print(f"  {k:30s} {v!r}")
+        print()
+
+    if py is not None and "error" not in py and "error" not in sql:
+        speedup_sql = py["elapsed_sec"] / sql["elapsed_sec"] if sql["elapsed_sec"] > 0 else 0
+        print(f"=== Speedup sql vs python : {speedup_sql:.2f}x  ===")
+        if rust is not None and "error" not in rust:
+            speedup_rust = py["elapsed_sec"] / rust["elapsed_sec"] if rust["elapsed_sec"] > 0 else 0
+            print(f"=== Speedup rust vs python : {speedup_rust:.2f}x  ===")
+    if rust is not None and "error" not in rust and "error" not in sql:
+        speedup_rust_vs_sql = sql["elapsed_sec"] / rust["elapsed_sec"] if rust["elapsed_sec"] > 0 else 0
+        print(f"=== Speedup rust vs sql    : {speedup_rust_vs_sql:.2f}x  ===")
+    print("    (throughput compared on dirty_node_count — unbiased across engines)")
 
 
 if __name__ == "__main__":

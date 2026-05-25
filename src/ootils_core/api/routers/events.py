@@ -61,6 +61,10 @@ def _build_propagation_engine(db):
     elif engine_flavor == "python":
         engine_cls = PropagationEngine
         logger.info("PropagationEngine: using Python backend (OOTILS_ENGINE=python)")
+    elif engine_flavor == "rust":
+        from ootils_core.engine.orchestration.propagator_rust import RustPropagationEngine
+        engine_cls = RustPropagationEngine
+        logger.info("PropagationEngine: using Rust backend (OOTILS_ENGINE=rust, opt-in)")
     else:
         logger.warning(
             "Unknown OOTILS_ENGINE=%r — falling back to sql (default)", engine_flavor,
