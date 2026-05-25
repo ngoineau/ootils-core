@@ -40,6 +40,14 @@ struct Cli {
     #[arg(long, env = "OOTILS_ENGINE_LISTEN", default_value = "127.0.0.1:50051")]
     listen: SocketAddr,
 
+    /// Log filter (tracing-subscriber EnvFilter syntax).
+    ///
+    /// F-047: when RUST_LOG is set by the operator (common in
+    /// containerized prod to reduce noise), the entire default
+    /// "info,ootils_engine=debug" is replaced — NOT merged. To keep
+    /// debug-level for the engine while silencing the rest, use
+    /// `RUST_LOG=warn,ootils_engine=debug`. The default below applies
+    /// only when RUST_LOG is unset.
     #[arg(long, env = "RUST_LOG", default_value = "info,ootils_engine=debug")]
     log: String,
 
@@ -97,12 +105,20 @@ struct Cli {
     /// explicitly via this flag or `OOTILS_ALLOW_EMPTY_BASELINE=1`.
     #[arg(long, env = "OOTILS_ALLOW_EMPTY_BASELINE", default_value_t = false)]
     allow_empty_baseline: bool,
+
+    /// Log output format. `text` = human-readable (dev default);
+    /// `json` = one JSON object per line (prod default — log
+    /// aggregators parse it natively). F-061 audit closure: the
+    /// json feature of tracing-subscriber was pulled in but never
+    /// wired; this flag activates it.
+    #[arg(long, env = "OOTILS_LOG_FORMAT", default_value = "text")]
+    log_format: String,
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(&cli.log);
+    init_tracing(&cli.log, &cli.log_format)?;
     let boot_time = Instant::now();
 
     info!(
@@ -111,6 +127,27 @@ async fn main() -> anyhow::Result<()> {
         bench = cli.bench,
         "ootils-engine starting"
     );
+
+    // F-007 + reviewer follow-up: validate metrics_listen FIRST,
+    // before the expensive verify_postgres + loader steps. A
+    // misconfigured address should fail in milliseconds, not after
+    // a 5-second baseline load. (The actual server is spawned later;
+    // this is just early validation of the parsed addr.)
+    let metrics_addr_str = cli.metrics_listen.trim().to_string();
+    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
+        || metrics_addr_str.eq_ignore_ascii_case("off")
+    {
+        None
+    } else {
+        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
+            anyhow::anyhow!(
+                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
+                 (use \"off\" to disable the metrics server)",
+                metrics_addr_str,
+                e
+            )
+        })?)
+    };
 
     verify_postgres(&cli.dsn).await?;
 
@@ -201,30 +238,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Item #2: Prometheus metrics — process-wide counter registry.
-    // F-007: Boot fails fast on a malformed metrics_listen. Operators
-    // who misconfigure the address learn at startup, not three weeks
-    // later during an incident. "off" (and empty for backward compat)
-    // explicitly disable the endpoint.
+    // Address was already parsed + validated at the top of main()
+    // (F-007 fail-fast).
     let metrics_registry = Arc::new(metrics::Metrics::new());
-    let metrics_addr_str = cli.metrics_listen.trim();
-    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
-        || metrics_addr_str.eq_ignore_ascii_case("off")
-    {
-        info!("metrics endpoint explicitly disabled (OOTILS_METRICS_LISTEN={metrics_addr_str:?})");
-        None
-    } else {
-        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
-            anyhow::anyhow!(
-                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
-                 (use \"off\" to disable the metrics server)",
-                metrics_addr_str,
-                e
-            )
-        })?)
-    };
     if let Some(addr) = metrics_addr {
         let _metrics_handle =
             metrics::spawn_metrics_server(metrics_registry.clone(), addr);
+    } else {
+        info!("metrics endpoint explicitly disabled");
     }
 
     let queue = Arc::new(write_behind::WriteBehindQueue::with_caps(
@@ -377,13 +398,37 @@ fn run_bench_fork(graph_lock: &Arc<RwLock<state::Graph>>, n: usize) {
     );
 }
 
-fn init_tracing(filter: &str) {
+fn init_tracing(filter: &str, format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt::layer().with_target(true).with_thread_ids(false))
-        .init();
+    match format.to_ascii_lowercase().as_str() {
+        "text" => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().with_target(true).with_thread_ids(false))
+                .init();
+        }
+        "json" => {
+            // F-061 audit closure: prod default. One JSON object per
+            // line; log aggregators (Loki/Splunk/CloudWatch) parse it
+            // natively without regex.
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_target(true)
+                        .with_thread_ids(false)
+                        .with_current_span(true),
+                )
+                .init();
+        }
+        other => anyhow::bail!(
+            "OOTILS_LOG_FORMAT={:?} not recognized — use \"text\" or \"json\"",
+            other
+        ),
+    }
+    Ok(())
 }
 
 /// F-017: redact the password component of a Postgres DSN so logs +
@@ -452,7 +497,33 @@ async fn verify_postgres(dsn: &str) -> anyhow::Result<()> {
     });
     let row = client.query_one("SELECT version()", &[]).await?;
     let version: String = row.get(0);
-    info!(pg_version = %version, "Postgres reachable");
+
+    // F-028: probe the schema we depend on. Pointing the engine at
+    // the wrong DB (or a DB that hasn't run migrations) used to fail
+    // deep inside the loader with an opaque "column does not exist"
+    // — much harder to debug than an early "your schema is missing X".
+    // We probe a single discriminating column (last_calc_seq, added
+    // by migration 037 which is part of the rust-svc engine's
+    // contract). Missing → bail loudly.
+    let probe = client
+        .query_opt(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = 'public' \
+               AND table_name = 'nodes' \
+               AND column_name = 'last_calc_seq'",
+            &[],
+        )
+        .await?;
+    if probe.is_none() {
+        anyhow::bail!(
+            "schema check failed: nodes.last_calc_seq column missing. \
+             Run migration 037_nodes_last_calc_seq.sql (or all pending \
+             migrations). DATABASE_URL appears correct (PG {})",
+            version
+        );
+    }
+
+    info!(pg_version = %version, "Postgres reachable + schema check OK");
     Ok(())
 }
 

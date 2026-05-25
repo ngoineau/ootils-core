@@ -214,7 +214,15 @@ async def create_event(
         effective_scenario_id,
     )
 
-    # Synchronous propagation
+    # Synchronous propagation.
+    # F-031 fix (audit Cluster F follow-up): distinguish "propagation
+    # failed" (engine returned an error) from "propagation skipped"
+    # (no trigger_node_id). The old code logged a warning + returned
+    # 202 status="queued" on engine failure — meaning operators saw
+    # successful HTTP responses while the engine was actually down.
+    # Now real engine failures bubble up as HTTP 503 (transient,
+    # client should retry) so the canary's error rate reflects
+    # reality.
     affected_nodes = 0
     if body.trigger_node_id is not None:
         try:
@@ -227,8 +235,23 @@ async def create_event(
             if calc_run is not None:
                 affected_nodes = calc_run.nodes_recalculated or 0
         except Exception as exc:
-            logger.warning("propagation failed for event %s: %s", event_id, exc)
-            # Don't fail the request — event is recorded, propagation is best-effort
+            logger.error(
+                "propagation failed for event %s: %s — surfacing as 503",
+                event_id,
+                exc,
+            )
+            # Event row is already persisted (event_id is committed).
+            # The 503 tells the caller to retry; on retry, the event
+            # is idempotent because event_id is unique + the engine's
+            # F-014 seq-guard skips already-applied writes.
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"propagation engine error: {type(exc).__name__}: {exc}. "
+                    "Event {event_id} recorded; retry safe."
+                ),
+            ) from exc
 
     return EventResponse(
         event_id=event_id,

@@ -32,10 +32,11 @@ use crate::write_behind::{PendingDelta, WriteBehindQueue};
 pub struct EngineSvc {
     boot_time: Instant,
     boot_timestamp: Timestamp,
-    /// Baseline state — phase 3-4 still uses an RwLock for in-place
-    /// mutation of the baseline. Phase 5+ may swap this for
-    /// `ArcSwap<Graph>` if benchmarks of structural-sharing variants
-    /// justify it.
+    /// Baseline state. F-009 (Cluster F audit response): the
+    /// propagation pipeline takes a READ lock during its parallel
+    /// compute phase + a brief WRITE lock to apply. Other handlers
+    /// (Health/GetNode/ListScenarios) can take read locks concurrently
+    /// with the compute phase.
     baseline: Arc<RwLock<Graph>>,
     /// COW scenarios on top of the baseline (phase 4).
     scenarios: Arc<ScenarioManager>,
@@ -45,6 +46,14 @@ pub struct EngineSvc {
     writeback: Arc<WriteBehindQueue>,
     /// Prometheus metrics registry (item #2).
     metrics: Arc<Metrics>,
+    /// F-009 propagation serializer. Held across compute + apply so
+    /// two concurrent propagations cannot both read the same state,
+    /// compute deltas in parallel, and then both apply (the second
+    /// would overwrite the first's deltas with stale values). The
+    /// graph RwLock is released between compute and apply; this
+    /// mutex re-establishes "one propagation at a time" without
+    /// blocking concurrent READS.
+    propagation_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 impl EngineSvc {
@@ -62,6 +71,7 @@ impl EngineSvc {
             scenarios: Arc::new(ScenarioManager::new()),
             writeback,
             metrics,
+            propagation_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 }
@@ -78,10 +88,15 @@ impl Engine for EngineSvc {
         tokio_stream::wrappers::ReceiverStream<Result<ChangeEvent, Status>>;
 
     async fn health(&self, _req: Request<()>) -> Result<Response<HealthStatus>, Status> {
-        let uptime = self.boot_time.elapsed().as_secs() as i64;
+        // F-039: explicit cast — saturating semantics on the unlikely
+        // overflow (uptime > 292 billion years).
+        let uptime = i64::try_from(self.boot_time.elapsed().as_secs())
+            .unwrap_or(i64::MAX);
         let g = self.baseline.read();
+        // F-040 fix: user-facing detail — no internal "phase N"
+        // nomenclature (ADR-017 implementation jargon).
         let detail = format!(
-            "phase 2: baseline loaded ({} nodes, gen {})",
+            "baseline loaded: {} nodes, generation {}",
             g.len(),
             g.generation
         );
@@ -94,19 +109,50 @@ impl Engine for EngineSvc {
     }
 
     async fn metrics(&self, _req: Request<()>) -> Result<Response<EngineMetrics>, Status> {
+        // F-041 fix: populate from the real registry instead of zeros.
+        // The /metrics HTTP endpoint exposes the same data in
+        // Prometheus exposition; this RPC is the typed counterpart for
+        // programmatic callers.
+        use std::sync::atomic::Ordering;
         let g = self.baseline.read();
+        let baseline_bytes = g.memory_bytes() as i64;
+        drop(g);
+        let scenarios_bytes: i64 = self
+            .scenarios
+            .list()
+            .iter()
+            .map(|s| (s.baseline_snapshot.memory_bytes() + s.overlay_memory_bytes()) as i64)
+            .sum();
+        let events_total = self.metrics.events_total.load(Ordering::Relaxed) as i64;
+        let nodes_processed = self.metrics.nodes_processed_total.load(Ordering::Relaxed) as i64;
+        let shortages = self.metrics.shortages_detected_total.load(Ordering::Relaxed) as i64;
+        // p50/p95/p99 require a histogram, which the hand-rolled
+        // metrics registry doesn't keep (it accumulates sum-only).
+        // Report mean as p50 — Prometheus consumers should use the
+        // counter pair (compute_us_sum / events_total) for accuracy.
+        // p95/p99 stay zero until a histogram lands (deferred — not
+        // urgent enough to pull in prometheus-client).
+        let mean_compute_us = if events_total > 0 {
+            self.metrics.propagate_compute_us_sum.load(Ordering::Relaxed) as f64 / events_total as f64
+        } else {
+            0.0
+        };
+        let wal_size = self.metrics.wal_size_bytes.load(Ordering::Relaxed) as i64;
+        let queue_depth =
+            self.metrics.writeback_queue_depth.load(Ordering::Relaxed) as i32;
+
         Ok(Response::new(EngineMetrics {
-            baseline_graph_bytes: g.memory_bytes() as i64,
-            total_scenarios_bytes: 0,
-            active_scenarios: 0,
-            events_processed_total: 0,
-            nodes_recomputed_total: 0,
-            shortages_detected_total: 0,
-            propagate_p50_us: 0.0,
+            baseline_graph_bytes: baseline_bytes,
+            total_scenarios_bytes: scenarios_bytes,
+            active_scenarios: self.scenarios.len() as i32,
+            events_processed_total: events_total,
+            nodes_recomputed_total: nodes_processed,
+            shortages_detected_total: shortages,
+            propagate_p50_us: mean_compute_us,
             propagate_p95_us: 0.0,
             propagate_p99_us: 0.0,
-            pg_writeback_queue_depth: 0,
-            wal_size_bytes: 0,
+            pg_writeback_queue_depth: queue_depth,
+            wal_size_bytes: wal_size,
             last_pg_flush: None,
         }))
     }
@@ -179,6 +225,33 @@ impl Engine for EngineSvc {
             created_at: Some(Timestamp::from(scenario.created_at_system)),
             overlay_size: 0,
             memory_bytes: scenario.baseline_snapshot.memory_bytes() as i64,
+        }))
+    }
+
+    async fn delete_scenario(
+        &self,
+        req: Request<DeleteRequest>,
+    ) -> Result<Response<DeleteResult>, Status> {
+        // F-037/F-038: explicit scenario disposal (what-if discard).
+        let q = req.into_inner();
+        let sid = Uuid::from_str(&q.scenario_id)
+            .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+        if sid == crate::loader::BASELINE_SCENARIO_ID {
+            return Err(Status::invalid_argument(
+                "cannot delete the baseline scenario",
+            ));
+        }
+        let scenario = self
+            .scenarios
+            .remove(&sid)
+            .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
+        let overlay_entries = scenario.overlay_size() as i32;
+        self.metrics
+            .active_scenarios
+            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
+        info!(scenario_id = %sid, overlay_entries, "scenario deleted (F-038)");
+        Ok(Response::new(DeleteResult {
+            overlay_entries_freed: overlay_entries,
         }))
     }
 
@@ -352,20 +425,40 @@ impl Engine for EngineSvc {
 
         let t_total = Instant::now();
 
-        // F-008 (Cluster E): the heavy stuff — write lock + rayon
-        // parallel compute + WAL fsync + queue push — is all blocking
-        // I/O or CPU-bound work that must NOT run on a tokio worker
-        // thread (would stall other handlers including Health,
-        // GetNode, and the metrics endpoint). We move it onto a
-        // dedicated blocking-task pool via spawn_blocking.
+        // F-008 + F-009 (Cluster E + F audit response): the heavy
+        // stuff — rayon compute + WAL fsync + queue push — runs in
+        // spawn_blocking so tokio workers stay free for other RPCs.
+        // Inside, the propagation pipeline is split:
+        //   1. propagation_lock serializes propagations (one at a
+        //      time end-to-end).
+        //   2. plan_compute runs under a READ lock → other handlers
+        //      (Health/GetNode/ListScenarios) take their own read
+        //      locks concurrently and aren't blocked by the ~ms
+        //      compute phase.
+        //   3. apply runs under a brief WRITE lock (sub-ms).
         let baseline = self.baseline.clone();
         let writeback = self.writeback.clone();
         let metrics = self.metrics.clone();
+        let prop_lock = self.propagation_lock.clone();
         let blocking_outcome = tokio::task::spawn_blocking(
             move || -> Result<(propagator::PropagationStats, f64), Status> {
+                // Serialize propagations with each other (F-009: keeps
+                // the read+write split correct under multi-tenant
+                // load — without this, two propagations could read
+                // the same state, compute conflicting deltas, then
+                // both apply and clobber each other).
+                let _propagation_guard = prop_lock.lock();
+
+                // Phase 1: compute under READ lock — concurrent reads OK.
+                let computed = {
+                    let g = baseline.read();
+                    propagator::plan_compute(&g, &dirty)
+                };
+
+                // Phase 2: apply under brief WRITE lock.
                 let stats = {
                     let mut g = baseline.write();
-                    propagator::propagate(&mut g, &dirty)
+                    propagator::apply(&mut g, computed, &dirty)
                 };
 
                 let mut wal_fsync_us = 0.0;

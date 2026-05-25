@@ -9,10 +9,34 @@ import "google/protobuf/timestamp.proto";
 // ootils.engine.v1 — gRPC contract between Python (FastAPI) and the Rust
 // in-memory engine service (ADR-017 Architecture B).
 //
-// This is the ONLY interface between the two processes. Any new operation
-// must be added here first, then implemented on both sides. Breaking
-// changes follow the v1 → v2 evolution rule (new package, kept side by
-// side until all clients migrate).
+// # Evolution policy (F-059 audit closure)
+//
+// ALLOWED inside v1 (additive, backward-compatible):
+//   - New `rpc` methods on the Engine service.
+//   - New fields in existing messages (use a fresh field number,
+//     do NOT reuse retired numbers).
+//   - New enum values appended at the end of an enum.
+//   - New message types.
+//
+// REQUIRES v2 (new package `ootils.engine.v2`, both run side-by-side
+// during migration):
+//   - Removing or renaming an rpc method.
+//   - Removing or renaming a field, OR repurposing a field number.
+//   - Changing a field's type (e.g. int64 → string).
+//   - Reordering oneof members, removing oneof members.
+//   - Changing a counter's signedness (e.g. F-042: int64 → uint64
+//     for ootils_engine_events_total et al. is a breaking change —
+//     deferred to v2 alongside the pagination work for ListScenarios
+//     [F-054]).
+//
+// Counter types in v1 use int64 for backward-compat. Treat them as
+// unsigned in practice (counters never decrement). At ~2^63 events
+// = thousands of years at 5K events/s — the v2 migration timeline
+// is not pressured by this.
+//
+// This is the ONLY interface between the two processes. Any new
+// operation must be added here first, then implemented on both
+// sides.
 // ============================================================================
 
 service Engine {
@@ -30,6 +54,14 @@ service Engine {
 
   // Merge a scenario's overlay back into the baseline. Atomic via arc-swap.
   rpc MergeScenario(MergeRequest) returns (MergeResult);
+
+  // Discard a scenario without merging. F-037/F-038 audit response:
+  // the only way to dispose of a scenario used to be Merge, which
+  // forced the planner's what-if to apply to baseline. Now what-ifs
+  // can be cleanly dropped. Returns NotFound if the scenario_id
+  // doesn't exist; the baseline scenario is rejected with
+  // InvalidArgument (cannot delete the root).
+  rpc DeleteScenario(DeleteRequest) returns (DeleteResult);
 
   // List active scenarios + their memory footprint.
   rpc ListScenarios(google.protobuf.Empty) returns (ScenarioList);
@@ -98,6 +130,15 @@ message MergeRequest {
 message MergeResult {
   int32 nodes_merged = 1;
   string new_baseline_generation = 2;
+}
+
+message DeleteRequest {
+  string scenario_id = 1;
+}
+
+message DeleteResult {
+  // # of overlay entries dropped — useful for ops sanity.
+  int32 overlay_entries_freed = 1;
 }
 
 message ScenarioInfo {

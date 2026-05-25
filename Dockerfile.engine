@@ -60,6 +60,12 @@ RUN cargo build --release -p ootils_engine \
 # ---- Stage 2: runtime ------------------------------------------------------
 # Distroless cc has the C runtime ootils-engine needs (mimalloc, libssl-less
 # tokio-postgres NoTls). No shell, no package manager, hardened by default.
+#
+# F-052: production releases SHOULD pin a digest, e.g.
+#   FROM gcr.io/distroless/cc-debian12@sha256:abc123...
+# The moving tag is fine for dev iterations but undermines
+# reproducible-builds claims. The release pipeline (when one exists)
+# should be responsible for resolving + locking the digest.
 FROM gcr.io/distroless/cc-debian12
 
 LABEL org.opencontainers.image.title="ootils-engine"

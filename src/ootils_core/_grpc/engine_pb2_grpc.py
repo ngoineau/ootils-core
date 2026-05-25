@@ -63,6 +63,11 @@ class EngineStub(object):
                 request_serializer=engine__pb2.MergeRequest.SerializeToString,
                 response_deserializer=engine__pb2.MergeResult.FromString,
                 _registered_method=True)
+        self.DeleteScenario = channel.unary_unary(
+                '/ootils.engine.v1.Engine/DeleteScenario',
+                request_serializer=engine__pb2.DeleteRequest.SerializeToString,
+                response_deserializer=engine__pb2.DeleteResult.FromString,
+                _registered_method=True)
         self.ListScenarios = channel.unary_unary(
                 '/ootils.engine.v1.Engine/ListScenarios',
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
@@ -134,6 +139,18 @@ class EngineServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def DeleteScenario(self, request, context):
+        """Discard a scenario without merging. F-037/F-038 audit response:
+        the only way to dispose of a scenario used to be Merge, which
+        forced the planner's what-if to apply to baseline. Now what-ifs
+        can be cleanly dropped. Returns NotFound if the scenario_id
+        doesn't exist; the baseline scenario is rejected with
+        InvalidArgument (cannot delete the root).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListScenarios(self, request, context):
         """List active scenarios + their memory footprint.
         """
@@ -200,6 +217,11 @@ def add_EngineServicer_to_server(servicer, server):
                     servicer.MergeScenario,
                     request_deserializer=engine__pb2.MergeRequest.FromString,
                     response_serializer=engine__pb2.MergeResult.SerializeToString,
+            ),
+            'DeleteScenario': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteScenario,
+                    request_deserializer=engine__pb2.DeleteRequest.FromString,
+                    response_serializer=engine__pb2.DeleteResult.SerializeToString,
             ),
             'ListScenarios': grpc.unary_unary_rpc_method_handler(
                     servicer.ListScenarios,
@@ -326,6 +348,33 @@ class Engine(object):
             '/ootils.engine.v1.Engine/MergeScenario',
             engine__pb2.MergeRequest.SerializeToString,
             engine__pb2.MergeResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteScenario(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ootils.engine.v1.Engine/DeleteScenario',
+            engine__pb2.DeleteRequest.SerializeToString,
+            engine__pb2.DeleteResult.FromString,
             options,
             channel_credentials,
             insecure,

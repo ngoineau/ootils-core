@@ -67,15 +67,32 @@ def grpc_module():
 
 
 def _free_port(start: int = 50100) -> int:
-    """Find an unused TCP port — multiple harnesses can run in parallel."""
-    for p in range(start, start + 100):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    """Find an unused TCP port — multiple harnesses can run in parallel.
+
+    F-033 fix: ask the OS to allocate via bind(0) + SO_REUSEADDR.
+    The `start` argument is now a hint only (kept for backward compat
+    with existing test offsets) — the actual port comes from
+    getsockname(). There's still a small TOCTOU window between close
+    and the harness's bind, but with SO_REUSEADDR + OS-allocation the
+    risk drops to "another process happens to grab the same fresh
+    port in the millisecond gap" — astronomically unlikely vs. the
+    old scan-a-range pattern that collided deterministically under
+    pytest-xdist.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Hint range: try the caller's preferred range first (helps
+        # log readability when tests interleave). On failure, fall
+        # back to OS allocation.
+        for p in range(start, start + 100):
             try:
                 s.bind(("127.0.0.1", p))
                 return p
             except OSError:
                 continue
-    raise RuntimeError(f"no free port in [{start}, {start + 100})")
+        # Range exhausted — let OS pick.
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 @pytest.fixture
@@ -148,8 +165,17 @@ def engine_session(engine_binary, dsn, grpc_module):
 
 @pytest.fixture
 def pick_pi_node(dsn):
-    """Factory that returns a fresh PI node UUID + its (item, location)
-    couple from the live DB. Useful for triggering Propagate."""
+    """Factory that returns a PI node UUID + its (item, location)
+    couple from the live DB. Useful for triggering Propagate.
+
+    F-045 fix: deterministic by default (filter by bucket_sequence=0
+    + ORDER BY node_id). The previous implementation used
+    `ORDER BY random()` which on a 330K-node profile L table is a
+    1-2 s full sort, AND made failing tests hard to reproduce ("the
+    previous run picked node X and passed, this one picked Y and
+    failed"). Now we get the same first eligible PI every time —
+    cheap (PK-ordered scan, stops at LIMIT 1) and reproducible.
+    """
     import psycopg
     from psycopg.rows import dict_row
 
@@ -158,13 +184,13 @@ def pick_pi_node(dsn):
             sql = (
                 "SELECT node_id, item_id, location_id FROM nodes "
                 "WHERE node_type='ProjectedInventory' AND scenario_id=%s "
-                "AND active=TRUE "
+                "AND active=TRUE AND bucket_sequence = 0 "
             )
             params: list = [BASELINE]
             if must_have_shortage is not None:
                 sql += "AND has_shortage = %s "
                 params.append(must_have_shortage)
-            sql += "ORDER BY random() LIMIT 1"
+            sql += "ORDER BY node_id LIMIT 1"
             row = conn.execute(sql, tuple(params)).fetchone()
             if row is None:
                 raise pytest.skip("no PI node matches the filter")

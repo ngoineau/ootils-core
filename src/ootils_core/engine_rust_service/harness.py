@@ -49,7 +49,17 @@ class EngineHarness:
             )
         self.dsn = dsn
         self.listen_addr = listen_addr
-        self.wal_path = wal_path or Path(tempfile.gettempdir()) / "ootils-engine-test.wal"
+        # F-058 fix: default WAL path includes pid + port so concurrent
+        # harnesses (same Python PID, different ports — pytest-xdist or
+        # CI loops) don't clash on the same scratch file. Existing
+        # tests that pass explicit `wal_path` are unaffected.
+        if wal_path is None:
+            port_tag = listen_addr.replace(":", "_").replace(".", "_")
+            wal_path = (
+                Path(tempfile.gettempdir())
+                / f"ootils-engine-test-{os.getpid()}-{port_tag}.wal"
+            )
+        self.wal_path = wal_path
         self.flush_interval_ms = flush_interval_ms
         self.log_level = log_level
         # Additional env vars layered on top of the defaults. Used by
@@ -90,9 +100,14 @@ class EngineHarness:
         # Test-supplied overrides last so they win over defaults.
         env.update(self.extra_env)
 
+        # F-050 fix: include the listen port in the log filename so
+        # multiple harnesses spawned from the same Python PID (CI
+        # iterations, pytest-xdist workers) don't overwrite each
+        # other's logs on test failure.
         td = Path(tempfile.gettempdir())
-        self._stdout_path = td / f"ootils-engine-stdout-{os.getpid()}.log"
-        self._stderr_path = td / f"ootils-engine-stderr-{os.getpid()}.log"
+        port_tag = self.listen_addr.replace(":", "_").replace(".", "_")
+        self._stdout_path = td / f"ootils-engine-stdout-{os.getpid()}-{port_tag}.log"
+        self._stderr_path = td / f"ootils-engine-stderr-{os.getpid()}-{port_tag}.log"
         self.stdout_log = open(self._stdout_path, "wb")
         self.stderr_log = open(self._stderr_path, "wb")
 
@@ -159,15 +174,40 @@ class EngineHarness:
 
     def kill9(self) -> None:
         """Simulate a hard crash — SIGKILL. Use this to validate WAL
-        recovery on restart."""
+        recovery on restart.
+
+        F-048 fix: capture exit code + last lines of stderr to logger
+        before tearing down. Speeds up post-mortem on failed recovery
+        tests where the engine had crashed already before the kill9.
+        """
         if self.process is None or self.process.poll() is not None:
-            logger.warning("kill9: engine not running")
+            logger.warning("kill9: engine not running (already exited)")
+            self._dump_stderr_tail()
             return
         logger.info("KILLING engine (SIGKILL/9)")
         self.process.kill()
-        self.process.wait()
+        rc = self.process.wait()
+        logger.info("engine killed, exit code=%s", rc)
+        self._dump_stderr_tail()
         self._close_logs()
         self.process = None
+
+    def _dump_stderr_tail(self, n_lines: int = 50) -> None:
+        """Log the last ~N lines of stderr to help post-mortem failed
+        test runs. F-048."""
+        try:
+            if not self._stderr_path or not self._stderr_path.exists():
+                return
+            text = self._stderr_path.read_text(errors="replace")
+            tail = text.splitlines()[-n_lines:]
+            if tail:
+                logger.info(
+                    "engine stderr tail (last %d lines):\n%s",
+                    len(tail),
+                    "\n".join(tail),
+                )
+        except OSError:
+            pass
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
