@@ -78,30 +78,13 @@ version = "0.1"
 [dependencies.bytes]
 version = "1.7"
 
-[dependencies.tonic-tls]
-version = "0.3"
-optional = true
-
-[dependencies.tracing-opentelemetry]
-version = "0.27"
-optional = true
-
-[dependencies.opentelemetry]
-version = "0.27"
-features = ["trace"]
-optional = true
-
-[dependencies.opentelemetry_sdk]
-version = "0.27"
-features = ["trace", "rt-tokio"]
-optional = true
-
-[dependencies.opentelemetry-otlp]
-version = "0.27"
-features = ["trace", "grpc-tonic"]
-optional = true
+# F-062 audit closure: removed dead `otlp` and `tls` feature flags +
+# their optional deps. They were declared but never referenced in
+# code (no #[cfg(feature = "otlp")] / "tls" anywhere). The deps stayed
+# unconditional in Cargo's resolution graph anyway since features
+# were never activated, making them pure manifest noise. When TLS or
+# OTLP land for real they can be re-added with a matching wiring in
+# main.rs.
 
 [features]
 default = []
-otlp = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
-tls = ["dep:tonic-tls"]

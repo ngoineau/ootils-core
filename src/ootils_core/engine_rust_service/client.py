@@ -63,7 +63,21 @@ class EngineClient:
     @classmethod
     def connect(cls, addr: str = "127.0.0.1:50051") -> "EngineClient":
         """Open an insecure channel — phase 6 ships local dev/test only.
-        Phase 8 production rollout adds TLS + auth."""
+        Phase 8 production rollout adds TLS + auth.
+
+        F-055 docs: `addr` accepts any string grpc.insecure_channel
+        understands. The supported forms are:
+          - "host:port"                  (default DNS resolution)
+          - "dns:host:port"              (explicit DNS scheme)
+          - "ipv4:1.2.3.4:5000"          (literal IPv4)
+          - "ipv6:[::1]:5000"            (literal IPv6)
+          - "unix:/path/to/socket.sock"  (POSIX UDS — not on Windows)
+          - "unix-abstract:engine"       (Linux abstract socket)
+        The engine's listen address is "host:port" via OOTILS_ENGINE_LISTEN.
+        Other URIs are useful for sidecar-style deployments (UDS) but
+        require matching server-side listener config.
+        """
+        logger.debug("EngineClient.connect addr=%s (256MB msg cap)", addr)
         channel = grpc.insecure_channel(
             addr,
             options=[

@@ -40,6 +40,14 @@ struct Cli {
     #[arg(long, env = "OOTILS_ENGINE_LISTEN", default_value = "127.0.0.1:50051")]
     listen: SocketAddr,
 
+    /// Log filter (tracing-subscriber EnvFilter syntax).
+    ///
+    /// F-047: when RUST_LOG is set by the operator (common in
+    /// containerized prod to reduce noise), the entire default
+    /// "info,ootils_engine=debug" is replaced — NOT merged. To keep
+    /// debug-level for the engine while silencing the rest, use
+    /// `RUST_LOG=warn,ootils_engine=debug`. The default below applies
+    /// only when RUST_LOG is unset.
     #[arg(long, env = "RUST_LOG", default_value = "info,ootils_engine=debug")]
     log: String,
 
@@ -97,12 +105,20 @@ struct Cli {
     /// explicitly via this flag or `OOTILS_ALLOW_EMPTY_BASELINE=1`.
     #[arg(long, env = "OOTILS_ALLOW_EMPTY_BASELINE", default_value_t = false)]
     allow_empty_baseline: bool,
+
+    /// Log output format. `text` = human-readable (dev default);
+    /// `json` = one JSON object per line (prod default — log
+    /// aggregators parse it natively). F-061 audit closure: the
+    /// json feature of tracing-subscriber was pulled in but never
+    /// wired; this flag activates it.
+    #[arg(long, env = "OOTILS_LOG_FORMAT", default_value = "text")]
+    log_format: String,
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(&cli.log);
+    init_tracing(&cli.log, &cli.log_format)?;
     let boot_time = Instant::now();
 
     info!(
@@ -382,13 +398,37 @@ fn run_bench_fork(graph_lock: &Arc<RwLock<state::Graph>>, n: usize) {
     );
 }
 
-fn init_tracing(filter: &str) {
+fn init_tracing(filter: &str, format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt::layer().with_target(true).with_thread_ids(false))
-        .init();
+    match format.to_ascii_lowercase().as_str() {
+        "text" => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().with_target(true).with_thread_ids(false))
+                .init();
+        }
+        "json" => {
+            // F-061 audit closure: prod default. One JSON object per
+            // line; log aggregators (Loki/Splunk/CloudWatch) parse it
+            // natively without regex.
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_target(true)
+                        .with_thread_ids(false)
+                        .with_current_span(true),
+                )
+                .init();
+        }
+        other => anyhow::bail!(
+            "OOTILS_LOG_FORMAT={:?} not recognized — use \"text\" or \"json\"",
+            other
+        ),
+    }
+    Ok(())
 }
 
 /// F-017: redact the password component of a Postgres DSN so logs +
