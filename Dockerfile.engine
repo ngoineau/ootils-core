@@ -25,7 +25,7 @@
 # F-020: aligned with the workspace's rust-version (1.82). 1.85 gives
 # us slightly newer std additions but the MSRV declared in Cargo.toml
 # is the source of truth. Pin a digest in production releases.
-FROM rust:1.82-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # We don't need clang/cmake/etc — pure Rust deps. But protoc-bin-vendored
 # expects glibc-style binaries; the slim image has them.
