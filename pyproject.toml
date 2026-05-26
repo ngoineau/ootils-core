@@ -43,7 +43,7 @@ forecast = [
     "statsforecast ~= 2.0",
     "mlforecast ~= 1.0",
     "lightgbm ~= 4.0",
-    "pandas ~= 2.3",
+    "pandas >= 2.3,< 4.0",
 ]
 
 [tool.setuptools.packages.find]
