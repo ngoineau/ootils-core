@@ -33,12 +33,37 @@
 - **Ephemeral only.** Scenarios live in engine RAM, evicted by TTL
   (default 1 h idle). No persistence. P2.2 lands the "Save as named
   scenario" PG-backed flow.
-- **No GetNode-from-scenario.** Reads via `GetNode(scenario_id=X)`
-  currently route to baseline only. Scenario state is observable
-  only via the propagation result. P2.1.f extends GetNode.
+- ~~**No GetNode-from-scenario.**~~ ✅ Resolved in P3.1.
 - **No scenario merge against modified baseline.** If the baseline
   has mutated since the fork, `MergeScenario` applies the overlay
   blindly. Conflict detection lands in P2.2.c.
+
+## P3 (agent-first) extensions — implemented
+
+Phase 3 added agent-friendly capabilities for AI planner agents
+(MCTS, simulated annealing, multi-step reasoning) — the target
+audience per Q4 design decision.
+
+| Phase | Capability | Status |
+|---|---|---|
+| P3.1 | `GetNode(scenario_id=X)` overlay-aware reads | ✅ |
+| P3.2 | `PropagateBatch` — N events / 1 RPC | ✅ |
+| P3.4 | `HeartbeatScenario` + per-scenario `ttl_seconds` | ✅ |
+| P3.5 | Fork-from-scenario (MCTS tree branching) | ✅ |
+| P3.6 | Agent workload bench + tests | ✅ |
+
+### Measured agent envelope (8-core Windows dev box)
+
+Full agent decision cycle = fork sandbox + batch propagate 10 events
++ read result + fork MCTS branch + batch propagate 3 events + cleanup:
+- p50 = **12.45 ms** per full cycle
+- p95 = 20.4 ms
+- 65 cycles/sec per agent
+- 3254 events/sec total (5 agents in parallel)
+
+Per-event cost inside a batch = 0.225 ms — the batch RPC saves the
+gRPC handshake overhead (~5 ms) that would otherwise dominate
+short-batch agent loops.
 
 ---
 

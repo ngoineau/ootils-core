@@ -25,6 +25,36 @@ class PropagateRequest(_message.Message):
     payload: bytes
     def __init__(self, scenario_id: _Optional[str] = ..., event_id: _Optional[str] = ..., event_type: _Optional[str] = ..., trigger_node_id: _Optional[str] = ..., payload: _Optional[bytes] = ...) -> None: ...
 
+class PropagateBatchRequest(_message.Message):
+    __slots__ = ("scenario_id", "events")
+    SCENARIO_ID_FIELD_NUMBER: _ClassVar[int]
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    scenario_id: str
+    events: _containers.RepeatedCompositeFieldContainer[BatchEvent]
+    def __init__(self, scenario_id: _Optional[str] = ..., events: _Optional[_Iterable[_Union[BatchEvent, _Mapping]]] = ...) -> None: ...
+
+class BatchEvent(_message.Message):
+    __slots__ = ("event_id", "event_type", "trigger_node_id", "payload")
+    EVENT_ID_FIELD_NUMBER: _ClassVar[int]
+    EVENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    TRIGGER_NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    event_id: str
+    event_type: str
+    trigger_node_id: str
+    payload: bytes
+    def __init__(self, event_id: _Optional[str] = ..., event_type: _Optional[str] = ..., trigger_node_id: _Optional[str] = ..., payload: _Optional[bytes] = ...) -> None: ...
+
+class PropagateBatchResponse(_message.Message):
+    __slots__ = ("results", "failed_at_index", "failure_detail")
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    FAILED_AT_INDEX_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_DETAIL_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedCompositeFieldContainer[PropagateResponse]
+    failed_at_index: int
+    failure_detail: str
+    def __init__(self, results: _Optional[_Iterable[_Union[PropagateResponse, _Mapping]]] = ..., failed_at_index: _Optional[int] = ..., failure_detail: _Optional[str] = ...) -> None: ...
+
 class PropagateResponse(_message.Message):
     __slots__ = ("calc_run_id", "nodes_processed", "nodes_changed", "shortages_detected", "timing")
     CALC_RUN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -54,12 +84,26 @@ class EngineTiming(_message.Message):
     def __init__(self, dirty_expand_us: _Optional[float] = ..., compute_us: _Optional[float] = ..., shortage_detect_us: _Optional[float] = ..., wal_fsync_us: _Optional[float] = ..., total_us: _Optional[float] = ...) -> None: ...
 
 class ForkRequest(_message.Message):
-    __slots__ = ("parent_scenario_id", "name")
+    __slots__ = ("parent_scenario_id", "name", "ttl_seconds")
     PARENT_SCENARIO_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
+    TTL_SECONDS_FIELD_NUMBER: _ClassVar[int]
     parent_scenario_id: str
     name: str
-    def __init__(self, parent_scenario_id: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+    ttl_seconds: int
+    def __init__(self, parent_scenario_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ...) -> None: ...
+
+class HeartbeatRequest(_message.Message):
+    __slots__ = ("scenario_id",)
+    SCENARIO_ID_FIELD_NUMBER: _ClassVar[int]
+    scenario_id: str
+    def __init__(self, scenario_id: _Optional[str] = ...) -> None: ...
+
+class HeartbeatResponse(_message.Message):
+    __slots__ = ("idle_seconds_before",)
+    IDLE_SECONDS_BEFORE_FIELD_NUMBER: _ClassVar[int]
+    idle_seconds_before: int
+    def __init__(self, idle_seconds_before: _Optional[int] = ...) -> None: ...
 
 class MergeRequest(_message.Message):
     __slots__ = ("scenario_id", "target_scenario_id")

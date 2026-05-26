@@ -31,10 +31,34 @@ class EngineStub(object):
     ootils.engine.v1 — gRPC contract between Python (FastAPI) and the Rust
     in-memory engine service (ADR-017 Architecture B).
 
-    This is the ONLY interface between the two processes. Any new operation
-    must be added here first, then implemented on both sides. Breaking
-    changes follow the v1 → v2 evolution rule (new package, kept side by
-    side until all clients migrate).
+    # Evolution policy (F-059 audit closure)
+
+    ALLOWED inside v1 (additive, backward-compatible):
+    - New `rpc` methods on the Engine service.
+    - New fields in existing messages (use a fresh field number,
+    do NOT reuse retired numbers).
+    - New enum values appended at the end of an enum.
+    - New message types.
+
+    REQUIRES v2 (new package `ootils.engine.v2`, both run side-by-side
+    during migration):
+    - Removing or renaming an rpc method.
+    - Removing or renaming a field, OR repurposing a field number.
+    - Changing a field's type (e.g. int64 → string).
+    - Reordering oneof members, removing oneof members.
+    - Changing a counter's signedness (e.g. F-042: int64 → uint64
+    for ootils_engine_events_total et al. is a breaking change —
+    deferred to v2 alongside the pagination work for ListScenarios
+    [F-054]).
+
+    Counter types in v1 use int64 for backward-compat. Treat them as
+    unsigned in practice (counters never decrement). At ~2^63 events
+    = thousands of years at 5K events/s — the v2 migration timeline
+    is not pressured by this.
+
+    This is the ONLY interface between the two processes. Any new
+    operation must be added here first, then implemented on both
+    sides.
     ============================================================================
 
     -------------------------------------------------------------------- //
@@ -53,10 +77,20 @@ class EngineStub(object):
                 request_serializer=engine__pb2.PropagateRequest.SerializeToString,
                 response_deserializer=engine__pb2.PropagateResponse.FromString,
                 _registered_method=True)
+        self.PropagateBatch = channel.unary_unary(
+                '/ootils.engine.v1.Engine/PropagateBatch',
+                request_serializer=engine__pb2.PropagateBatchRequest.SerializeToString,
+                response_deserializer=engine__pb2.PropagateBatchResponse.FromString,
+                _registered_method=True)
         self.ForkScenario = channel.unary_unary(
                 '/ootils.engine.v1.Engine/ForkScenario',
                 request_serializer=engine__pb2.ForkRequest.SerializeToString,
                 response_deserializer=engine__pb2.ScenarioInfo.FromString,
+                _registered_method=True)
+        self.HeartbeatScenario = channel.unary_unary(
+                '/ootils.engine.v1.Engine/HeartbeatScenario',
+                request_serializer=engine__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=engine__pb2.HeartbeatResponse.FromString,
                 _registered_method=True)
         self.MergeScenario = channel.unary_unary(
                 '/ootils.engine.v1.Engine/MergeScenario',
@@ -105,10 +139,34 @@ class EngineServicer(object):
     ootils.engine.v1 — gRPC contract between Python (FastAPI) and the Rust
     in-memory engine service (ADR-017 Architecture B).
 
-    This is the ONLY interface between the two processes. Any new operation
-    must be added here first, then implemented on both sides. Breaking
-    changes follow the v1 → v2 evolution rule (new package, kept side by
-    side until all clients migrate).
+    # Evolution policy (F-059 audit closure)
+
+    ALLOWED inside v1 (additive, backward-compatible):
+    - New `rpc` methods on the Engine service.
+    - New fields in existing messages (use a fresh field number,
+    do NOT reuse retired numbers).
+    - New enum values appended at the end of an enum.
+    - New message types.
+
+    REQUIRES v2 (new package `ootils.engine.v2`, both run side-by-side
+    during migration):
+    - Removing or renaming an rpc method.
+    - Removing or renaming a field, OR repurposing a field number.
+    - Changing a field's type (e.g. int64 → string).
+    - Reordering oneof members, removing oneof members.
+    - Changing a counter's signedness (e.g. F-042: int64 → uint64
+    for ootils_engine_events_total et al. is a breaking change —
+    deferred to v2 alongside the pagination work for ListScenarios
+    [F-054]).
+
+    Counter types in v1 use int64 for backward-compat. Treat them as
+    unsigned in practice (counters never decrement). At ~2^63 events
+    = thousands of years at 5K events/s — the v2 migration timeline
+    is not pressured by this.
+
+    This is the ONLY interface between the two processes. Any new
+    operation must be added here first, then implemented on both
+    sides.
     ============================================================================
 
     -------------------------------------------------------------------- //
@@ -125,8 +183,34 @@ class EngineServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PropagateBatch(self, request, context):
+        """P3.2 (agent-first): batch variant. Apply N events sequentially
+        against the same scenario in a single round-trip. Each event is
+        processed serially (per-scenario lock semantics preserved), but
+        the gRPC handshake + tokio dispatch happens once. For agents
+        exploring N variations of a decision, this collapses N RPCs
+        into one. Returns per-event results so the agent can extract
+        individual outcomes.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ForkScenario(self, request, context):
-        """Fork a scenario via copy-on-write. Sub-50ms target on any profile.
+        """Fork a scenario via copy-on-write. Sub-µs since ArcSwap (P2.1.a).
+        If `parent_scenario_id` is empty or the baseline UUID, forks from
+        current baseline. Otherwise forks from the named scenario,
+        inheriting its overlay (P3.5 — agent MCTS tree branching).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def HeartbeatScenario(self, request, context):
+        """P3.4 (agent-first): bump last_accessed_at on a scenario so the
+        TTL eviction won't drop it. Use this for long-running agent
+        sessions that have idle gaps > TTL (e.g., a batch agent
+        pausing for human review).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -208,10 +292,20 @@ def add_EngineServicer_to_server(servicer, server):
                     request_deserializer=engine__pb2.PropagateRequest.FromString,
                     response_serializer=engine__pb2.PropagateResponse.SerializeToString,
             ),
+            'PropagateBatch': grpc.unary_unary_rpc_method_handler(
+                    servicer.PropagateBatch,
+                    request_deserializer=engine__pb2.PropagateBatchRequest.FromString,
+                    response_serializer=engine__pb2.PropagateBatchResponse.SerializeToString,
+            ),
             'ForkScenario': grpc.unary_unary_rpc_method_handler(
                     servicer.ForkScenario,
                     request_deserializer=engine__pb2.ForkRequest.FromString,
                     response_serializer=engine__pb2.ScenarioInfo.SerializeToString,
+            ),
+            'HeartbeatScenario': grpc.unary_unary_rpc_method_handler(
+                    servicer.HeartbeatScenario,
+                    request_deserializer=engine__pb2.HeartbeatRequest.FromString,
+                    response_serializer=engine__pb2.HeartbeatResponse.SerializeToString,
             ),
             'MergeScenario': grpc.unary_unary_rpc_method_handler(
                     servicer.MergeScenario,
@@ -266,10 +360,34 @@ class Engine(object):
     ootils.engine.v1 — gRPC contract between Python (FastAPI) and the Rust
     in-memory engine service (ADR-017 Architecture B).
 
-    This is the ONLY interface between the two processes. Any new operation
-    must be added here first, then implemented on both sides. Breaking
-    changes follow the v1 → v2 evolution rule (new package, kept side by
-    side until all clients migrate).
+    # Evolution policy (F-059 audit closure)
+
+    ALLOWED inside v1 (additive, backward-compatible):
+    - New `rpc` methods on the Engine service.
+    - New fields in existing messages (use a fresh field number,
+    do NOT reuse retired numbers).
+    - New enum values appended at the end of an enum.
+    - New message types.
+
+    REQUIRES v2 (new package `ootils.engine.v2`, both run side-by-side
+    during migration):
+    - Removing or renaming an rpc method.
+    - Removing or renaming a field, OR repurposing a field number.
+    - Changing a field's type (e.g. int64 → string).
+    - Reordering oneof members, removing oneof members.
+    - Changing a counter's signedness (e.g. F-042: int64 → uint64
+    for ootils_engine_events_total et al. is a breaking change —
+    deferred to v2 alongside the pagination work for ListScenarios
+    [F-054]).
+
+    Counter types in v1 use int64 for backward-compat. Treat them as
+    unsigned in practice (counters never decrement). At ~2^63 events
+    = thousands of years at 5K events/s — the v2 migration timeline
+    is not pressured by this.
+
+    This is the ONLY interface between the two processes. Any new
+    operation must be added here first, then implemented on both
+    sides.
     ============================================================================
 
     -------------------------------------------------------------------- //
@@ -305,6 +423,33 @@ class Engine(object):
             _registered_method=True)
 
     @staticmethod
+    def PropagateBatch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ootils.engine.v1.Engine/PropagateBatch',
+            engine__pb2.PropagateBatchRequest.SerializeToString,
+            engine__pb2.PropagateBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def ForkScenario(request,
             target,
             options=(),
@@ -321,6 +466,33 @@ class Engine(object):
             '/ootils.engine.v1.Engine/ForkScenario',
             engine__pb2.ForkRequest.SerializeToString,
             engine__pb2.ScenarioInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def HeartbeatScenario(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ootils.engine.v1.Engine/HeartbeatScenario',
+            engine__pb2.HeartbeatRequest.SerializeToString,
+            engine__pb2.HeartbeatResponse.FromString,
             options,
             channel_credentials,
             insecure,
