@@ -213,9 +213,27 @@ impl Engine for EngineSvc {
         } else {
             q.name
         };
-        // Phase 4: forks are always from baseline. Parent-scenario forks
-        // (forking a fork) is a phase-5 elaboration.
-        let (scenario, stats) = self.scenarios.fork_from_baseline(name.clone(), &self.baseline);
+
+        // P3.4 + P3.5: branch on parent_scenario_id.
+        //   empty or baseline UUID → fork from baseline (P2.1.a path)
+        //   any other UUID → fork from named scenario (P3.5 MCTS)
+        let ttl = q.ttl_seconds as u64;
+        let (scenario, stats) = if q.parent_scenario_id.is_empty() {
+            self.scenarios.fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
+        } else {
+            let parent_uuid = Uuid::from_str(&q.parent_scenario_id).map_err(|e| {
+                Status::invalid_argument(format!("bad parent_scenario_id: {e}"))
+            })?;
+            if parent_uuid == crate::loader::BASELINE_SCENARIO_ID {
+                self.scenarios.fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
+            } else {
+                self.scenarios
+                    .fork_from_scenario(name.clone(), parent_uuid, ttl)
+                    .ok_or_else(|| {
+                        Status::not_found(format!("parent scenario {parent_uuid} not found"))
+                    })?
+            }
+        };
         self.metrics.record_fork();
         self.metrics
             .active_scenarios
@@ -264,6 +282,28 @@ impl Engine for EngineSvc {
         info!(scenario_id = %sid, overlay_entries, "scenario deleted (F-038)");
         Ok(Response::new(DeleteResult {
             overlay_entries_freed: overlay_entries,
+        }))
+    }
+
+    async fn heartbeat_scenario(
+        &self,
+        req: Request<HeartbeatRequest>,
+    ) -> Result<Response<HeartbeatResponse>, Status> {
+        // P3.4 (agent-first): keep-alive for long-running agent
+        // sessions. Bumps last_accessed_at so the TTL scanner won't
+        // drop the scenario. Returns the prior idle time so the
+        // agent can monitor its own staleness.
+        let q = req.into_inner();
+        let sid = Uuid::from_str(&q.scenario_id)
+            .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+        let scenario = self
+            .scenarios
+            .get(&sid)
+            .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
+        let idle = scenario.idle_seconds();
+        scenario.touch_accessed();
+        Ok(Response::new(HeartbeatResponse {
+            idle_seconds_before: idle,
         }))
     }
 
@@ -330,14 +370,57 @@ impl Engine for EngineSvc {
         &self,
         req: Request<NodeQuery>,
     ) -> Result<Response<NodeState>, Status> {
+        // P3.1 (agent-first): GetNode is now overlay-aware. If
+        // scenario_id refers to a forked scenario, read first from
+        // its overlay (post-propagation values) and fall back to the
+        // baseline snapshot for nodes the scenario hasn't touched.
+        // This lets an agent that propagated a what-if scenario read
+        // back the result via GetNode — the obvious agentic pattern.
         let q = req.into_inner();
         let node_id = Uuid::from_str(&q.node_id)
             .map_err(|e| Status::invalid_argument(format!("bad node_id: {e}")))?;
 
-        let g = self.baseline.load_full();
-        let node = g
-            .get_node(&node_id)
-            .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?;
+        // Resolve target scenario (baseline if empty / canonical UUID).
+        let scenario_opt: Option<Arc<crate::scenario::Scenario>> = if q.scenario_id.is_empty() {
+            None
+        } else {
+            let req_sid = Uuid::from_str(&q.scenario_id)
+                .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+            if req_sid == crate::loader::BASELINE_SCENARIO_ID {
+                None
+            } else {
+                Some(
+                    self.scenarios.get(&req_sid).ok_or_else(|| {
+                        Status::not_found(format!("scenario {req_sid} not found"))
+                    })?,
+                )
+            }
+        };
+
+        // Fetch the node — overlay-aware if we have a scenario.
+        let node = match &scenario_opt {
+            None => {
+                let g = self.baseline.load_full();
+                g.get_node(&node_id)
+                    .cloned()
+                    .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?
+            }
+            Some(scenario) => {
+                scenario.touch_accessed();
+                // Translate node_id → NodeIndex via the snapshot's
+                // by_node_id (immutable across forks). Then check
+                // overlay first, fall back to snapshot.
+                let idx = scenario
+                    .baseline_snapshot
+                    .by_node_id
+                    .get(&node_id)
+                    .copied()
+                    .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?;
+                scenario
+                    .get_node_cloned(idx)
+                    .ok_or_else(|| Status::not_found(format!("node {node_id} not found")))?
+            }
+        };
 
         Ok(Response::new(NodeState {
             node_id: node.node_id.to_string(),
@@ -575,6 +658,99 @@ impl Engine for EngineSvc {
         }))
     }
 
+    async fn propagate_batch(
+        &self,
+        req: Request<PropagateBatchRequest>,
+    ) -> Result<Response<PropagateBatchResponse>, Status> {
+        // P3.2 (agent-first): apply N events sequentially to one
+        // scenario in a single RPC. The per-scenario lock is held
+        // for the whole batch so no other call interleaves mid-batch.
+        // For agents exploring N variations, this collapses N RPCs
+        // into one (saves gRPC handshake + tokio spawn overhead).
+        let q = req.into_inner();
+
+        if q.events.is_empty() {
+            return Ok(Response::new(PropagateBatchResponse {
+                results: Vec::new(),
+                failed_at_index: -1,
+                failure_detail: String::new(),
+            }));
+        }
+
+        // Resolve scenario (None = baseline).
+        let target_scenario: Option<Arc<crate::scenario::Scenario>> =
+            if q.scenario_id.is_empty() {
+                None
+            } else {
+                let req_sid = Uuid::from_str(&q.scenario_id)
+                    .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+                if req_sid == crate::loader::BASELINE_SCENARIO_ID {
+                    None
+                } else {
+                    Some(self.scenarios.get(&req_sid).ok_or_else(|| {
+                        Status::not_found(format!("scenario {req_sid} not found"))
+                    })?)
+                }
+            };
+
+        let baseline = self.baseline.clone();
+        let writeback = self.writeback.clone();
+        let metrics = self.metrics.clone();
+        let prop_lock = self.propagation_lock.clone();
+        let events = q.events;
+        let scenario_id_str = q.scenario_id.clone();
+
+        let batch_outcome = tokio::task::spawn_blocking(
+            move || -> (Vec<PropagateResponse>, i32, String) {
+                let mut results = Vec::with_capacity(events.len());
+                // Single lock acquisition for the whole batch.
+                let n = events.len();
+                if let Some(scenario) = target_scenario.as_ref() {
+                    let _g = scenario.propagation_lock.lock();
+                    scenario.touch_accessed();
+                    for (i, ev) in events.into_iter().enumerate() {
+                        match apply_one_scenario(scenario.as_ref(), &ev, &scenario_id_str) {
+                            Ok(resp) => results.push(resp),
+                            Err(status) => {
+                                return (
+                                    results,
+                                    i as i32,
+                                    format!("event #{} of {}: {}: {}", i, n, status.code(), status.message()),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let _g = prop_lock.lock();
+                    for (i, ev) in events.into_iter().enumerate() {
+                        match apply_one_baseline(&baseline, &writeback, &metrics, &ev) {
+                            Ok(resp) => results.push(resp),
+                            Err(status) => {
+                                return (
+                                    results,
+                                    i as i32,
+                                    format!("event #{} of {}: {}: {}", i, n, status.code(), status.message()),
+                                );
+                            }
+                        }
+                    }
+                }
+                (results, -1, String::new())
+            },
+        )
+        .await;
+
+        let (results, failed_at, detail) = batch_outcome.map_err(|e| {
+            Status::internal(format!("propagate_batch worker failed: {e}"))
+        })?;
+
+        Ok(Response::new(PropagateBatchResponse {
+            results,
+            failed_at_index: failed_at,
+            failure_detail: detail,
+        }))
+    }
+
     async fn query_shortages(
         &self,
         _req: Request<ShortagesQuery>,
@@ -592,4 +768,187 @@ impl Engine for EngineSvc {
             "stream_changes is not implemented yet — see ADR-017 phase 7",
         ))
     }
+}
+
+// ============================================================
+// P3.2 batch helpers — apply one event with the lock already held by
+// the caller. Mirrors the per-call propagate() but stripped of the
+// lock + spawn_blocking machinery (the batch handler does that once).
+// ============================================================
+
+fn apply_one_scenario(
+    scenario: &crate::scenario::Scenario,
+    ev: &BatchEvent,
+    scenario_id_str: &str,
+) -> Result<PropagateResponse, Status> {
+    let t_total = Instant::now();
+    let cr_uuid = if ev.event_id.is_empty() {
+        Uuid::new_v4()
+    } else {
+        Uuid::parse_str(&ev.event_id)
+            .map_err(|e| Status::invalid_argument(format!("bad event_id: {e}")))?
+    };
+    let trigger_id = Uuid::from_str(&ev.trigger_node_id)
+        .map_err(|e| Status::invalid_argument(format!("bad trigger_node_id: {e}")))?;
+
+    let mut dirty = HashSet::new();
+    {
+        let g = &scenario.baseline_snapshot;
+        if let Some(node) = g.get_node(&trigger_id) {
+            if let (Some(item), Some(loc)) = (node.item_id, node.location_id) {
+                if let Some(pis) = g.by_item_location.get(&(item, loc)) {
+                    for &idx in pis {
+                        let n = &g.nodes[idx as usize];
+                        if n.node_type == NodeType::ProjectedInventory && n.is_active() {
+                            dirty.insert(idx);
+                        }
+                    }
+                }
+            }
+        } else {
+            return Err(Status::not_found(format!(
+                "trigger_node_id {trigger_id} not found in scenario {scenario_id_str}"
+            )));
+        }
+    }
+
+    if dirty.is_empty() {
+        let total_us = t_total.elapsed().as_micros() as f64;
+        return Ok(PropagateResponse {
+            calc_run_id: cr_uuid.to_string(),
+            nodes_processed: 0,
+            nodes_changed: 0,
+            shortages_detected: 0,
+            timing: Some(EngineTiming {
+                dirty_expand_us: 0.0,
+                compute_us: 0.0,
+                shortage_detect_us: 0.0,
+                wal_fsync_us: 0.0,
+                total_us,
+            }),
+        });
+    }
+
+    let computed = propagator::plan_compute_scenario(scenario, &dirty);
+    let stats = propagator::apply_scenario(scenario, computed, &dirty);
+    let total_us = t_total.elapsed().as_micros() as f64;
+
+    Ok(PropagateResponse {
+        calc_run_id: cr_uuid.to_string(),
+        nodes_processed: stats.n_processed as i32,
+        nodes_changed: stats.n_changed as i32,
+        shortages_detected: stats.n_shortages as i32,
+        timing: Some(EngineTiming {
+            dirty_expand_us: 0.0,
+            compute_us: stats.compute_us as f64,
+            shortage_detect_us: 0.0,
+            wal_fsync_us: 0.0,
+            total_us,
+        }),
+    })
+}
+
+fn apply_one_baseline(
+    baseline: &Arc<ArcSwap<Graph>>,
+    writeback: &Arc<WriteBehindQueue>,
+    metrics: &Arc<Metrics>,
+    ev: &BatchEvent,
+) -> Result<PropagateResponse, Status> {
+    let t_total = Instant::now();
+    let cr_uuid = if ev.event_id.is_empty() {
+        Uuid::new_v4()
+    } else {
+        Uuid::parse_str(&ev.event_id)
+            .map_err(|e| Status::invalid_argument(format!("bad event_id: {e}")))?
+    };
+    let trigger_id = Uuid::from_str(&ev.trigger_node_id)
+        .map_err(|e| Status::invalid_argument(format!("bad trigger_node_id: {e}")))?;
+
+    let snapshot_for_dirty = baseline.load_full();
+    let mut dirty = HashSet::new();
+    if let Some(node) = snapshot_for_dirty.get_node(&trigger_id) {
+        if let (Some(item), Some(loc)) = (node.item_id, node.location_id) {
+            if let Some(pis) = snapshot_for_dirty.by_item_location.get(&(item, loc)) {
+                for &idx in pis {
+                    let n = &snapshot_for_dirty.nodes[idx as usize];
+                    if n.node_type == NodeType::ProjectedInventory && n.is_active() {
+                        dirty.insert(idx);
+                    }
+                }
+            }
+        }
+    } else {
+        return Err(Status::not_found(format!(
+            "trigger_node_id {trigger_id} not found"
+        )));
+    }
+
+    if dirty.is_empty() {
+        let total_us = t_total.elapsed().as_micros() as f64;
+        return Ok(PropagateResponse {
+            calc_run_id: cr_uuid.to_string(),
+            nodes_processed: 0,
+            nodes_changed: 0,
+            shortages_detected: 0,
+            timing: Some(EngineTiming {
+                dirty_expand_us: 0.0,
+                compute_us: 0.0,
+                shortage_detect_us: 0.0,
+                wal_fsync_us: 0.0,
+                total_us,
+            }),
+        });
+    }
+
+    let snapshot = baseline.load_full();
+    let computed = propagator::plan_compute(&snapshot, &dirty);
+    let mut new_graph: Graph = (*snapshot).clone();
+    drop(snapshot);
+    let stats = propagator::apply(&mut new_graph, computed, &dirty);
+    baseline.store(Arc::new(new_graph));
+
+    let mut wal_fsync_us = 0.0;
+    if !stats.deltas.is_empty() {
+        let t_wal = Instant::now();
+        let record = make_record(cr_uuid, crate::loader::BASELINE_SCENARIO_ID, stats.deltas.clone());
+        let assigned_seq = match writeback.wal().append(&record) {
+            Ok(s) => s,
+            Err(e) => {
+                metrics.record_failure();
+                if let Some(full) = e.downcast_ref::<crate::wal::WalFull>() {
+                    return Err(Status::resource_exhausted(full.to_string()));
+                }
+                return Err(Status::internal(format!("WAL append failed: {e}")));
+            }
+        };
+        wal_fsync_us = t_wal.elapsed().as_micros() as f64;
+        metrics
+            .wal_appends_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pending: Vec<PendingDelta> = stats
+            .deltas
+            .iter()
+            .cloned()
+            .map(|d| PendingDelta::from_delta(assigned_seq, d))
+            .collect();
+        if let Err(full) = writeback.try_push(pending) {
+            metrics.record_failure();
+            return Err(Status::resource_exhausted(full.to_string()));
+        }
+    }
+
+    let total_us = t_total.elapsed().as_micros() as f64;
+    Ok(PropagateResponse {
+        calc_run_id: cr_uuid.to_string(),
+        nodes_processed: stats.n_processed as i32,
+        nodes_changed: stats.n_changed as i32,
+        shortages_detected: stats.n_shortages as i32,
+        timing: Some(EngineTiming {
+            dirty_expand_us: 0.0,
+            compute_us: stats.compute_us as f64,
+            shortage_detect_us: 0.0,
+            wal_fsync_us,
+            total_us,
+        }),
+    })
 }

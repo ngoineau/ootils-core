@@ -49,8 +49,26 @@ service Engine {
   // forget; the caller never waits for it.
   rpc Propagate(PropagateRequest) returns (PropagateResponse);
 
-  // Fork a scenario via copy-on-write. Sub-50ms target on any profile.
+  // P3.2 (agent-first): batch variant. Apply N events sequentially
+  // against the same scenario in a single round-trip. Each event is
+  // processed serially (per-scenario lock semantics preserved), but
+  // the gRPC handshake + tokio dispatch happens once. For agents
+  // exploring N variations of a decision, this collapses N RPCs
+  // into one. Returns per-event results so the agent can extract
+  // individual outcomes.
+  rpc PropagateBatch(PropagateBatchRequest) returns (PropagateBatchResponse);
+
+  // Fork a scenario via copy-on-write. Sub-µs since ArcSwap (P2.1.a).
+  // If `parent_scenario_id` is empty or the baseline UUID, forks from
+  // current baseline. Otherwise forks from the named scenario,
+  // inheriting its overlay (P3.5 — agent MCTS tree branching).
   rpc ForkScenario(ForkRequest) returns (ScenarioInfo);
+
+  // P3.4 (agent-first): bump last_accessed_at on a scenario so the
+  // TTL eviction won't drop it. Use this for long-running agent
+  // sessions that have idle gaps > TTL (e.g., a batch agent
+  // pausing for human review).
+  rpc HeartbeatScenario(HeartbeatRequest) returns (HeartbeatResponse);
 
   // Merge a scenario's overlay back into the baseline. Atomic via arc-swap.
   rpc MergeScenario(MergeRequest) returns (MergeResult);
@@ -100,6 +118,32 @@ message PropagateRequest {
   bytes payload = 5;
 }
 
+// P3.2 (agent-first) batch propagation. All events are applied to
+// the same scenario_id; the engine acquires the per-scenario lock
+// once and processes them serially. If any event errors, processing
+// stops and the response reports how many succeeded — the agent can
+// decide to retry or abort.
+message PropagateBatchRequest {
+  string scenario_id = 1;
+  repeated BatchEvent events = 2;
+}
+
+message BatchEvent {
+  string event_id = 1;
+  string event_type = 2;
+  string trigger_node_id = 3;
+  bytes payload = 4;
+}
+
+message PropagateBatchResponse {
+  repeated PropagateResponse results = 1;
+  // If processing stopped on an error, this is the 0-based index
+  // of the failing event + the error detail. results contains the
+  // successful events before this index. -1 if all succeeded.
+  int32 failed_at_index = 2;
+  string failure_detail = 3;
+}
+
 message PropagateResponse {
   string calc_run_id = 1;
   int32 nodes_processed = 2;
@@ -118,8 +162,24 @@ message EngineTiming {
 }
 
 message ForkRequest {
+  // Empty or baseline UUID → fork from baseline. Otherwise fork from
+  // the named scenario (P3.5 MCTS tree branching).
   string parent_scenario_id = 1;
   string name = 2;
+  // P3.4: agent-friendly TTL. 0 = use engine default
+  // (OOTILS_SCENARIO_TTL_SEC). Otherwise the scenario lives at least
+  // this many seconds before eviction. Useful for batch agents that
+  // know they need a longer-than-default lifetime.
+  uint32 ttl_seconds = 3;
+}
+
+message HeartbeatRequest {
+  string scenario_id = 1;
+}
+
+message HeartbeatResponse {
+  // Seconds since the scenario was last accessed before this heartbeat.
+  uint64 idle_seconds_before = 1;
 }
 
 message MergeRequest {

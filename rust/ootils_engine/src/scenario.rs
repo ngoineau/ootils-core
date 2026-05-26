@@ -50,21 +50,39 @@ pub struct Scenario {
     /// Used by the TTL eviction background task. Updated to "now"
     /// on every Propagate / GetNode / merge etc.
     pub last_accessed_at: parking_lot::Mutex<Instant>,
+    /// P3.4 (agent-first): per-scenario minimum TTL. Set at fork time
+    /// (via ForkRequest.ttl_seconds). The eviction scanner uses
+    /// `max(default_ttl, this)` so an agent that requests 6h lifetime
+    /// won't be reaped by the default 1h policy. 0 = use default.
+    pub min_ttl_seconds: u64,
 }
 
 impl Scenario {
     pub fn new(name: String, parent_id: Option<Uuid>, baseline: Arc<Graph>) -> Self {
+        Self::with_options(name, parent_id, baseline, DashMap::with_hasher(RandomState::new()), 0)
+    }
+
+    /// Full constructor used by fork paths that may inherit a parent's
+    /// overlay (P3.5) or pin a per-scenario TTL (P3.4).
+    pub fn with_options(
+        name: String,
+        parent_id: Option<Uuid>,
+        baseline: Arc<Graph>,
+        overlay: DashMap<NodeIndex, Node, RandomState>,
+        min_ttl_seconds: u64,
+    ) -> Self {
         let now_instant = Instant::now();
         Self {
             id: Uuid::new_v4(),
             name,
             parent_id,
             baseline_snapshot: baseline,
-            overlay: DashMap::with_hasher(RandomState::new()),
+            overlay,
             created_at_instant: now_instant,
             created_at_system: SystemTime::now(),
             propagation_lock: parking_lot::Mutex::new(()),
             last_accessed_at: parking_lot::Mutex::new(now_instant),
+            min_ttl_seconds,
         }
     }
 
@@ -147,26 +165,73 @@ impl ScenarioManager {
         name: String,
         baseline: &arc_swap::ArcSwap<Graph>,
     ) -> (Arc<Scenario>, ForkStats) {
+        self.fork_from_baseline_with_ttl(name, baseline, 0)
+    }
+
+    pub fn fork_from_baseline_with_ttl(
+        &self,
+        name: String,
+        baseline: &arc_swap::ArcSwap<Graph>,
+        min_ttl_seconds: u64,
+    ) -> (Arc<Scenario>, ForkStats) {
         let t0 = Instant::now();
-        // O(1) refcount bump — no deep clone. The Graph data is shared
-        // with the live baseline until the baseline is mutated, at
-        // which point ArcSwap publishes a new Arc and this Scenario
-        // continues to hold the old one (still alive via refcount).
         let snapshot: Arc<Graph> = baseline.load_full();
         let clone_ms = t0.elapsed().as_millis() as u64;
 
-        let scenario = Arc::new(Scenario::new(name, None, snapshot));
+        let scenario = Arc::new(Scenario::with_options(
+            name,
+            None,
+            snapshot,
+            DashMap::with_hasher(RandomState::new()),
+            min_ttl_seconds,
+        ));
         let id = scenario.id;
         self.scenarios.insert(id, scenario.clone());
 
         let total_ms = t0.elapsed().as_millis() as u64;
-        (
-            scenario,
-            ForkStats {
-                clone_ms,
-                total_ms,
-            },
-        )
+        (scenario, ForkStats { clone_ms, total_ms })
+    }
+
+    /// P3.5 (agent-first MCTS): fork from an existing scenario, NOT
+    /// the baseline. The new scenario inherits the parent's overlay
+    /// (deep-copied entries) + same snapshot. Lets an agent branch
+    /// its reasoning tree: explore alternative continuations from a
+    /// promising state without re-applying all the prior events.
+    pub fn fork_from_scenario(
+        &self,
+        name: String,
+        parent_id: Uuid,
+        min_ttl_seconds: u64,
+    ) -> Option<(Arc<Scenario>, ForkStats)> {
+        let t0 = Instant::now();
+        let parent = self.scenarios.get(&parent_id)?.clone();
+        parent.touch_accessed();
+
+        // Snapshot Arc is shared (refcount bump only).
+        let snapshot = parent.baseline_snapshot.clone();
+
+        // Overlay must be deep-copied: child mutations must not leak
+        // into the parent. DashMap iteration + insertion is O(N) but
+        // typical overlays are small (a handful of dirty PIs) so this
+        // is microsecond-scale in practice.
+        let child_overlay: DashMap<NodeIndex, Node, RandomState> =
+            DashMap::with_hasher(RandomState::new());
+        for entry in parent.overlay.iter() {
+            child_overlay.insert(*entry.key(), entry.value().clone());
+        }
+
+        let clone_ms = t0.elapsed().as_millis() as u64;
+        let scenario = Arc::new(Scenario::with_options(
+            name,
+            Some(parent_id),
+            snapshot,
+            child_overlay,
+            min_ttl_seconds,
+        ));
+        let id = scenario.id;
+        self.scenarios.insert(id, scenario.clone());
+        let total_ms = t0.elapsed().as_millis() as u64;
+        Some((scenario, ForkStats { clone_ms, total_ms }))
     }
 
     pub fn get(&self, id: &Uuid) -> Option<Arc<Scenario>> {
@@ -185,17 +250,19 @@ impl ScenarioManager {
         self.scenarios.len()
     }
 
-    /// P2.1.d: scan + evict scenarios idle for longer than
-    /// `ttl_seconds`. Returns the list of evicted scenario UUIDs so
-    /// the caller can update metrics + log.
-    pub fn evict_idle(&self, ttl_seconds: u64) -> Vec<Uuid> {
+    /// P2.1.d + P3.4: scan + evict scenarios idle for longer than
+    /// max(default_ttl, scenario.min_ttl_seconds). Returns evicted
+    /// UUIDs. P3.4 lets agents pin a longer-than-default lifetime
+    /// at fork time for batch sessions.
+    pub fn evict_idle(&self, default_ttl_seconds: u64) -> Vec<Uuid> {
         let mut evicted = Vec::new();
-        // Collect to-evict IDs first (can't mutate DashMap during iter).
         let to_evict: Vec<Uuid> = self
             .scenarios
             .iter()
             .filter_map(|e| {
-                if e.value().idle_seconds() >= ttl_seconds {
+                let s = e.value();
+                let effective_ttl = default_ttl_seconds.max(s.min_ttl_seconds);
+                if s.idle_seconds() >= effective_ttl {
                     Some(*e.key())
                 } else {
                     None
