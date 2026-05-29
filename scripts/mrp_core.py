@@ -199,15 +199,20 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
     # covers. A line's period runs from its date to the NEXT forecast date for
     # the same item (inferred granularity — monthly/quarterly/weekly); the qty is
     # spread proportional to day-overlap. Already-weekly forecasts => no-op.
-    raw_fc = defaultdict(list)
+    # Aggregate forecast by (item, date) FIRST: there can be several forecast
+    # nodes for the same item+date (one per location). Summing them = item-level
+    # pooled demand, and — critically — collapses duplicate dates so the
+    # period-to-next-date proration below never sees a zero-length period (which
+    # would silently drop a location's volume).
+    raw_fc = defaultdict(lambda: defaultdict(float))
     for item, tref, qty in cur.execute(
         "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
         "AND node_type='ForecastDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
-        raw_fc[item].append((tref, float(qty)))
+        raw_fc[item][tref] += float(qty)
     horizon_end = horizon_start + _dt.timedelta(days=horizon_days)
     d.fc_b = defaultdict(lambda: defaultdict(float))
-    for item, rows in raw_fc.items():
-        rows.sort(key=lambda x: x[0])
+    for item, datemap in raw_fc.items():
+        rows = sorted(datemap.items())
         gaps = [(rows[i + 1][0] - rows[i][0]).days for i in range(len(rows) - 1)
                 if (rows[i + 1][0] - rows[i][0]).days > 0]
         default_span = sorted(gaps)[len(gaps) // 2] if gaps else 7  # median gap, else weekly
