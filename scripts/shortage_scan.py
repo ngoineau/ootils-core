@@ -138,6 +138,88 @@ ORDER BY fs.balance_at_shortage ASC
 """
 
 
+REORDER_SQL = """
+WITH events AS (
+    SELECT item_id, time_ref AS d, quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE AND node_type = ANY(%(supply)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+    UNION ALL
+    SELECT item_id, time_ref AS d, -quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE AND node_type = ANY(%(demand)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+),
+running AS (
+    SELECT item_id, d,
+           SUM(q) OVER (PARTITION BY item_id ORDER BY d, q
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bal
+    FROM events
+),
+first_short AS (
+    SELECT DISTINCT ON (item_id) item_id, d AS fsd, bal
+    FROM running WHERE bal < 0 ORDER BY item_id, d
+),
+item_lt AS (
+    SELECT item_id, MIN(lead_time_days) AS lt_days
+    FROM supplier_items WHERE lead_time_days IS NOT NULL
+    GROUP BY item_id
+)
+SELECT it.external_id, it.name, fs.fsd, fs.bal, lt.lt_days,
+       (fs.fsd - CURRENT_DATE)                                AS runway_days,
+       (fs.fsd - CURRENT_DATE) - COALESCE(lt.lt_days, 99999)  AS margin_days
+FROM first_short fs
+JOIN items it ON it.item_id = fs.item_id
+LEFT JOIN item_lt lt ON lt.item_id = fs.item_id
+ORDER BY margin_days ASC
+"""
+
+
+def _classify(lt_days, runway_days, margin_days) -> str:
+    if runway_days < 0:
+        return "PAST_DUE"           # shortage date already in the past — data artifact / already happened
+    if lt_days is None:
+        return "NO_SOURCE"          # forward shortage + no supplier to reorder from
+    if margin_days >= 0:
+        return "RECOVERABLE"        # order now, arrives before shortage
+    if margin_days >= -14:
+        return "TIGHT"              # missed normal reorder by <=2wk → expedite
+    return "CRITICAL"               # forward shortage, too late via normal reorder → expedite/alt source
+
+
+def scan_reorder(conn: psycopg.Connection, top: int) -> dict:
+    cur = conn.cursor()
+    cur.execute("SET work_mem = '256MB'")
+    cur.execute("SET max_parallel_workers_per_gather = 0")
+    t0 = time.perf_counter()
+    rows = cur.execute(
+        REORDER_SQL,
+        {"b": BASELINE, "supply": list(SUPPLY_TYPES), "demand": list(DEMAND_TYPES)},
+    ).fetchall()
+    elapsed = time.perf_counter() - t0
+
+    classified = []
+    breakdown: dict[str, int] = {}
+    for ext, name, fsd, bal, lt, runway, margin in rows:
+        cls = _classify(lt, runway, margin)
+        breakdown[cls] = breakdown.get(cls, 0) + 1
+        classified.append((ext, name, fsd, bal, lt, runway, margin, cls))
+
+    # Actionable = forward-looking with a real lead time, ranked by smallest margin
+    actionable = sorted(
+        [c for c in classified if c[7] in ("CRITICAL", "TIGHT")],
+        key=lambda c: c[6],  # margin asc
+    )
+
+    return {
+        "elapsed_s": round(elapsed, 2),
+        "total_short": len(rows),
+        "breakdown": breakdown,
+        "actionable": actionable,
+        "top": top,
+    }
+
+
 def scan_by_item(conn: psycopg.Connection, top: int) -> dict:
     cur = conn.cursor()
     cur.execute("SET work_mem = '256MB'")
@@ -226,6 +308,8 @@ def main(argv=None) -> int:
                    help="comma-separated filter for the top list, e.g. 'plant,dc,warehouse'")
     p.add_argument("--by-item", action="store_true",
                    help="aggregate net supply vs demand per ITEM (ignore location)")
+    p.add_argument("--reorder", action="store_true",
+                   help="item-level + reorder feasibility (RECOVERABLE / TIGHT / CRITICAL / NO_SOURCE)")
     p.add_argument("--allow-dev", action="store_true")
     args = p.parse_args(argv)
     if not args.dsn:
@@ -235,6 +319,32 @@ def main(argv=None) -> int:
     loc_types = [t.strip() for t in args.location_types.split(",")] if args.location_types else None
 
     db = _guard(args.dsn, args.allow_dev)
+
+    # ── Reorder feasibility mode ────────────────────────────────────
+    if args.reorder:
+        logger.info("Shortage scan (REORDER feasibility): DB=%s", db)
+        with psycopg.connect(args.dsn) as conn:
+            r = scan_reorder(conn, args.top)
+        order = ["CRITICAL", "TIGHT", "RECOVERABLE", "NO_SOURCE", "PAST_DUE"]
+        logger.info("=" * 90)
+        logger.info("REORDER FEASIBILITY SCAN DONE in %.2fs", r["elapsed_s"])
+        logger.info("  Net-short items       : %d", r["total_short"])
+        logger.info("  Action classes:")
+        for cls in order:
+            n = r["breakdown"].get(cls, 0)
+            pct = (100 * n / r["total_short"]) if r["total_short"] else 0
+            logger.info("      %-12s %6d  (%4.1f%%)", cls, n, pct)
+        n_act = len(r["actionable"])
+        logger.info("  → ACTIONABLE (forward shortage, has supplier, reorder window tight/missed): %d", n_act)
+        logger.info("=" * 90)
+        logger.info("TOP %d ACTIONABLE alerts (smallest reorder margin first):", r["top"])
+        logger.info("  %-15s %-12s %12s %7s %7s %7s  %-11s %s", "item", "shortage", "net_qty", "lt_d", "runway", "margin", "class", "name")
+        for ext, name, fsd, bal, lt, runway, margin, cls in r["actionable"][: r["top"]]:
+            nm = (name or "")[:26]
+            logger.info("  %-15s %-12s %12.0f %7s %7s %7s  %-11s %s",
+                        ext, str(fsd), float(bal), str(lt), str(runway), str(margin), cls, nm)
+        logger.info("=" * 90)
+        return 0
 
     # ── Item-level aggregated mode ──────────────────────────────────
     if args.by_item:
