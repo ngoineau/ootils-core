@@ -39,6 +39,8 @@ def main(argv=None) -> int:
                    help="date a PO is attributed to: release (commit) or need (receipt)")
     p.add_argument("--rolling12", action="store_true", help="window = next 12 months instead of current calendar year")
     p.add_argument("--top", type=int, default=15)
+    p.add_argument("--by-supplier", action="store_true", help="break purchase volume/spend down by supplier")
+    p.add_argument("--top-suppliers", type=int, default=30, help="suppliers to show (<=0 = all)")
     p.add_argument("--allow-dev", action="store_true")
     args = p.parse_args(argv)
     if not args.dsn:
@@ -66,6 +68,10 @@ def main(argv=None) -> int:
     priced_orders = 0
     item_cost = defaultdict(lambda: defaultdict(float))  # item -> ccy -> cost
     item_units = defaultdict(float)
+    sup_cost = defaultdict(lambda: defaultdict(float))   # supplier -> ccy -> cost
+    sup_units = defaultdict(float)
+    sup_orders = defaultdict(int)
+    sup_items = defaultdict(set)
 
     for item, qty, rel, need, kind, pd in r["planned"]:
         if kind != "PO":
@@ -74,6 +80,7 @@ def main(argv=None) -> int:
         if not (win_start <= attr <= win_end):
             continue
         sup = d.best_sup.get(item)
+        sup_label = sup[1] if (sup and sup[1]) else "(no supplier)"
         uc = sup[3] if sup else None
         ccy = (sup[4] if sup else None)
         if uc is None:                       # chosen supplier carries no cost -> fall back
@@ -85,6 +92,9 @@ def main(argv=None) -> int:
         if uc is None:
             unpriced_units += qty
             unpriced_orders += 1
+            sup_units[sup_label] += qty      # volume still attributed to supplier
+            sup_orders[sup_label] += 1
+            sup_items[sup_label].add(item)
             continue
         ccy = ccy or "USD"
         cost = qty * float(uc)
@@ -94,6 +104,10 @@ def main(argv=None) -> int:
         priced_orders += 1
         item_cost[item][ccy] += cost
         item_units[item] += qty
+        sup_cost[sup_label][ccy] += cost
+        sup_units[sup_label] += qty
+        sup_orders[sup_label] += 1
+        sup_items[sup_label].add(item)
 
     tot_orders = priced_orders + unpriced_orders
     priced_units = sum(by_ccy_units.values())
@@ -128,6 +142,24 @@ def main(argv=None) -> int:
         ccy = max(ccys, key=ccys.get)
         logger.info("      %-16s %14s %-5s %14s", d.names.get(item, str(item)[:8]),
                     f"{ccys[ccy]:,.0f}", ccy, f"{item_units[item]:,.0f}")
+
+    if args.by_supplier:
+        logger.info("  --------------------------------------------------------------")
+        n = args.top_suppliers
+        ranked_sup = sorted(sup_units, key=lambda s: (-sum(sup_cost[s].values()), -sup_units[s]))
+        logger.info("  PURCHASE VOLUME by supplier (%s):", "all" if n <= 0 else f"top {n} by spend")
+        logger.info("      %-14s %16s %-5s %14s %8s %7s", "supplier", "spend", "ccy", "units", "orders", "items")
+        shown = ranked_sup if n <= 0 else ranked_sup[:n]
+        for s in shown:
+            ccys = sup_cost[s]
+            if ccys:
+                ccy = max(ccys, key=ccys.get)
+                spend = f"{ccys[ccy]:,.0f}"
+            else:
+                ccy, spend = "—", "unpriced"
+            logger.info("      %-14s %16s %-5s %14s %8d %7d", s[:14], spend, ccy,
+                        f"{sup_units[s]:,.0f}", sup_orders[s], len(sup_items[s]))
+        logger.info("      (suppliers in window: %d)", len(sup_units))
     logger.info("=" * 92)
     return 0
 
