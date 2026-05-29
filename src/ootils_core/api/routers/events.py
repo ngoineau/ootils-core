@@ -244,7 +244,6 @@ async def create_event(
             # The 503 tells the caller to retry; on retry, the event
             # is idempotent because event_id is unique + the engine's
             # F-014 seq-guard skips already-applied writes.
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=503,
                 detail=(
