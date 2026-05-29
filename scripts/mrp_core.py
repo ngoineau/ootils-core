@@ -237,9 +237,13 @@ def consume_demand(d: PlanningData) -> dict:
     return gross
 
 
-def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4):
+def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4, trace=None):
     """Time-phased level-by-level MRP cascade. Returns dict with planned orders
     (item, qty, release_bucket, need_bucket, kind, past_due) and counters.
+
+    If `trace` is a list, append per-order explainability tuples
+    (item, shortfall_before_lot, qty_after_lot, moq, mult, rule, kind) — used by
+    lot-sizing diagnostics.
     """
     dependent = defaultdict(lambda: defaultdict(float))
     planned, rule_orders = [], defaultdict(int)
@@ -270,7 +274,10 @@ def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4)
             for t in range(0, d.n_buckets):
                 pa = pa + sc.get(t, 0.0) - (g.get(t, 0.0) if g else 0.0) - (dep.get(t, 0.0) if dep else 0.0)
                 if pa < ss:
-                    qty = apply_lot_rule(rule, ss - pa, pa, ss, netreq, t, P, eoq, maxoq, im_moq, im_mult, d.n_buckets)
+                    shortfall = ss - pa
+                    qty = apply_lot_rule(rule, shortfall, pa, ss, netreq, t, P, eoq, maxoq, im_moq, im_mult, d.n_buckets)
+                    if trace is not None:
+                        trace.append((item, shortfall, qty, im_moq, im_mult, rule, "WO" if make else "PO"))
                     pa += qty
                     rel = t - lt_weeks
                     pd = rel < 0
