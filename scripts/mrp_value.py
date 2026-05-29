@@ -1,0 +1,123 @@
+"""
+mrp_value.py — value the planned PURCHASE plan in money (CLI over mrp_core).
+
+Runs the time-phased cascade and values every planned PURCHASE order (kind=PO,
+all LLC levels — a made item explodes into purchases of its own components) at
+the supplier unit cost. Filters to orders RELEASED within a window (default: the
+current calendar year, today..Dec 31) — i.e. the spend you would commit this year.
+
+Aggregates by currency (no FX conversion — reported per currency) and by month,
+and reports price coverage (unpriced orders are surfaced, never silently dropped).
+
+Usage:
+    DATABASE_URL=... python scripts/mrp_value.py [--force-rule POQ] [--poq-periods 4]
+        [--basis release|need] [--rolling12]
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import logging
+import os
+import sys
+from collections import defaultdict
+
+import psycopg
+import mrp_core as core
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logger = logging.getLogger("mrp_value")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description="Value the planned purchase plan in money (CLI over mrp_core).")
+    p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
+    p.add_argument("--horizon-days", type=int, default=540)
+    p.add_argument("--force-rule", default=None)
+    p.add_argument("--poq-periods", type=int, default=4)
+    p.add_argument("--basis", choices=["release", "need"], default="release",
+                   help="date a PO is attributed to: release (commit) or need (receipt)")
+    p.add_argument("--rolling12", action="store_true", help="window = next 12 months instead of current calendar year")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--allow-dev", action="store_true")
+    args = p.parse_args(argv)
+    if not args.dsn:
+        logger.error("DATABASE_URL not set")
+        return 2
+    db = core.guard_db(args.dsn, args.allow_dev)
+
+    with psycopg.connect(args.dsn) as conn:
+        d = core.load_planning_data(conn, args.horizon_days)
+    gross = core.consume_demand(d)
+    r = core.run_timephased(d, gross, force_rule=args.force_rule, poq_periods=args.poq_periods)
+    hs = d.horizon_start
+
+    if args.rolling12:
+        win_start, win_end, label = hs, hs + _dt.timedelta(days=365), f"rolling 12 months ({hs} .. {hs + _dt.timedelta(days=365)})"
+    else:
+        win_start, win_end, label = hs, _dt.date(hs.year, 12, 31), f"current year {hs.year} ({hs} .. {hs.year}-12-31)"
+    logger.info("Purchase-plan valuation: DB=%s  rule=%s  basis=%s  window=%s", db, args.force_rule or "per-item", args.basis, label)
+
+    by_ccy = defaultdict(float)
+    by_ccy_units = defaultdict(float)
+    by_month = defaultdict(lambda: defaultdict(float))
+    unpriced_units = 0.0
+    unpriced_orders = 0
+    priced_orders = 0
+    item_cost = defaultdict(lambda: defaultdict(float))  # item -> ccy -> cost
+    item_units = defaultdict(float)
+
+    for item, qty, rel, need, kind, pd in r["planned"]:
+        if kind != "PO":
+            continue
+        attr = hs + _dt.timedelta(weeks=(rel if args.basis == "release" else need))
+        if not (win_start <= attr <= win_end):
+            continue
+        sup = d.best_sup.get(item)
+        uc = sup[3] if sup else None
+        if uc is None:
+            unpriced_units += qty
+            unpriced_orders += 1
+            continue
+        ccy = (sup[4] or "USD")
+        cost = qty * float(uc)
+        by_ccy[ccy] += cost
+        by_ccy_units[ccy] += qty
+        by_month[attr.strftime("%Y-%m")][ccy] += cost
+        priced_orders += 1
+        item_cost[item][ccy] += cost
+        item_units[item] += qty
+
+    tot_orders = priced_orders + unpriced_orders
+    cov = 100.0 * priced_orders / tot_orders if tot_orders else 0.0
+    logger.info("=" * 92)
+    logger.info("PURCHASE PLAN VALUATION — %s", label)
+    logger.info("=" * 92)
+    logger.info("  Planned PO releases in window : %d  (priced %d / unpriced %d)", tot_orders, priced_orders, unpriced_orders)
+    logger.info("  Price coverage                : %.1f%% of orders priced", cov)
+    if unpriced_orders:
+        logger.info("  ⚠ Unpriced (no supplier unit cost) : %d orders, %s units NOT valued", unpriced_orders, f"{unpriced_units:,.0f}")
+    logger.info("  --------------------------------------------------------------")
+    logger.info("  PLANNED SPEND by currency (no FX conversion applied):")
+    for ccy in sorted(by_ccy, key=lambda c: -by_ccy[c]):
+        logger.info("      %-4s : %18s   (%s units)", ccy, f"{by_ccy[ccy]:,.2f}", f"{by_ccy_units[ccy]:,.0f}")
+    logger.info("  --------------------------------------------------------------")
+    logger.info("  Spend by month (primary currency per row):")
+    for mo in sorted(by_month):
+        parts = ", ".join(f"{c} {v:,.0f}" for c, v in sorted(by_month[mo].items(), key=lambda x: -x[1]))
+        logger.info("      %-8s : %s", mo, parts)
+    logger.info("  --------------------------------------------------------------")
+    # top items by spend (sum across their currencies, labelled with dominant ccy)
+    ranked = sorted(item_cost.items(), key=lambda kv: -sum(kv[1].values()))[: args.top]
+    logger.info("  TOP %d items by planned spend in window:", args.top)
+    logger.info("      %-16s %14s %-5s %14s", "item", "spend", "ccy", "units")
+    for item, ccys in ranked:
+        ccy = max(ccys, key=ccys.get)
+        logger.info("      %-16s %14s %-5s %14s", d.names.get(item, str(item)[:8]),
+                    f"{ccys[ccy]:,.0f}", ccy, f"{item_units[item]:,.0f}")
+    logger.info("=" * 92)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
