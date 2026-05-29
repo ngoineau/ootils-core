@@ -1,0 +1,289 @@
+"""
+shortage_scan.py — Virtual projection: detect first shortage per (item, location)
+WITHOUT materializing ProjectedInventory rows.
+
+Rationale
+---------
+Materializing N series × H daily buckets (12.5M+ rows) is slow, fragile, and
+unnecessary for a first shortage signal. This script computes the running stock
+balance directly from supply/demand nodes via a single window function and
+returns, per series, the first date the balance goes negative.
+
+This is the primitive the "shortage control tower" wedge actually needs:
+"which item × location runs short, when, by how much" — answered in seconds.
+
+PI materialization (bootstrap_pi + compute_pi_sql) is reserved for drill-down on
+specific series an agent wants to inspect day-by-day — not for the broad scan.
+
+Semantics (V1, documented caveats)
+----------------------------------
+- Supply nodes  (OnHandSupply, PurchaseOrderSupply, TransferSupply) = +quantity
+- Demand nodes  (CustomerOrderDemand, ForecastDemand)               = -quantity
+- Events ordered chronologically by time_ref; running cumulative balance.
+- First shortage = first event date where running balance < 0.
+- CAVEATS:
+    * Forecast monthly buckets are treated as a lump at bucket_start
+      (no intra-month spread — see PRORATA-V1.1).
+    * Past-dated nodes (e.g. POs with 2020 dates) are included as-is; they sort
+      first and fold into the opening balance. Real cleanup = data-source job.
+
+Usage
+-----
+    DATABASE_URL=postgresql://... python scripts/shortage_scan.py
+    python scripts/shortage_scan.py --top 30 --materialize
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+import time
+
+import psycopg
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logger = logging.getLogger("shortage_scan")
+
+BASELINE = "00000000-0000-0000-0000-000000000001"
+
+SUPPLY_TYPES = ("OnHandSupply", "PurchaseOrderSupply", "TransferSupply")
+DEMAND_TYPES = ("CustomerOrderDemand", "ForecastDemand")
+
+
+def _guard(dsn: str, allow_dev: bool) -> str:
+    name = dsn.rstrip("/").split("/")[-1].split("?")[0]
+    if not name.startswith("ootils"):
+        raise SystemExit(f"REFUSED: DB '{name}' does not start with 'ootils'.")
+    if name == "ootils_dev" and not allow_dev:
+        raise SystemExit("REFUSED: ootils_dev is semi-prod, pass --allow-dev.")
+    return name
+
+
+SCAN_SQL = """
+WITH events AS (
+    SELECT item_id, location_id, time_ref AS d, quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE
+      AND node_type = ANY(%(supply)s)
+      AND item_id IS NOT NULL AND location_id IS NOT NULL
+      AND time_ref IS NOT NULL AND quantity IS NOT NULL
+    UNION ALL
+    SELECT item_id, location_id, time_ref AS d, -quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE
+      AND node_type = ANY(%(demand)s)
+      AND item_id IS NOT NULL AND location_id IS NOT NULL
+      AND time_ref IS NOT NULL AND quantity IS NOT NULL
+),
+running AS (
+    SELECT item_id, location_id, d, q,
+           SUM(q) OVER (PARTITION BY item_id, location_id
+                        ORDER BY d, q          -- demand (negative q) settles after supply same day
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bal
+    FROM events
+),
+first_short AS (
+    SELECT DISTINCT ON (item_id, location_id)
+           item_id, location_id,
+           d   AS first_shortage_date,
+           bal AS balance_at_shortage
+    FROM running
+    WHERE bal < 0
+    ORDER BY item_id, location_id, d
+)
+SELECT fs.item_id, fs.location_id, fs.first_shortage_date, fs.balance_at_shortage,
+       it.external_id AS item_ext, it.name AS item_name,
+       loc.external_id AS loc_ext, loc.location_type AS loc_type
+FROM first_short fs
+JOIN items it     ON it.item_id = fs.item_id
+JOIN locations loc ON loc.location_id = fs.location_id
+ORDER BY fs.balance_at_shortage ASC
+"""
+
+
+ITEM_SCAN_SQL = """
+WITH events AS (
+    SELECT item_id, time_ref AS d, quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE
+      AND node_type = ANY(%(supply)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+    UNION ALL
+    SELECT item_id, time_ref AS d, -quantity AS q
+    FROM nodes
+    WHERE scenario_id = %(b)s AND active = TRUE
+      AND node_type = ANY(%(demand)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+),
+running AS (
+    SELECT item_id, d, q,
+           SUM(q) OVER (PARTITION BY item_id
+                        ORDER BY d, q
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bal
+    FROM events
+),
+first_short AS (
+    SELECT DISTINCT ON (item_id)
+           item_id, d AS first_shortage_date, bal AS balance_at_shortage
+    FROM running
+    WHERE bal < 0
+    ORDER BY item_id, d
+)
+SELECT fs.item_id, fs.first_shortage_date, fs.balance_at_shortage,
+       it.external_id AS item_ext, it.name AS item_name, it.item_type
+FROM first_short fs
+JOIN items it ON it.item_id = fs.item_id
+ORDER BY fs.balance_at_shortage ASC
+"""
+
+
+def scan_by_item(conn: psycopg.Connection, top: int) -> dict:
+    cur = conn.cursor()
+    cur.execute("SET work_mem = '256MB'")
+    cur.execute("SET max_parallel_workers_per_gather = 0")
+
+    t0 = time.perf_counter()
+    rows = cur.execute(
+        ITEM_SCAN_SQL,
+        {"b": BASELINE, "supply": list(SUPPLY_TYPES), "demand": list(DEMAND_TYPES)},
+    ).fetchall()
+    elapsed = time.perf_counter() - t0
+
+    total_items = cur.execute(
+        """
+        SELECT COUNT(DISTINCT item_id) FROM nodes
+        WHERE scenario_id = %(b)s AND active = TRUE
+          AND node_type = ANY(%(all)s) AND item_id IS NOT NULL
+        """,
+        {"b": BASELINE, "all": list(SUPPLY_TYPES + DEMAND_TYPES)},
+    ).fetchone()[0]
+
+    breakdown: dict[str, int] = {}
+    for r in rows:
+        breakdown[r[5]] = breakdown.get(r[5], 0) + 1  # item_type
+
+    return {
+        "elapsed_s": round(elapsed, 2),
+        "total_items": total_items,
+        "items_with_shortage": len(rows),
+        "breakdown": breakdown,
+        "rows": rows,
+        "top": top,
+    }
+
+
+def scan(conn: psycopg.Connection, top: int, loc_types: list[str] | None) -> dict:
+    cur = conn.cursor()
+    cur.execute("SET work_mem = '256MB'")
+    cur.execute("SET max_parallel_workers_per_gather = 0")
+
+    t0 = time.perf_counter()
+    rows = cur.execute(
+        SCAN_SQL,
+        {"b": BASELINE, "supply": list(SUPPLY_TYPES), "demand": list(DEMAND_TYPES)},
+    ).fetchall()
+    elapsed = time.perf_counter() - t0
+
+    # Breakdown by location_type (col index 7 = loc_type)
+    breakdown: dict[str, int] = {}
+    for r in rows:
+        breakdown[r[7]] = breakdown.get(r[7], 0) + 1
+
+    # Optional filter for the top list
+    if loc_types:
+        rows = [r for r in rows if r[7] in loc_types]
+
+    # Total series scanned (distinct item×loc with any supply/demand)
+    total_series = cur.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT item_id, location_id FROM nodes
+            WHERE scenario_id = %(b)s AND active = TRUE
+              AND node_type = ANY(%(all)s)
+              AND item_id IS NOT NULL AND location_id IS NOT NULL
+        ) s
+        """,
+        {"b": BASELINE, "all": list(SUPPLY_TYPES + DEMAND_TYPES)},
+    ).fetchone()[0]
+
+    return {
+        "elapsed_s": round(elapsed, 2),
+        "total_series": total_series,
+        "series_with_shortage": len(rows),
+        "breakdown": breakdown,
+        "rows": rows,
+        "top": top,
+        "loc_types_filter": loc_types,
+    }
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description="Virtual shortage scan (no PI materialization).")
+    p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
+    p.add_argument("--top", type=int, default=20)
+    p.add_argument("--location-types", default=None,
+                   help="comma-separated filter for the top list, e.g. 'plant,dc,warehouse'")
+    p.add_argument("--by-item", action="store_true",
+                   help="aggregate net supply vs demand per ITEM (ignore location)")
+    p.add_argument("--allow-dev", action="store_true")
+    args = p.parse_args(argv)
+    if not args.dsn:
+        logger.error("DATABASE_URL not set")
+        return 2
+
+    loc_types = [t.strip() for t in args.location_types.split(",")] if args.location_types else None
+
+    db = _guard(args.dsn, args.allow_dev)
+
+    # ── Item-level aggregated mode ──────────────────────────────────
+    if args.by_item:
+        logger.info("Shortage scan (BY ITEM, all locations netted): DB=%s", db)
+        with psycopg.connect(args.dsn) as conn:
+            r = scan_by_item(conn, args.top)
+        pct = (100 * r["items_with_shortage"] / r["total_items"]) if r["total_items"] else 0
+        logger.info("=" * 78)
+        logger.info("ITEM-LEVEL SHORTAGE SCAN DONE in %.2fs", r["elapsed_s"])
+        logger.info("  Items scanned         : %d", r["total_items"])
+        logger.info("  Items net-short       : %d (%.1f%%)", r["items_with_shortage"], pct)
+        logger.info("  Breakdown by item_type:")
+        for it_t, n in sorted(r["breakdown"].items(), key=lambda x: -x[1]):
+            logger.info("      %-20s %d", it_t, n)
+        logger.info("=" * 78)
+        logger.info("TOP %d net-short items — worst balance first:", r["top"])
+        logger.info("  %-16s %-14s %-12s %14s   %s", "item", "item_type", "date", "net_balance", "name")
+        for row in r["rows"][: r["top"]]:
+            item_id, date, bal, item_ext, item_name, item_type = row
+            name = (item_name or "")[:32]
+            logger.info("  %-16s %-14s %-12s %14.1f   %s", item_ext, item_type, str(date), float(bal), name)
+        logger.info("=" * 78)
+        return 0
+
+    logger.info("Shortage scan: DB=%s  filter=%s", db, loc_types or "all")
+
+    with psycopg.connect(args.dsn) as conn:
+        r = scan(conn, args.top, loc_types)
+
+    total_short = sum(r["breakdown"].values())
+    pct = (100 * total_short / r["total_series"]) if r["total_series"] else 0
+    logger.info("=" * 70)
+    logger.info("SHORTAGE SCAN DONE in %.2fs", r["elapsed_s"])
+    logger.info("  Series scanned        : %d", r["total_series"])
+    logger.info("  Series with shortage  : %d (%.1f%%)", total_short, pct)
+    logger.info("  Breakdown by location_type:")
+    for lt, n in sorted(r["breakdown"].items(), key=lambda x: -x[1]):
+        logger.info("      %-20s %d", lt, n)
+    logger.info("=" * 70)
+    label = f"(filter: {','.join(loc_types)})" if loc_types else "(all locations)"
+    logger.info("TOP %d shortages %s — worst balance first:", r["top"], label)
+    logger.info("  %-16s %-14s %-10s %-12s %14s   %s", "item", "loc", "loc_type", "date", "balance", "name")
+    for row in r["rows"][: r["top"]]:
+        item_id, loc_id, date, bal, item_ext, item_name, loc_ext, loc_type = row
+        name = (item_name or "")[:30]
+        logger.info("  %-16s %-14s %-10s %-12s %14.1f   %s", item_ext, loc_ext, loc_type, str(date), float(bal), name)
+    logger.info("=" * 70)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
