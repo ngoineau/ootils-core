@@ -148,7 +148,7 @@ def main(argv=None) -> int:
         n = args.top_suppliers
         ranked_sup = sorted(sup_units, key=lambda s: (-sum(sup_cost[s].values()), -sup_units[s]))
         logger.info("  PURCHASE VOLUME by supplier (%s):", "all" if n <= 0 else f"top {n} by spend")
-        logger.info("      %-14s %16s %-5s %14s %8s %7s", "supplier", "spend", "ccy", "units", "orders", "items")
+        logger.info("      %-12s %-32s %16s %-5s %14s %7s", "code", "supplier", "spend", "ccy", "units", "items")
         shown = ranked_sup if n <= 0 else ranked_sup[:n]
         for s in shown:
             ccys = sup_cost[s]
@@ -157,8 +157,9 @@ def main(argv=None) -> int:
                 spend = f"{ccys[ccy]:,.0f}"
             else:
                 ccy, spend = "—", "unpriced"
-            logger.info("      %-14s %16s %-5s %14s %8d %7d", s[:14], spend, ccy,
-                        f"{sup_units[s]:,.0f}", sup_orders[s], len(sup_items[s]))
+            name = (d.sup_name.get(s) or "")[:32]
+            logger.info("      %-12s %-32s %16s %-5s %14s %7d", s[:12], name, spend, ccy,
+                        f"{sup_units[s]:,.0f}", len(sup_items[s]))
         logger.info("      (suppliers in window: %d)", len(sup_units))
     logger.info("=" * 92)
     return 0
