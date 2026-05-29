@@ -48,6 +48,27 @@ def lot_size(qty, moq, mult):
     return qty
 
 
+def _spread_period(qty, start, end, horizon_start, horizon_end, n_buckets, out):
+    """Prorate qty across weekly buckets proportional to the days each bucket
+    overlaps the period [start, end). Mass-conserving when the period is inside
+    the horizon; the fraction falling outside the horizon is dropped (we only
+    plan forward). Used to spread lumpy (e.g. monthly) forecasts into weeks.
+    """
+    span = (end - start).days
+    if span <= 0:
+        return
+    day = max(start, horizon_start)
+    last = min(end, horizon_end)
+    while day < last:
+        bk = max(0, (day - horizon_start).days // 7)
+        bk_end = horizon_start + _dt.timedelta(days=(bk + 1) * 7)
+        seg_end = min(last, bk_end)
+        days = (seg_end - day).days
+        if days > 0 and bk < n_buckets:
+            out[bk] += qty * days / span
+        day = seg_end
+
+
 def apply_lot_rule(rule, shortfall, pa, ss, netreq, t, P, eoq, maxoq, moq, mult, n_buckets):
     """Compute order qty for a shortfall at bucket t under a lot-sizing rule."""
     if rule == "POQ":
@@ -149,12 +170,25 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         "AND node_type='CustomerOrderDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
         if tref >= horizon_start:
             d.co_b[item][d.bucket(tref)] += float(qty)
-    d.fc_b = defaultdict(lambda: defaultdict(float))
+    # Forecast: prorate each line across the weekly buckets of the period it
+    # covers. A line's period runs from its date to the NEXT forecast date for
+    # the same item (inferred granularity — monthly/quarterly/weekly); the qty is
+    # spread proportional to day-overlap. Already-weekly forecasts => no-op.
+    raw_fc = defaultdict(list)
     for item, tref, qty in cur.execute(
         "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
         "AND node_type='ForecastDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
-        if tref >= horizon_start:
-            d.fc_b[item][d.bucket(tref)] += float(qty)
+        raw_fc[item].append((tref, float(qty)))
+    horizon_end = horizon_start + _dt.timedelta(days=horizon_days)
+    d.fc_b = defaultdict(lambda: defaultdict(float))
+    for item, rows in raw_fc.items():
+        rows.sort(key=lambda x: x[0])
+        gaps = [(rows[i + 1][0] - rows[i][0]).days for i in range(len(rows) - 1)
+                if (rows[i + 1][0] - rows[i][0]).days > 0]
+        default_span = sorted(gaps)[len(gaps) // 2] if gaps else 7  # median gap, else weekly
+        for i, (tref, qty) in enumerate(rows):
+            end = rows[i + 1][0] if i + 1 < len(rows) else tref + _dt.timedelta(days=default_span)
+            _spread_period(qty, tref, end, horizon_start, horizon_end, d.n_buckets, d.fc_b[item])
     d.sched_b = defaultdict(lambda: defaultdict(float))
     for item, tref, qty in cur.execute(
         "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
