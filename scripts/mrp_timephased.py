@@ -121,14 +121,49 @@ def main(argv=None) -> int:
         ).fetchall():
             bom[parent].append((comp, float(qpb), float(scrap or 0)))
 
-        # ── bucketed independent demand + scheduled receipts ────────
-        gross = defaultdict(lambda: defaultdict(float))   # item -> bucket -> qty
+        # ── time fences + forecast-consumption strategy per item ────
+        frozen_d = _m(cur, "SELECT item_id, MAX(frozen_time_fence_days) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        slushy_d = _m(cur, "SELECT item_id, MAX(slashed_time_fence_days) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        strat = _m(cur, "SELECT item_id, MIN(forecast_consumption_strategy::text) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+
+        # ── bucketed CUSTOMER ORDERS and FORECAST, kept SEPARATE ────
+        co_b = defaultdict(lambda: defaultdict(float))
+        fc_b = defaultdict(lambda: defaultdict(float))
         for item, tref, qty in cur.execute(
             "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
-            "AND node_type IN ('CustomerOrderDemand','ForecastDemand') AND time_ref IS NOT NULL AND quantity IS NOT NULL", b
-        ).fetchall():
+            "AND node_type='CustomerOrderDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
             if tref >= horizon_start:
-                gross[item][bucket(tref)] += float(qty)
+                co_b[item][bucket(tref)] += float(qty)
+        for item, tref, qty in cur.execute(
+            "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
+            "AND node_type='ForecastDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
+            if tref >= horizon_start:
+                fc_b[item][bucket(tref)] += float(qty)
+
+        # ── independent demand AFTER forecast consumption + demand time fence ──
+        #   inside the demand time fence (frozen): customer orders ONLY (forecast ignored)
+        #   beyond it: apply strategy. max_only = max(orders, forecast) — NEVER the sum
+        #   (prevents double-counting; matches APICS forecast consumption).
+        gross = defaultdict(lambda: defaultdict(float))   # item -> bucket -> consumed independent demand
+        consumed_saved = 0.0
+        for item in set(co_b) | set(fc_b):
+            dtf_weeks = math.ceil(float(frozen_d.get(item, 0) or 0) / 7)
+            s = (strat.get(item) or "max_only").lower()
+            buckets_here = set(co_b.get(item, {})) | set(fc_b.get(item, {}))
+            for t in buckets_here:
+                o = co_b.get(item, {}).get(t, 0.0)
+                f = fc_b.get(item, {}).get(t, 0.0)
+                if t < dtf_weeks:
+                    d = o                       # demand time fence → firm orders only
+                elif s == "forecast_only":
+                    d = f
+                elif s == "orders_only":
+                    d = o
+                else:                           # max_only / consume_* → larger of the two
+                    d = max(o, f)
+                consumed_saved += (o + f) - d   # how much double-count we removed
+                if d:
+                    gross[item][t] = d
 
         sched = defaultdict(lambda: defaultdict(float))   # item -> bucket -> qty
         for item, tref, qty in cur.execute(
@@ -157,6 +192,7 @@ def main(argv=None) -> int:
     dependent = defaultdict(lambda: defaultdict(float))   # item -> bucket -> qty
     planned = []          # (item, qty, release_bucket, need_bucket, kind, past_due)
     n_wo = n_po = past_due = 0
+    within_ptf = 0        # planned-order releases inside the planning time fence (planner action, not auto)
     rule_orders = defaultdict(int)   # lot_size_rule -> #orders generated
 
     for level in range(0, max_llc + 1):
@@ -171,6 +207,7 @@ def main(argv=None) -> int:
             lt_weeks = max(0, math.ceil(float(lt_days) / 7))
             item_moq = max(float(moq.get(item) or 0), float(min_oq.get(item) or 0))
             item_mult = float(mult.get(item) or 0)
+            ptf_weeks = math.ceil(float(slushy_d.get(item, 0) or 0) / 7)   # planning time fence
             rule = (args.force_rule or lot_rule.get(item) or "LOTFORLOT").upper()
             P = int((args.poq_periods if args.force_rule else poq_per.get(item)) or 4)  # POQ period length (weeks)
             eoq = float(eoq_q.get(item) or 0)
@@ -211,6 +248,8 @@ def main(argv=None) -> int:
                     if pd:
                         rel = 0
                         past_due += 1
+                    if rel < ptf_weeks:      # release inside planning time fence → planner action, not auto
+                        within_ptf += 1
                     planned.append((item, qty, rel, t, "WO" if make else "PO", pd))
                     rule_orders[rule] += 1
                     if make:
@@ -234,6 +273,8 @@ def main(argv=None) -> int:
     logger.info("  Planned PURCHASE ORD. : %d", n_po)
     logger.info("  Planned-order lines   : %d", len(planned))
     logger.info("  PAST-DUE releases (need − lead time already elapsed → EXPEDITE): %d", past_due)
+    logger.info("  Inside PLANNING TIME FENCE (frozen → planner action, not auto) : %d", within_ptf)
+    logger.info("  Forecast double-count removed by consumption (max_only/DTF)    : %.0f units", consumed_saved)
     logger.info("  Orders by lot-sizing rule: %s", dict(rule_orders))
     logger.info("  Releases by week (next 8 weeks):")
     for wk in range(0, 8):
