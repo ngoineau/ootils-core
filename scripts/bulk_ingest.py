@@ -131,10 +131,27 @@ def load_items(conn: psycopg.Connection, tsv_path: Path) -> dict[str, Any]:
             bad_type + bad_status + bad_required, bad_required, bad_type, bad_status,
         )
 
+    # Optional valuation columns: standard_cost / cost_currency (back-compatible —
+    # absent header => not touched). standard_cost lets the ERP supply item-level
+    # cost to close the valuation gap on items without a supplier unit_cost.
+    has_cost = "standard_cost" in header
+    if has_cost:
+        has_ccy = "cost_currency" in header
+        cur.execute(
+            "UPDATE _b_items SET standard_cost = NULLIF(TRIM(standard_cost), '')"
+            + (", cost_currency = COALESCE(NULLIF(TRIM(cost_currency), ''), 'USD')" if has_ccy else "")
+        )
+        sel_extra = ", NULLIF(standard_cost,'')::numeric" + (", cost_currency" if has_ccy else ", 'USD'")
+        ins_cols = ", standard_cost, cost_currency"
+        upd_extra = (", standard_cost = COALESCE(EXCLUDED.standard_cost, items.standard_cost)"
+                     ", cost_currency = COALESCE(EXCLUDED.cost_currency, items.cost_currency)")
+    else:
+        sel_extra = ins_cols = upd_extra = ""
+
     cur.execute(
-        """
-        INSERT INTO items (external_id, name, item_type, uom, status)
-        SELECT external_id, name, item_type, uom, status FROM _b_items
+        f"""
+        INSERT INTO items (external_id, name, item_type, uom, status{ins_cols})
+        SELECT external_id, name, item_type, uom, status{sel_extra} FROM _b_items
         WHERE external_id IS NOT NULL AND name IS NOT NULL
           AND item_type IN ('finished_good', 'component', 'raw_material', 'semi_finished')
           AND status IN ('active', 'obsolete', 'phase_out')
@@ -143,7 +160,7 @@ def load_items(conn: psycopg.Connection, tsv_path: Path) -> dict[str, Any]:
             item_type = EXCLUDED.item_type,
             uom       = EXCLUDED.uom,
             status    = EXCLUDED.status,
-            updated_at = now()
+            updated_at = now(){upd_extra}
         """
     )
     affected = cur.rowcount

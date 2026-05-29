@@ -77,8 +77,11 @@ def main(argv=None) -> int:
         uc = sup[3] if sup else None
         ccy = (sup[4] if sup else None)
         if uc is None:                       # chosen supplier carries no cost -> fall back
-            uc = d.unit_cost.get(item)
+            uc = d.unit_cost.get(item)       # any priced supplier row
             ccy = d.cost_ccy.get(item)
+        if uc is None:                       # still none -> item standard cost (incl. BOM roll-up)
+            uc = d.std_cost.get(item)
+            ccy = d.std_ccy.get(item)
         if uc is None:
             unpriced_units += qty
             unpriced_orders += 1

@@ -111,6 +111,8 @@ class PlanningData:
     best_sup: dict = field(default_factory=dict)
     unit_cost: dict = field(default_factory=dict)
     cost_ccy: dict = field(default_factory=dict)
+    std_cost: dict = field(default_factory=dict)
+    std_ccy: dict = field(default_factory=dict)
     co_b: dict = field(default_factory=dict)
     fc_b: dict = field(default_factory=dict)
     sched_b: dict = field(default_factory=dict)
@@ -151,6 +153,8 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
     d.slushy_d = _m(cur, "SELECT item_id, MAX(slashed_time_fence_days) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
     d.strat = _m(cur, "SELECT item_id, MIN(forecast_consumption_strategy::text) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
     d.names = _m(cur, "SELECT item_id, external_id FROM items")
+    d.std_cost = _m(cur, "SELECT item_id, standard_cost FROM items WHERE standard_cost IS NOT NULL")
+    d.std_ccy = _m(cur, "SELECT item_id, cost_currency FROM items WHERE standard_cost IS NOT NULL")
 
     for parent, comp, qpb, scrap in cur.execute(
         "SELECT bh.parent_item_id, bl.component_item_id, bl.quantity_per, bl.scrap_factor "

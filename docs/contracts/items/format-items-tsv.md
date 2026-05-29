@@ -35,6 +35,8 @@
 | 3 | `item_type` | optionnel | enum | `finished_good` \| `component` \| `raw_material` \| `semi_finished` | Type d'article. Défaut si absent : `finished_good`. |
 | 4 | `uom` | optionnel | texte | code unité (max 16 caractères) | Unité de mesure de base. Défaut si absent : `EA` (each / unité). Codes usuels : `EA`, `KG`, `L`, `M`, `BOX`, `PAL`. |
 | 5 | `status` | optionnel | enum | `active` \| `obsolete` \| `phase_out` | Statut commercial. Défaut si absent : `active`. |
+| 6 | `standard_cost` | optionnel | décimal | ≥ 0 | Coût unitaire standard de l'article (fallback de valorisation). Utilisé quand l'article n'a pas de `unit_cost` fournisseur. Pour un fabriqué, peut être laissé vide et calculé par roll-up de nomenclature (`compute_cost_rollup.py`). |
+| 7 | `cost_currency` | optionnel | texte | code ISO 3 lettres | Devise de `standard_cost`. Défaut si absent : `USD`. Pas de conversion FX appliquée. |
 
 ### Notes de domaine
 
@@ -48,7 +50,7 @@
 
 ### Cellule vide vs valeur par défaut
 
-- Cellule **vide** sur colonne optionnelle → valeur par défaut appliquée (`finished_good`, `EA`, `active`).
+- Cellule **vide** sur colonne optionnelle → valeur par défaut appliquée (`finished_good`, `EA`, `active`). Pour `standard_cost`, une cellule vide laisse la valeur existante inchangée (pas d'écrasement par NULL).
 - Cellule **vide** sur colonne obligatoire (`external_id`, `name`) → la ligne est rejetée, **et tout le batch est rejeté** (politique all-or-nothing actuelle).
 
 ---
