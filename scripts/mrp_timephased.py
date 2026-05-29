@@ -74,6 +74,9 @@ def main(argv=None) -> int:
     p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
     p.add_argument("--horizon-days", type=int, default=540)
     p.add_argument("--top", type=int, default=25)
+    p.add_argument("--force-rule", default=None,
+                   help="override every item's lot_size_rule (e.g. POQ) to demonstrate consolidation")
+    p.add_argument("--poq-periods", type=int, default=4, help="period length when forcing POQ")
     p.add_argument("--allow-dev", action="store_true")
     args = p.parse_args(argv)
     if not args.dsn:
@@ -102,6 +105,13 @@ def main(argv=None) -> int:
         moq = _m(cur, "SELECT item_id, MIN(moq) FROM supplier_items WHERE moq IS NOT NULL GROUP BY item_id")
         mult = _m(cur, "SELECT item_id, MAX(order_multiple) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
         names = _m(cur, "SELECT item_id, external_id FROM items")
+
+        # lot-sizing policy per item (item_planning_params)
+        lot_rule = _m(cur, "SELECT item_id, MIN(lot_size_rule::text) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        poq_per  = _m(cur, "SELECT item_id, MAX(lot_size_poq_periods) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        eoq_q    = _m(cur, "SELECT item_id, MAX(economic_order_qty) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        max_oq   = _m(cur, "SELECT item_id, MAX(max_order_qty) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
+        min_oq   = _m(cur, "SELECT item_id, MAX(min_order_qty) FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id")
 
         bom = defaultdict(list)
         for parent, comp, qpb, scrap in cur.execute(
@@ -147,6 +157,7 @@ def main(argv=None) -> int:
     dependent = defaultdict(lambda: defaultdict(float))   # item -> bucket -> qty
     planned = []          # (item, qty, release_bucket, need_bucket, kind, past_due)
     n_wo = n_po = past_due = 0
+    rule_orders = defaultdict(int)   # lot_size_rule -> #orders generated
 
     for level in range(0, max_llc + 1):
         for item in by_level[level]:
@@ -158,16 +169,42 @@ def main(argv=None) -> int:
             ss = float(safety.get(item, 0) or 0)
             lt_days = (make_lt.get(item) if make else buy_lt.get(item)) or DEFAULT_LT_DAYS
             lt_weeks = max(0, math.ceil(float(lt_days) / 7))
-            item_moq = float(moq.get(item) or 0)
+            item_moq = max(float(moq.get(item) or 0), float(min_oq.get(item) or 0))
             item_mult = float(mult.get(item) or 0)
+            rule = (args.force_rule or lot_rule.get(item) or "LOTFORLOT").upper()
+            P = int((args.poq_periods if args.force_rule else poq_per.get(item)) or 4)  # POQ period length (weeks)
+            eoq = float(eoq_q.get(item) or 0)
+            maxoq = float(max_oq.get(item) or 0)
+
+            # net requirement per bucket for this item (gross − scheduled)
+            sc = sched.get(item, {})
+            netreq = {}
+            for t in range(0, n_buckets):
+                r = (g.get(t, 0.0) if g else 0.0) + (dep.get(t, 0.0) if dep else 0.0) - sc.get(t, 0.0)
+                if r:
+                    netreq[t] = r
 
             pa = float(on_hand.get(item, 0) or 0)   # opening projected available
-            for t in range(0, n_buckets):
-                req = (g.get(t, 0.0) if g else 0.0) + (dep.get(t, 0.0) if dep else 0.0)
-                pa = pa + sched.get(item, {}).get(t, 0.0) - req
+            t = 0
+            while t < n_buckets:
+                pa = pa + sc.get(t, 0.0) - (g.get(t, 0.0) if g else 0.0) - (dep.get(t, 0.0) if dep else 0.0)
                 if pa < ss:
-                    need = ss - pa
-                    qty = _lot_size(need, item_moq, item_mult)
+                    shortfall = ss - pa
+                    # ── lot sizing by rule ──────────────────────────
+                    if rule == "POQ":
+                        # cover shortfall + net requirements over next P-1 buckets
+                        window = sum(max(0.0, netreq.get(k, 0.0)) for k in range(t + 1, min(t + P, n_buckets)))
+                        qty = shortfall + window
+                    elif rule == "EOQ" and eoq > 0:
+                        qty = max(eoq, shortfall)
+                    elif rule == "MIN_MAX" and maxoq > 0:
+                        qty = (ss + maxoq) - pa        # bring up to max above safety
+                    elif rule == "FIXED_QTY" and item_moq > 0:
+                        qty = math.ceil(shortfall / item_moq) * item_moq
+                    else:  # LOTFORLOT / MULTIPLE / fallback
+                        qty = shortfall
+                    # apply MOQ floor + multiple rounding as final guard
+                    qty = _lot_size(qty, item_moq, item_mult)
                     pa += qty
                     rel = t - lt_weeks
                     pd = rel < 0
@@ -175,12 +212,14 @@ def main(argv=None) -> int:
                         rel = 0
                         past_due += 1
                     planned.append((item, qty, rel, t, "WO" if make else "PO", pd))
+                    rule_orders[rule] += 1
                     if make:
                         n_wo += 1
                         for comp, qpb, scrap in bom.get(item, []):
                             dependent[comp][rel] += qty * qpb * (1.0 + scrap)
                     else:
                         n_po += 1
+                t += 1
     cascade_s = round(time.perf_counter() - t1, 2)
 
     # ── report ──────────────────────────────────────────────────────
@@ -195,6 +234,7 @@ def main(argv=None) -> int:
     logger.info("  Planned PURCHASE ORD. : %d", n_po)
     logger.info("  Planned-order lines   : %d", len(planned))
     logger.info("  PAST-DUE releases (need − lead time already elapsed → EXPEDITE): %d", past_due)
+    logger.info("  Orders by lot-sizing rule: %s", dict(rule_orders))
     logger.info("  Releases by week (next 8 weeks):")
     for wk in range(0, 8):
         logger.info("      week %-2d : %d planned-order releases", wk, by_relbucket.get(wk, 0))
