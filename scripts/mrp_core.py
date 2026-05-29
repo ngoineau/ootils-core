@@ -330,6 +330,34 @@ def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4,
             "within_ptf": within_ptf, "rule_orders": dict(rule_orders)}
 
 
+def first_shortage(d: PlanningData, gross: dict) -> dict:
+    """Item-level virtual projection on CONSUMED demand (the single demand truth:
+    max_only + demand-time-fence + prorated + multi-location-deduped). For each
+    item with independent demand, walks weekly buckets accumulating
+    scheduled receipts − consumed demand on top of on-hand, and returns the FIRST
+    bucket where projected on-hand goes negative.
+
+    Returns {item: {"bucket": t, "date": date, "deficit": qty, "balance": pa}}.
+
+    Scope: items carrying independent demand (gross) — the finished-good /
+    independent-demand control tower. Dependent-demand (component) shortages are
+    the material side (run_timephased), not this projection.
+    """
+    out = {}
+    for item, g in gross.items():
+        if not g:
+            continue
+        pa = float(d.on_hand.get(item, 0) or 0)
+        sc = d.sched_b.get(item, {})
+        for t in range(d.n_buckets):
+            pa += sc.get(t, 0.0) - g.get(t, 0.0)
+            if pa < 0:
+                out[item] = {"bucket": t, "date": d.horizon_start + _dt.timedelta(weeks=t),
+                             "deficit": -pa, "balance": pa}
+                break
+    return out
+
+
 def peg_origins(d: PlanningData, gross: dict):
     """Aggregate LLC cascade with origin attribution. Returns (dependent_total,
     origin) where origin[item] = {finished_good: qty}. Uses consumed demand.
