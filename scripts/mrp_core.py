@@ -17,8 +17,6 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-import psycopg
-
 BASELINE = "00000000-0000-0000-0000-000000000001"
 DEFAULT_LT_DAYS = 30
 SUPPLY_TYPES = ["OnHandSupply", "PurchaseOrderSupply", "TransferSupply"]

@@ -61,6 +61,7 @@ def main(argv=None) -> int:
         logger.error("DATABASE_URL not set")
         return 2
     db = core.guard_db(args.dsn, args.allow_dev)
+    logger.info("Shortage scan: DB=%s", db)
 
     t0 = time.perf_counter()
     with psycopg.connect(args.dsn) as conn:
