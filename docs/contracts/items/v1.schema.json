@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ootils.io/contracts/items/v1.schema.json",
+  "title": "Ootils Items Ingestion Contract",
+  "description": "JSON Schema for POST /v1/ingest/items. Documents the V1.0 (current implementation) and V1.1 (proposed agent-ready extensions). Fields under `attrs` and the V1.1 classification/physical/regulatory blocks are optional and gated behind contract negotiation.",
+  "type": "object",
+  "required": ["items"],
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50000,
+      "items": { "$ref": "#/$defs/ItemRow" }
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, validate (including FK checks) but do not persist."
+    }
+  },
+  "$defs": {
+    "ItemRow": {
+      "type": "object",
+      "required": ["external_id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "external_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique business identifier (e.g. ERP SKU). Upsert key. Combined with X-Source-System header for multi-source scenarios."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Item label / description."
+        },
+        "item_type": {
+          "type": "string",
+          "enum": ["finished_good", "component", "raw_material", "semi_finished"],
+          "default": "finished_good"
+        },
+        "uom": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "default": "EA",
+          "description": "Base unit of measure. Must exist in uom_conversions or be SI standard."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "obsolete", "phase_out"],
+          "default": "active"
+        },
+
+        "family": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "[V1.1] Product family (PLM/ERP). Consumed by ABC/XYZ Reclassification, BOM Health, Demand Anomaly."
+        },
+        "category": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "[V1.1] Commercial category."
+        },
+        "subcategory": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "brand": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "abc_class": {
+          "type": ["string", "null"],
+          "enum": ["A", "B", "C", null],
+          "description": "[V1.1] ABC classification (volume/value). Consumed by ABC/XYZ Drift Watcher."
+        },
+        "xyz_class": {
+          "type": ["string", "null"],
+          "enum": ["X", "Y", "Z", null],
+          "description": "[V1.1] XYZ classification (demand volatility)."
+        },
+        "lifecycle_stage": {
+          "type": ["string", "null"],
+          "enum": ["NPI", "GROWTH", "MATURE", "DECLINE", "EOL", "OBSOLETE", null],
+          "description": "[V1.1] Product lifecycle stage. Consumed by NPI Agent, End-of-Life Agent."
+        },
+
+        "net_weight_kg": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "[V1.1] Unit net weight (kg)."
+        },
+        "gross_weight_kg": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "volume_m3": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "length_mm": { "type": ["integer", "null"], "minimum": 0 },
+        "width_mm":  { "type": ["integer", "null"], "minimum": 0 },
+        "height_mm": { "type": ["integer", "null"], "minimum": 0 },
+
+        "pack_size": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "[V1.1] Units per inner pack/carton."
+        },
+        "case_pack": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "[V1.1] Cartons per pallet. Must be >= pack_size if both present."
+        },
+        "shelf_life_days": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "[V1.1] Shelf life in days (perishable items)."
+        },
+        "lot_tracked": {
+          "type": ["boolean", "null"],
+          "description": "[V1.1] Lot tracking required."
+        },
+        "serial_tracked": {
+          "type": ["boolean", "null"],
+          "description": "[V1.1] Serial tracking required."
+        },
+
+        "hs_code": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]{6,10}$",
+          "description": "[V1.1] Harmonized System code (6-10 digits)."
+        },
+        "country_of_origin": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Z]{2}$",
+          "description": "[V1.1] ISO 3166-1 alpha-2."
+        },
+        "hazmat_class": {
+          "type": ["string", "null"],
+          "maxLength": 32,
+          "description": "[V1.1] ADR/IATA hazard class (e.g. '3', '8', '9')."
+        },
+        "allergen_flags": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "maxLength": 64 },
+          "description": "[V1.1] Allergen codes (food only)."
+        },
+        "regulatory_flags": {
+          "type": ["object", "null"],
+          "description": "[V1.1] Freeform regulatory markings (CE, FDA, REACH, etc.)."
+        },
+
+        "attrs": {
+          "type": ["object", "null"],
+          "description": "[V1.1] Freeform tenant-specific attributes (e.g. size, color, season). Indexed via GIN."
+        },
+        "tags": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "maxLength": 64 },
+          "description": "[V1.1] Freeform tags for agent search/filter."
+        }
+      },
+
+      "allOf": [
+        {
+          "description": "If case_pack and pack_size both set, case_pack must be >= pack_size",
+          "if": {
+            "properties": {
+              "case_pack": { "type": "integer" },
+              "pack_size": { "type": "integer" }
+            },
+            "required": ["case_pack", "pack_size"]
+          },
+          "then": {
+            "properties": {
+              "case_pack": { "type": "integer" }
+            }
+          }
+        },
+        {
+          "description": "EOL items must be phase_out or obsolete (warning level, not enforced here — DQ post-load).",
+          "if": {
+            "properties": { "lifecycle_stage": { "const": "EOL" } },
+            "required": ["lifecycle_stage"]
+          },
+          "then": true
+        }
+      ]
+    }
+  }
+}

@@ -19,3 +19,13 @@ build/
 .venv/
 venv/
 env/
+
+# Inbound file inbox / archives — content is operational, not source
+# Keep directory structure (via .gitkeep) but ignore any deposited files.
+/data/inbox/*
+!/data/inbox/.gitkeep
+!/data/inbox/README.md
+/data/processed/*
+!/data/processed/.gitkeep
+/data/rejected/*
+!/data/rejected/.gitkeep
