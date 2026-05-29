@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 import time
@@ -187,6 +188,107 @@ def _classify(lt_days, runway_days, margin_days) -> str:
     return "CRITICAL"               # forward shortage, too late via normal reorder → expedite/alt source
 
 
+REC_SQL = """
+WITH events AS (
+    SELECT item_id, time_ref AS d, quantity AS q
+    FROM nodes WHERE scenario_id = %(b)s AND active = TRUE AND node_type = ANY(%(supply)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+    UNION ALL
+    SELECT item_id, time_ref AS d, -quantity AS q
+    FROM nodes WHERE scenario_id = %(b)s AND active = TRUE AND node_type = ANY(%(demand)s)
+      AND item_id IS NOT NULL AND time_ref IS NOT NULL AND quantity IS NOT NULL
+),
+running AS (
+    SELECT item_id, d,
+           SUM(q) OVER (PARTITION BY item_id ORDER BY d, q
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bal
+    FROM events
+),
+first_short AS (
+    SELECT DISTINCT ON (item_id) item_id, d AS fsd, bal
+    FROM running WHERE bal < 0 ORDER BY item_id, d
+),
+fwd AS (
+    SELECT item_id, fsd, bal FROM first_short WHERE fsd >= CURRENT_DATE
+),
+best_sup AS (
+    SELECT DISTINCT ON (si.item_id)
+           si.item_id, si.supplier_id, si.lead_time_days, si.moq, si.unit_cost, si.currency
+    FROM supplier_items si WHERE si.lead_time_days IS NOT NULL
+    ORDER BY si.item_id, si.is_preferred DESC, si.lead_time_days ASC
+),
+ipp_agg AS (
+    SELECT item_id,
+           SUM(COALESCE(safety_stock_qty, 0)) AS ss_pooled,
+           MAX(order_multiple)                AS mult
+    FROM item_planning_params WHERE effective_to IS NULL
+    GROUP BY item_id
+)
+SELECT it.external_id, it.name,
+       f.fsd, (-f.bal) AS deficit,
+       s.external_id AS sup_ext, s.name AS sup_name, s.reliability_score,
+       bs.lead_time_days, bs.moq, bs.unit_cost, bs.currency,
+       COALESCE(ia.ss_pooled, 0) AS ss_pooled, ia.mult,
+       (f.fsd - CURRENT_DATE)                       AS runway,
+       (f.fsd - CURRENT_DATE) - bs.lead_time_days   AS margin
+FROM fwd f
+JOIN items it     ON it.item_id = f.item_id
+JOIN best_sup bs  ON bs.item_id = f.item_id
+JOIN suppliers s  ON s.supplier_id = bs.supplier_id
+LEFT JOIN ipp_agg ia ON ia.item_id = f.item_id
+ORDER BY margin ASC
+"""
+
+
+def scan_recommend(conn: psycopg.Connection, top: int) -> dict:
+    cur = conn.cursor()
+    cur.execute("SET work_mem = '256MB'")
+    cur.execute("SET max_parallel_workers_per_gather = 0")
+    t0 = time.perf_counter()
+    rows = cur.execute(
+        REC_SQL,
+        {"b": BASELINE, "supply": list(SUPPLY_TYPES), "demand": list(DEMAND_TYPES)},
+    ).fetchall()
+    elapsed = time.perf_counter() - t0
+
+    recs = []
+    by_action: dict[str, int] = {}
+    spend_by_ccy: dict[str, float] = {}
+    for (ext, name, fsd, deficit, sup_ext, sup_name, rel, lt, moq,
+         unit_cost, ccy, ss, mult, runway, margin) in rows:
+        deficit = float(deficit or 0)
+        ss = float(ss or 0)
+        # quantity = cover deficit + restore pooled safety stock
+        qty = deficit + ss
+        if moq:
+            qty = max(qty, float(moq))
+        if mult:
+            qty = math.ceil(qty / float(mult)) * float(mult)
+        qty = round(qty, 2)
+        cost = round(qty * float(unit_cost), 2) if unit_cost is not None else None
+        ccy = ccy or "EUR"
+        if margin < -14:
+            action = "EXPEDITE"
+        elif margin < 0:
+            action = "ORDER_RUSH"
+        else:
+            action = "ORDER_NOW"
+        by_action[action] = by_action.get(action, 0) + 1
+        if cost is not None:
+            spend_by_ccy[ccy] = spend_by_ccy.get(ccy, 0.0) + cost
+        recs.append((ext, name, fsd, deficit, qty, cost, ccy, sup_ext, sup_name,
+                     rel, lt, runway, margin, action))
+
+    return {
+        "elapsed_s": round(elapsed, 2),
+        "n_recs": len(recs),
+        "by_action": by_action,
+        "spend_by_ccy": spend_by_ccy,
+        "recs": recs,
+        "top": top,
+    }
+
+
 def scan_reorder(conn: psycopg.Connection, top: int) -> dict:
     cur = conn.cursor()
     cur.execute("SET work_mem = '256MB'")
@@ -310,6 +412,8 @@ def main(argv=None) -> int:
                    help="aggregate net supply vs demand per ITEM (ignore location)")
     p.add_argument("--reorder", action="store_true",
                    help="item-level + reorder feasibility (RECOVERABLE / TIGHT / CRITICAL / NO_SOURCE)")
+    p.add_argument("--recommend", action="store_true",
+                   help="quantified purchase recommendations (supplier, qty, cost, action)")
     p.add_argument("--allow-dev", action="store_true")
     args = p.parse_args(argv)
     if not args.dsn:
@@ -319,6 +423,33 @@ def main(argv=None) -> int:
     loc_types = [t.strip() for t in args.location_types.split(",")] if args.location_types else None
 
     db = _guard(args.dsn, args.allow_dev)
+
+    # ── Recommendation mode ─────────────────────────────────────────
+    if args.recommend:
+        logger.info("Purchase recommendations: DB=%s", db)
+        with psycopg.connect(args.dsn) as conn:
+            r = scan_recommend(conn, args.top)
+        logger.info("=" * 100)
+        logger.info("PURCHASE RECOMMENDATIONS DONE in %.2fs", r["elapsed_s"])
+        logger.info("  Forward shortages with a supplier : %d", r["n_recs"])
+        logger.info("  By action:")
+        for act in ("EXPEDITE", "ORDER_RUSH", "ORDER_NOW"):
+            logger.info("      %-12s %d", act, r["by_action"].get(act, 0))
+        logger.info("  Estimated spend to cover:")
+        for ccy, amt in sorted(r["spend_by_ccy"].items(), key=lambda x: -x[1]):
+            logger.info("      %-6s %15.2f", ccy, amt)
+        logger.info("=" * 100)
+        logger.info("TOP %d recommendations (most urgent first):", r["top"])
+        logger.info("  %-14s %-10s %-11s %9s %13s %-9s %-12s %s",
+                    "item", "by_date", "action", "order_qty", "cost", "ccy", "supplier", "name")
+        for (ext, name, fsd, deficit, qty, cost, ccy, sup_ext, sup_name,
+             rel, lt, runway, margin, action) in r["recs"][: r["top"]]:
+            nm = (name or "")[:24]
+            cost_s = f"{cost:,.0f}" if cost is not None else "—"
+            logger.info("  %-14s %-10s %-11s %9.0f %13s %-9s %-12s %s",
+                        ext, str(fsd), action, qty, cost_s, ccy, sup_ext, nm)
+        logger.info("=" * 100)
+        return 0
 
     # ── Reorder feasibility mode ────────────────────────────────────
     if args.reorder:
