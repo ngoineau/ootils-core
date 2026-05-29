@@ -109,6 +109,8 @@ class PlanningData:
     names: dict = field(default_factory=dict)
     bom: dict = field(default_factory=dict)
     best_sup: dict = field(default_factory=dict)
+    unit_cost: dict = field(default_factory=dict)
+    cost_ccy: dict = field(default_factory=dict)
     co_b: dict = field(default_factory=dict)
     fc_b: dict = field(default_factory=dict)
     sched_b: dict = field(default_factory=dict)
@@ -156,13 +158,32 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         "WHERE bh.effective_to IS NULL OR bh.effective_to > CURRENT_DATE").fetchall():
         d.bom.setdefault(parent, []).append((comp, float(qpb), float(scrap or 0)))
 
+    # make/buy resolution: any item with an active BOM is manufactured (make),
+    # even when the is_make planning flag is missing. A missing flag must not
+    # silently turn a manufactured parent into a phantom (uncosted) purchase —
+    # it would explode the purchase plan with buy orders that have no supplier.
+    for parent in d.bom:
+        d.is_make[parent] = True
+
     for item, sid, sext, lt, uc, ccy, rel in cur.execute(
         "SELECT DISTINCT ON (si.item_id) si.item_id, s.supplier_id, s.external_id, "
         "si.lead_time_days, si.unit_cost, si.currency, s.reliability_score "
         "FROM supplier_items si JOIN suppliers s ON s.supplier_id=si.supplier_id "
         "WHERE si.lead_time_days IS NOT NULL "
-        "ORDER BY si.item_id, si.is_preferred DESC, si.lead_time_days ASC").fetchall():
+        # cost-aware pick: prefer the preferred supplier, but among ties take a row
+        # that actually carries a unit_cost before falling back to shortest lead time
+        "ORDER BY si.item_id, si.is_preferred DESC, (si.unit_cost IS NULL), si.lead_time_days ASC").fetchall():
         d.best_sup[item] = (sid, sext, lt, uc, ccy, rel)
+
+    # dedicated cost map: a representative unit_cost from ANY priced supplier row
+    # (decoupled from supplier identity / lead-time filter) so valuation isn't
+    # starved when the chosen supplier happens to carry no cost.
+    for item, uc, ccy in cur.execute(
+        "SELECT DISTINCT ON (item_id) item_id, unit_cost, currency FROM supplier_items "
+        "WHERE unit_cost IS NOT NULL AND unit_cost > 0 "
+        "ORDER BY item_id, is_preferred DESC, unit_cost ASC").fetchall():
+        d.unit_cost[item] = float(uc)
+        d.cost_ccy[item] = ccy or "USD"
 
     d.co_b = defaultdict(lambda: defaultdict(float))
     for item, tref, qty in cur.execute(

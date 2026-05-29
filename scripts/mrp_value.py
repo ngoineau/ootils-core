@@ -75,11 +75,15 @@ def main(argv=None) -> int:
             continue
         sup = d.best_sup.get(item)
         uc = sup[3] if sup else None
+        ccy = (sup[4] if sup else None)
+        if uc is None:                       # chosen supplier carries no cost -> fall back
+            uc = d.unit_cost.get(item)
+            ccy = d.cost_ccy.get(item)
         if uc is None:
             unpriced_units += qty
             unpriced_orders += 1
             continue
-        ccy = (sup[4] or "USD")
+        ccy = ccy or "USD"
         cost = qty * float(uc)
         by_ccy[ccy] += cost
         by_ccy_units[ccy] += qty
@@ -89,14 +93,20 @@ def main(argv=None) -> int:
         item_units[item] += qty
 
     tot_orders = priced_orders + unpriced_orders
+    priced_units = sum(by_ccy_units.values())
+    tot_units = priced_units + unpriced_units
     cov = 100.0 * priced_orders / tot_orders if tot_orders else 0.0
+    cov_u = 100.0 * priced_units / tot_units if tot_units else 0.0
     logger.info("=" * 92)
     logger.info("PURCHASE PLAN VALUATION — %s", label)
     logger.info("=" * 92)
     logger.info("  Planned PO releases in window : %d  (priced %d / unpriced %d)", tot_orders, priced_orders, unpriced_orders)
-    logger.info("  Price coverage                : %.1f%% of orders priced", cov)
+    logger.info("  Price coverage by order count : %.1f%%", cov)
+    logger.info("  Price coverage by VOLUME      : %.1f%%  (%s priced / %s total units)",
+                cov_u, f"{priced_units:,.0f}", f"{tot_units:,.0f}")
     if unpriced_orders:
-        logger.info("  ⚠ Unpriced (no supplier unit cost) : %d orders, %s units NOT valued", unpriced_orders, f"{unpriced_units:,.0f}")
+        logger.info("  ⚠ Unpriced (no supplier cost) : %d orders, %s units — typically low-level components",
+                    unpriced_orders, f"{unpriced_units:,.0f}")
     logger.info("  --------------------------------------------------------------")
     logger.info("  PLANNED SPEND by currency (no FX conversion applied):")
     for ccy in sorted(by_ccy, key=lambda c: -by_ccy[c]):
