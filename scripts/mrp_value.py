@@ -38,6 +38,7 @@ def main(argv=None) -> int:
     p.add_argument("--basis", choices=["release", "need"], default="release",
                    help="date a PO is attributed to: release (commit) or need (receipt)")
     p.add_argument("--rolling12", action="store_true", help="window = next 12 months instead of current calendar year")
+    p.add_argument("--year", type=int, default=None, help="value a specific calendar year FY (Jan1..Dec31), e.g. 2027")
     p.add_argument("--top", type=int, default=15)
     p.add_argument("--by-supplier", action="store_true", help="break purchase volume/spend down by supplier")
     p.add_argument("--top-suppliers", type=int, default=30, help="suppliers to show (<=0 = all)")
@@ -49,16 +50,27 @@ def main(argv=None) -> int:
     db = core.guard_db(args.dsn, args.allow_dev)
 
     with psycopg.connect(args.dsn) as conn:
-        d = core.load_planning_data(conn, args.horizon_days)
+        today = conn.cursor().execute("SELECT CURRENT_DATE").fetchone()[0]
+        # resolve the valuation window first, so the planning horizon is extended
+        # to cover it (a future FY needs more than the default 540 days).
+        if args.year is not None:
+            win_start = max(today, _dt.date(args.year, 1, 1))
+            win_end = _dt.date(args.year, 12, 31)
+            label = f"FY {args.year} ({win_start} .. {win_end})"
+        elif args.rolling12:
+            win_start, win_end = today, today + _dt.timedelta(days=365)
+            label = f"rolling 12 months ({win_start} .. {win_end})"
+        else:
+            win_start, win_end = today, _dt.date(today.year, 12, 31)
+            label = f"current year {today.year} ({win_start} .. {win_end})"
+        needed = (win_end - today).days + 14
+        horizon = max(args.horizon_days, needed)
+        d = core.load_planning_data(conn, horizon)
     gross = core.consume_demand(d)
     r = core.run_timephased(d, gross, force_rule=args.force_rule, poq_periods=args.poq_periods)
     hs = d.horizon_start
-
-    if args.rolling12:
-        win_start, win_end, label = hs, hs + _dt.timedelta(days=365), f"rolling 12 months ({hs} .. {hs + _dt.timedelta(days=365)})"
-    else:
-        win_start, win_end, label = hs, _dt.date(hs.year, 12, 31), f"current year {hs.year} ({hs} .. {hs.year}-12-31)"
-    logger.info("Purchase-plan valuation: DB=%s  rule=%s  basis=%s  window=%s", db, args.force_rule or "per-item", args.basis, label)
+    logger.info("Purchase-plan valuation: DB=%s  rule=%s  basis=%s  horizon=%dd  window=%s",
+                db, args.force_rule or "per-item", args.basis, horizon, label)
 
     by_ccy = defaultdict(float)
     by_ccy_units = defaultdict(float)
