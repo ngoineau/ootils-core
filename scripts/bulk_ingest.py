@@ -366,17 +366,41 @@ def load_item_planning_params(conn: psycopg.Connection, tsv_path: Path) -> dict[
             bad_item + bad_loc + bad_sup, bad_item, bad_loc, bad_sup,
         )
 
-    # Close existing active rows for matching (item, location) pairs
+    # Resolve the target (item_id, location_id) pairs once into a temp table so the
+    # close/replace below joins on an indexable key instead of a row-constructor IN
+    # subquery (faster, and reused by both statements).
+    cur.execute(
+        """
+        CREATE TEMP TABLE _b_ipp_keys ON COMMIT DROP AS
+        SELECT DISTINCT it.item_id, l.location_id
+        FROM _b_ipp b
+        JOIN items it ON it.external_id = b.item_external_id
+        JOIN locations l ON l.external_id = b.location_external_id
+        """
+    )
+    # Same-day reload (idempotency): active rows whose effective_from is today were
+    # written by an earlier load on the same day and carry no SCD2 history value.
+    # They must be DELETED, not closed — closing them to (CURRENT_DATE - 1) would set
+    # effective_to < effective_from and violate the ipp_effective_order check.
+    cur.execute(
+        """
+        DELETE FROM item_planning_params ipp
+        USING _b_ipp_keys k
+        WHERE ipp.effective_to IS NULL
+          AND ipp.effective_from >= CURRENT_DATE
+          AND ipp.item_id = k.item_id AND ipp.location_id = k.location_id
+        """
+    )
+    # Older active rows: close them at (CURRENT_DATE - 1), preserving SCD2 history.
+    # effective_from < CURRENT_DATE guarantees effective_to >= effective_from.
     cur.execute(
         """
         UPDATE item_planning_params ipp
         SET effective_to = CURRENT_DATE - INTERVAL '1 day', updated_at = now()
-        WHERE effective_to IS NULL
-          AND (ipp.item_id, ipp.location_id) IN (
-              SELECT it.item_id, l.location_id FROM _b_ipp b
-              JOIN items it ON it.external_id = b.item_external_id
-              JOIN locations l ON l.external_id = b.location_external_id
-          )
+        FROM _b_ipp_keys k
+        WHERE ipp.effective_to IS NULL
+          AND ipp.effective_from < CURRENT_DATE
+          AND ipp.item_id = k.item_id AND ipp.location_id = k.location_id
         """
     )
 
@@ -571,16 +595,18 @@ def load_on_hand(conn: psycopg.Connection, tsv_path: Path) -> dict[str, Any]:
     if bad_item or bad_loc:
         logger.warning("on_hand: rows with unresolved FKs will be skipped (items=%d, locations=%d)", bad_item, bad_loc)
 
-    # Delete existing OnHandSupply nodes for the affected (item, location) pairs
+    # Delete existing OnHandSupply nodes for the affected (item, location) pairs.
+    # DELETE ... USING a join (not a row-constructor IN subquery, which Postgres
+    # plans as a pathological nested loop — observed 17 min on 15k pairs) so the
+    # planner uses idx_nodes_item_location_scenario. Seconds instead of minutes.
     cur.execute(
         """
-        DELETE FROM nodes
-        WHERE node_type = 'OnHandSupply' AND scenario_id = %s::uuid
-          AND (item_id, location_id) IN (
-              SELECT it.item_id, loc.location_id FROM _b_oh b
-              JOIN items it ON it.external_id = TRIM(b.item_external_id)
-              JOIN locations loc ON loc.external_id = TRIM(b.location_external_id)
-          )
+        DELETE FROM nodes n
+        USING _b_oh b
+        JOIN items it      ON it.external_id  = TRIM(b.item_external_id)
+        JOIN locations loc ON loc.external_id = TRIM(b.location_external_id)
+        WHERE n.node_type = 'OnHandSupply' AND n.scenario_id = %s::uuid
+          AND n.item_id = it.item_id AND n.location_id = loc.location_id
         """,
         (BASELINE_SCENARIO_ID,),
     )
@@ -613,16 +639,18 @@ def load_forecasts(conn: psycopg.Connection, tsv_path: Path) -> dict[str, Any]:
     if bad_item or bad_loc:
         logger.warning("forecasts: rows with unresolved FKs will be skipped (items=%d, locations=%d)", bad_item, bad_loc)
 
-    # Wipe ForecastDemand nodes for affected (item, location) pairs (full reload)
+    # Wipe ForecastDemand nodes for affected (item, location) pairs (full reload).
+    # DELETE ... USING a join instead of a row-constructor IN subquery, so the
+    # planner uses idx_nodes_item_location_scenario (the IN form was a 17-min
+    # nested loop on the pilote).
     cur.execute(
         """
-        DELETE FROM nodes
-        WHERE node_type = 'ForecastDemand' AND scenario_id = %s::uuid
-          AND (item_id, location_id) IN (
-              SELECT DISTINCT it.item_id, loc.location_id FROM _b_fc b
-              JOIN items it ON it.external_id = TRIM(b.item_external_id)
-              JOIN locations loc ON loc.external_id = TRIM(b.location_external_id)
-          )
+        DELETE FROM nodes n
+        USING _b_fc b
+        JOIN items it      ON it.external_id  = TRIM(b.item_external_id)
+        JOIN locations loc ON loc.external_id = TRIM(b.location_external_id)
+        WHERE n.node_type = 'ForecastDemand' AND n.scenario_id = %s::uuid
+          AND n.item_id = it.item_id AND n.location_id = loc.location_id
         """,
         (BASELINE_SCENARIO_ID,),
     )
