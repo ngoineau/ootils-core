@@ -72,7 +72,7 @@ import agent_material_watcher  # noqa: E402
 import agent_shortage_watcher  # noqa: E402
 
 import psycopg  # noqa: E402
-from psycopg.rows import dict_row  # noqa: E402
+from psycopg.rows import dict_row, tuple_row  # noqa: E402
 
 pytestmark = [requires_db, pytest.mark.smoke]
 
@@ -102,8 +102,11 @@ _CONFIDENCES = {"HIGH", "MEDIUM", "LOW", "NEEDS_DATA_REVIEW"}
 _SEVERITIES = {"HIGH", "MEDIUM", "LOW"}
 
 
+# These helpers index rows positionally ([0], tuple-unpack), so they force a
+# tuple_row cursor regardless of the connection's row_factory -- callers may pass
+# a dict_row connection (used elsewhere for column access) without breaking them.
 def _completed_runs(conn, agent_name):
-    return conn.execute(
+    return conn.cursor(row_factory=tuple_row).execute(
         "SELECT COUNT(*) FROM agent_runs "
         "WHERE agent_name=%s AND scenario_id=%s AND status='COMPLETED'",
         (agent_name, BASELINE)).fetchone()[0]
@@ -111,7 +114,7 @@ def _completed_runs(conn, agent_name):
 
 def _latest_run(conn, agent_name):
     """(agent_run_id, status, metrics, finished_at) of the newest run, or None."""
-    return conn.execute(
+    return conn.cursor(row_factory=tuple_row).execute(
         "SELECT agent_run_id, status, metrics, finished_at FROM agent_runs "
         "WHERE agent_name=%s AND scenario_id=%s "
         "ORDER BY started_at DESC, finished_at DESC NULLS LAST LIMIT 1",
