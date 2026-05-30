@@ -180,6 +180,25 @@ def main(argv=None) -> int:
                          "evidence": {"supplier": sext, "valid_to": str(vto)}})
         emit("EXPIRED_SUPPLIER_TERM", rows)
 
+        # ── R7 STALE_SUPPLY — open firm receipts dated in the past, per item ──
+        rows = []
+        stale_sup = cur.execute(
+            "SELECT n.item_id, i.external_id, SUM(n.quantity) qty, COUNT(*) c, MIN(n.time_ref) oldest "
+            "FROM nodes n JOIN items i ON i.item_id=n.item_id "
+            "WHERE n.scenario_id=%(b)s AND n.active AND n.node_type=ANY(%(t)s) "
+            "  AND n.time_ref IS NOT NULL AND n.time_ref < CURRENT_DATE AND n.quantity IS NOT NULL "
+            "GROUP BY n.item_id, i.external_id",
+            {"b": core.BASELINE, "t": core.FIRM_RECEIPT_TYPES}).fetchall()
+        qmap = {row[0]: float(row[2] or 0) for row in stale_sup}
+        sev = _severity_by_quantile(qmap)
+        for item_id, ext, qty, c, oldest in stale_sup:
+            rows.append({"etype": "item", "eid": item_id, "eext": ext, "severity": sev.get(item_id, "LOW"),
+                         "metric": "past_due_receipt_qty", "impact": float(qty or 0),
+                         "desc": f"{c} open receipt(s) (PO/WO/transfer) dated in the past — collapse onto week 0 and inflate projected on-hand",
+                         "action": "Refresh open-order dates at the source, or close received/cancelled orders",
+                         "evidence": {"past_due_receipts": c, "past_due_qty": round(float(qty or 0), 2), "oldest": str(oldest)}})
+        emit("STALE_SUPPLY", rows)
+
         # ── persist: open run, supersede prior OPEN set, insert ──
         run_id = cur.execute(
             "INSERT INTO agent_runs (agent_name, scenario_id, status) VALUES (%s,%s,'RUNNING') RETURNING agent_run_id",
@@ -204,7 +223,8 @@ def main(argv=None) -> int:
     logger.info("DQ WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], metrics["elapsed_s"])
     logger.info("  Findings persisted (OPEN) : %d   (prior OPEN superseded: %d)", len(findings), superseded)
     logger.info("  By rule (count / total impact / persisted):")
-    for rule in ("MISSING_COST", "NO_SUPPLIER", "MAKE_WITHOUT_BOM", "STALE_DEMAND", "ORPHAN_MAKE_FLAG", "EXPIRED_SUPPLIER_TERM"):
+    for rule in ("MISSING_COST", "NO_SUPPLIER", "MAKE_WITHOUT_BOM", "STALE_DEMAND", "STALE_SUPPLY",
+                 "ORPHAN_MAKE_FLAG", "EXPIRED_SUPPLIER_TERM"):
         t = totals.get(rule)
         if t:
             logger.info("      %-22s %6d found / impact %15s / %d persisted",
