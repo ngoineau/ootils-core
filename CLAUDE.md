@@ -8,6 +8,32 @@ Target-architecture notes may appear below. Verify runtime reality before treati
 
 `ootils-core` — a graph-based supply chain decision engine. FastAPI REST API on top of a Python kernel that models supply chains as typed nodes + edges, persisted in PostgreSQL 16. Core capabilities: incremental propagation, shortage detection, MRP explosion, scenario branching (deep-copy fork — historically labelled "copy-on-write"; see [REVIEW-2026-05 R10](docs/REVIEW-2026-05.md)), RCCP, a ghost/virtual-supply engine, and a data quality (DQ) pipeline.
 
+## North Star — Ootils is an agent-piloted supply-chain operating substrate
+
+**This is the single most important framing.** Ootils is not an APS with an AI bolt-on. It is the **deterministic substrate** on top of which a fleet of agents (watchers, scenario workers, governance, orchestrators) continuously monitors, diagnoses, simulates, ranks, and drafts actions. Humans supervise exceptions and irreversible decisions; agents absorb the rest. Reference: `docs/STRATEGY-autonomous-supply-chain-operations.md`.
+
+Every design and implementation decision must be evaluated against this lens:
+
+- **Forkable / scenario-first** — every state-changing capability must work inside a scenario fork so agents can test counter-factuals without touching baseline. No feature is "agent-ready" if it only works on baseline.
+- **Deterministic core, stochastic edge** — LLMs/agents never own core calculations. Engine is deterministic; agents propose, govern, approve. Reproducibility is non-negotiable.
+- **Queryable from a scenario** — every read path (`GetNode`, `QueryShortages`, etc.) must accept a `scenario_id`. Agents read from forks, not just baseline.
+- **Streamable** — agents subscribe to deltas (`StreamChanges`), they don't poll. New capabilities should emit change events.
+- **Explainable** — every calculation must be traceable. Recommendations without evidence are rejected by governance agents.
+- **Auditable** — every write (by agent or human) is logged with input, output, scenario_id, calc_run_id, policy result. Audit is a feature, not telemetry.
+- **Confidence-aware** — outputs that agents consume (forecasts, anomalies, recommendations) must carry a confidence score and a data-freshness flag. Stale data or low DQ blocks autonomous actions.
+- **Decision Ladder L0-L4** (cf. strategy doc §5) — every action is classified by reversibility/risk. L0-L2 may be autonomous; L3-L4 require human approval.
+- **Budgeted / kill-switchable** — agent-facing endpoints must support idempotency, per-agent scopes, rate limits, and global kill switches.
+
+**Anti-patterns to refuse** (even if requested):
+- A module that only works on baseline (not forkable).
+- A read endpoint without `scenario_id` parameter.
+- A write that bypasses the recommendation/approval state machine for L3+ actions.
+- A forecast / score / metric without a confidence or freshness signal.
+- An LLM call inside a deterministic calculation path.
+- A new feature without StreamChanges emission, without audit log, without explanation trace.
+
+**Wedge V1** : "Autonomous shortage control tower with scenario-backed recommendations." Every near-term feature is judged by whether it advances this wedge.
+
 ## Commands
 
 ```bash
