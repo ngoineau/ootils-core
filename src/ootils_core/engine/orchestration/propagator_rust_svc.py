@@ -25,11 +25,10 @@ from __future__ import annotations
 import logging
 import os
 from typing import TYPE_CHECKING, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 
-from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.orchestration.propagator import PropagationEngine
 from ootils_core.engine_rust_service import EngineClient
 

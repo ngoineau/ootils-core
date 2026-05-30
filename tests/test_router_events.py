@@ -157,8 +157,10 @@ def test_create_event_with_trigger_node_propagation_returns_none_calc_run():
     assert body["affected_nodes_estimate"] == 0
 
 
-def test_create_event_propagation_failure_swallowed():
-    """If propagation raises, request still returns 202 with status='queued'."""
+def test_create_event_propagation_failure_surfaces_503():
+    """F-031: if propagation raises, the event row is still persisted but the
+    failure surfaces as HTTP 503 (transient, retry-safe) — engine-down must NOT
+    be masked behind a 202 success."""
     db = _make_db_mock()
     fake_engine = MagicMock()
     fake_engine.process_event.side_effect = RuntimeError("propagator down")
@@ -176,8 +178,7 @@ def test_create_event_propagation_failure_swallowed():
             },
             headers=AUTH,
         )
-    assert resp.status_code == 202
-    assert resp.json()["status"] == "queued"
+    assert resp.status_code == 503
 
 
 def test_create_event_with_baseline_keyword_in_body():
