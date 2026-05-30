@@ -333,7 +333,16 @@ def first_shortage(d: PlanningData, gross: dict) -> dict:
     max_only + demand-time-fence + prorated + multi-location-deduped). For each
     item with independent demand, walks weekly buckets accumulating
     scheduled receipts − consumed demand on top of on-hand, and returns the FIRST
-    bucket where projected on-hand goes negative.
+    bucket where projected on-hand drops BELOW SAFETY STOCK.
+
+    Triggering at the safety threshold (not at zero/stockout) is deliberate and
+    matches run_timephased: safety stock is the reorder trigger that leaves lead
+    time to recover, so detecting only at true stockout would fire too late. For
+    items with no safety stock (ss=0) this reduces to "first negative bucket".
+
+    `deficit` is the quantity needed to climb back to the safety level (ss − pa),
+    i.e. the order is already sized to restore safety — consumers must NOT add ss
+    again.
 
     Returns {item: {"bucket": t, "date": date, "deficit": qty, "balance": pa}}.
 
@@ -345,13 +354,14 @@ def first_shortage(d: PlanningData, gross: dict) -> dict:
     for item, g in gross.items():
         if not g:
             continue
+        ss = float(d.safety.get(item, 0) or 0)
         pa = float(d.on_hand.get(item, 0) or 0)
         sc = d.sched_b.get(item, {})
         for t in range(d.n_buckets):
             pa += sc.get(t, 0.0) - g.get(t, 0.0)
-            if pa < 0:
+            if pa < ss:
                 out[item] = {"bucket": t, "date": d.horizon_start + _dt.timedelta(weeks=t),
-                             "deficit": -pa, "balance": pa}
+                             "deficit": ss - pa, "balance": pa}
                 break
     return out
 

@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import logging
 import os
 import sys
@@ -69,8 +70,23 @@ def main(argv=None) -> int:
     with psycopg.connect(args.dsn) as conn:
         d = core.load_planning_data(conn, args.horizon_days)
         gross = core.consume_demand(d)
-        short = core.first_shortage(d, gross)
+        r = core.run_timephased(d, gross)
         today = d.horizon_start
+
+        # FG procurement signal sourced from the TIME-PHASED engine (nets to safety,
+        # lot-sized, lead-time offset) — not a single-bucket deficit, so the order is
+        # correctly sized for the coverage the engine planned. Scope: items carrying
+        # independent demand that are BOUGHT (LLC 0); components (LLC>=1) are the
+        # material watcher's job. Take the EARLIEST planned PO per item as the imminent
+        # buy; count the rest as future-planned context.
+        fg_first, fg_count = {}, defaultdict(int)
+        for it, qty_o, rel_o, need_o, kind_o, pd_o in r["planned"]:
+            if kind_o != "PO" or it not in gross or d.llc.get(it, 0) != 0:
+                continue
+            fg_count[it] += 1
+            best = fg_first.get(it)
+            if best is None or need_o < best["need"]:
+                fg_first[it] = {"qty": qty_o, "rel": rel_o, "need": need_o, "pd": pd_o}
 
         # demand freshness (data-quality gate): share of raw demand qty past-due
         cur = conn.cursor()
@@ -88,33 +104,32 @@ def main(argv=None) -> int:
         by_action, by_conf = defaultdict(int), defaultdict(int)
         spend = defaultdict(float)
         skipped_no_supplier = 0
-        for item, sh in short.items():
+        for item, o in fg_first.items():
             sup = d.best_sup.get(item)
             if not sup:
                 skipped_no_supplier += 1      # make / unsourced independent demand → material side
                 continue
             sid, sext, lt, uc, ccy, rel = sup
-            deficit = sh["deficit"]
-            ss = float(d.safety.get(item, 0) or 0)
-            qty = core.lot_size(deficit + ss, float(d.moq.get(item) or 0), float(d.mult.get(item) or 0))
-            qty = round(qty, 2)
+            qty = round(o["qty"], 2)          # already lot-sized & lead-time-offset by run_timephased
             cost = round(qty * float(uc), 2) if uc is not None else None
             ccy = ccy or "EUR"
-            runway = (sh["date"] - today).days
+            need_date = today + _dt.timedelta(weeks=o["need"])
+            runway = (need_date - today).days
             margin = runway - int(lt or core.DEFAULT_LT_DAYS)
-            action = "EXPEDITE" if margin < -14 else ("ORDER_RUSH" if margin < 0 else "ORDER_NOW")
+            action = "EXPEDITE" if (o["pd"] or margin < -14) else ("ORDER_RUSH" if margin < 0 else "ORDER_NOW")
             conf = _confidence(uc, rel, past_due_ratio)
-            evidence = {"deficit_qty": round(deficit, 2), "pooled_safety_stock": ss,
+            evidence = {"planned_qty": qty, "release_week": o["rel"], "need_week": o["need"],
+                        "past_due": o["pd"], "future_orders_planned": fg_count[item],
                         "moq": float(d.moq.get(item) or 0) or None, "order_multiple": float(d.mult.get(item) or 0) or None,
                         "lead_time_days": lt, "runway_days": runway, "margin_days": margin,
-                        "shortage_bucket_week": sh["bucket"], "supplier_reliability": float(rel) if rel is not None else None,
+                        "supplier_reliability": float(rel) if rel is not None else None,
                         "unit_cost": float(uc) if uc is not None else None,
-                        "rule": "first weekly bucket where on_hand + receipts − consumed_demand < 0; "
-                                "qty = deficit + pooled_safety, MOQ floor, multiple round (consumed demand = max_only/DTF/prorated)"}
+                        "rule": "earliest time-phased planned PURCHASE order from run_timephased "
+                                "(nets to safety, lot-sized, lead-time offset); consumed demand = max_only/DTF/prorated"}
             recs.append((AGENT_NAME, run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                         sh["date"], round(deficit, 2), qty, cost, ccy, sid, sext, lt, runway, margin,
+                         need_date, qty, qty, cost, ccy, sid, sext, lt, runway, margin,
                          action, "L1", "DRAFT", conf, Jsonb(evidence)))
-            display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": sh["date"], "qty": qty,
+            display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": need_date, "qty": qty,
                             "cost": cost, "ccy": ccy, "action": action, "conf": conf, "margin": margin})
             by_action[action] += 1
             by_conf[conf] += 1
@@ -135,7 +150,7 @@ def main(argv=None) -> int:
                    "by_action": dict(by_action), "by_confidence": dict(by_conf),
                    "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
                    "skipped_no_supplier": skipped_no_supplier,
-                   "shortage_items": len(short), "demand_nodes": dn, "past_due_demand_nodes": pdn,
+                   "fg_items_to_order": len(fg_first), "demand_nodes": dn, "past_due_demand_nodes": pdn,
                    "past_due_ratio": round(past_due_ratio, 4), "elapsed_s": round(time.perf_counter() - t0, 2)}
         cur.execute("UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s WHERE agent_run_id=%s",
                     (Jsonb(metrics), run_id))
@@ -145,8 +160,8 @@ def main(argv=None) -> int:
     logger.info("=" * 92)
     logger.info("SHORTAGE WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], m["elapsed_s"])
     logger.info("  Recommendations written (DRAFT, L1) : %d", m["recommendations"])
-    logger.info("  Forward shortage items (total)      : %d  (skipped, no supplier: %d)",
-                m["shortage_items"], m["skipped_no_supplier"])
+    logger.info("  FG items needing a purchase order   : %d  (skipped, no supplier: %d)",
+                m["fg_items_to_order"], m["skipped_no_supplier"])
     logger.info("  Prior drafts superseded (EXPIRED)   : %d", m["superseded_prior_drafts"])
     logger.info("  By action     : %s", m["by_action"])
     logger.info("  By confidence : %s", m["by_confidence"])
