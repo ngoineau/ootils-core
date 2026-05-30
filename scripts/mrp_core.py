@@ -325,7 +325,8 @@ def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4,
                     else:
                         n_po += 1
     return {"planned": planned, "n_wo": n_wo, "n_po": n_po, "past_due": past_due,
-            "within_ptf": within_ptf, "rule_orders": dict(rule_orders)}
+            "within_ptf": within_ptf, "rule_orders": dict(rule_orders),
+            "dependent": {it: dict(bk) for it, bk in dependent.items()}}
 
 
 def first_shortage(d: PlanningData, gross: dict) -> dict:
