@@ -366,6 +366,53 @@ def first_shortage(d: PlanningData, gross: dict) -> dict:
     return out
 
 
+def excess_obsolete(d: PlanningData, gross: dict, months: float = 12.0) -> dict:
+    """Classify on-hand stock against its consumption rate and quantify the part
+    sitting beyond `months` of coverage.
+
+    Annual usage per item = total GROSS demand over the next 52 weeks (independent
+    consumed demand + BOM-exploded dependent demand, no netting — the true burn
+    rate). coverage_months = on_hand / (annual / 12).
+      EXCESS   : coverage > months → excess_units = on_hand − months × monthly
+      OBSOLETE : annual == 0 (no demand on the horizon) → excess_units = on_hand
+
+    Returns {item: {"class","on_hand","annual","coverage_months"(None=∞),"excess_units"}}.
+    Only items with on_hand > 0 AND beyond the threshold are returned.
+    """
+    WEEKS = 52
+    indep12 = {}
+    for item, buckets in gross.items():
+        s = sum(q for t, q in buckets.items() if t < WEEKS)
+        if s:
+            indep12[item] = s
+    dep12 = defaultdict(float)
+    for level in range(0, d.max_llc + 1):
+        for item in d.by_level[level]:
+            use = indep12.get(item, 0.0) + dep12.get(item, 0.0)
+            if use <= 0 or not bool(d.is_make.get(item, False)):
+                continue
+            for comp, qpb, scrap in d.bom.get(item, []):
+                dep12[comp] += use * qpb * (1.0 + scrap)
+
+    out = {}
+    for item, oh in d.on_hand.items():
+        oh = float(oh or 0)
+        if oh <= 0:
+            continue
+        annual = indep12.get(item, 0.0) + dep12.get(item, 0.0)
+        if annual <= 0:
+            out[item] = {"class": "OBSOLETE", "on_hand": oh, "annual": 0.0,
+                         "coverage_months": None, "excess_units": oh}
+        else:
+            monthly = annual / 12.0
+            cover = oh / monthly
+            if cover <= months:
+                continue
+            out[item] = {"class": "EXCESS", "on_hand": oh, "annual": annual,
+                         "coverage_months": cover, "excess_units": oh - months * monthly}
+    return out
+
+
 def peg_origins(d: PlanningData, gross: dict):
     """Aggregate LLC cascade with origin attribution. Returns (dependent_total,
     origin) where origin[item] = {finished_good: qty}. Uses consumed demand.

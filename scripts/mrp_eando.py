@@ -54,19 +54,7 @@ def main(argv=None) -> int:
     with psycopg.connect(args.dsn) as conn:
         d = core.load_planning_data(conn, args.horizon_days)
     gross = core.consume_demand(d)
-
-    # Total GROSS usage per item over the horizon = independent demand + dependent
-    # demand exploded through the BOM (no netting → true consumption rate).
-    indep = {i: sum(v.values()) for i, v in gross.items()}
-    dep = defaultdict(float)
-    for level in range(0, d.max_llc + 1):
-        for item in d.by_level[level]:
-            use = indep.get(item, 0.0) + dep.get(item, 0.0)
-            if use <= 0 or not bool(d.is_make.get(item, False)):
-                continue
-            for comp, qpb, scrap in d.bom.get(item, []):
-                dep[comp] += use * qpb * (1.0 + scrap)
-    ann_factor = 365.0 / args.horizon_days
+    eo = core.excess_obsolete(d, gross, months=args.months)
 
     by_class_ccy = defaultdict(lambda: defaultdict(float))   # class -> ccy -> value
     by_class_units = defaultdict(float)
@@ -74,19 +62,10 @@ def main(argv=None) -> int:
     unpriced_units = unpriced_items = 0
     rows = []                                                # (item, cls, oh, cover, excess_units, value, ccy)
 
-    for item, oh in d.on_hand.items():
-        oh = float(oh or 0)
-        if oh <= 0:
-            continue
-        annual = (indep.get(item, 0.0) + dep.get(item, 0.0)) * ann_factor
-        monthly = annual / 12.0
-        if annual <= 0:
-            cls, cover, excess_units = "OBSOLETE", math.inf, oh
-        else:
-            cover = oh / monthly
-            if cover <= args.months:
-                continue                                     # healthy coverage
-            cls, excess_units = "EXCESS", oh - args.months * monthly
+    for item, e in eo.items():
+        cls = e["class"]
+        excess_units = e["excess_units"]
+        cover = e["coverage_months"] if e["coverage_months"] is not None else math.inf
         uc = d.unit_cost.get(item) or d.std_cost.get(item)
         ccy = (d.cost_ccy.get(item) or d.std_ccy.get(item) or "USD")
         by_class_units[cls] += excess_units
@@ -98,7 +77,7 @@ def main(argv=None) -> int:
         else:
             value = excess_units * float(uc)
             by_class_ccy[cls][ccy] += value
-        rows.append((d.names.get(item, str(item)[:8]), cls, oh, cover, excess_units, value, ccy))
+        rows.append((d.names.get(item, str(item)[:8]), cls, e["on_hand"], cover, excess_units, value, ccy))
 
     elapsed = round(time.perf_counter() - t0, 2)
     grand = defaultdict(float)
