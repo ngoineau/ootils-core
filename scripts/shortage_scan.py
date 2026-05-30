@@ -1,20 +1,17 @@
 """
 shortage_scan.py — item-level shortage scan, thin over mrp_core.
 
-Detects the first forward shortage per item on the SINGLE demand truth
-(mrp_core: forecast consumption max_only + demand time fence + proration +
-multi-location dedup) via the same virtual projection the Shortage Watcher agent
-uses (core.first_shortage). This is the human/CLI counterpart of the agent — same
-numbers.
+Detects items whose projected on-hand falls BELOW SAFETY STOCK on the SINGLE
+demand truth (mrp_core: forecast consumption max_only + demand time fence +
+proration + multi-location dedup), via core.first_shortage.
 
-Previously this script ran a raw SQL window function that SUMMED customer orders
-+ forecast (double-count) with no proration; it now shares mrp_core so the scan,
-the agent, and the MRP all agree.
-
-Modes:
-    (default)     list net-short items, worst balance first
-    --reorder     classify by reorder feasibility (RECOVERABLE / TIGHT / CRITICAL / NO_SOURCE)
-    --recommend   quantified purchase recommendations (supplier, qty, cost, action)
+Modes (note the two detection bases, intentionally):
+    (default)     list items below safety, worst balance first   [core.first_shortage]
+    --reorder     classify by reorder feasibility                [core.first_shortage]
+    --recommend   quantified purchase recommendations            [core.run_timephased]
+The default/--reorder DETECTION fires at the safety threshold; --recommend mirrors
+the Shortage Watcher agent exactly (same time-phased engine, same numbers). The
+detection count can exceed the recommend count (e.g. items covered without a PO).
 
 Note on location: planning is pooled at item level (LANES-LATER). Per-(item,
 location) projection needs the network connected and is out of scope here.
@@ -130,7 +127,7 @@ def main(argv=None) -> int:
             classified.append((d.names.get(item, str(item)[:8]), sh["date"], sh["balance"], lt, runway, margin, cls))
         actionable = sorted([c for c in classified if c[6] in ("CRITICAL", "TIGHT")], key=lambda c: c[5])
         logger.info("=" * 90)
-        logger.info("REORDER FEASIBILITY (consumption-correct) in %.2fs — %d net-short items", elapsed, len(short))
+        logger.info("REORDER FEASIBILITY (consumption-correct) in %.2fs — %d items below safety", elapsed, len(short))
         for cls in ("CRITICAL", "TIGHT", "RECOVERABLE", "NO_SOURCE"):
             n = breakdown.get(cls, 0)
             pct = (100 * n / len(short)) if short else 0
@@ -151,10 +148,10 @@ def main(argv=None) -> int:
     logger.info("=" * 78)
     logger.info("ITEM-LEVEL SHORTAGE SCAN (consumption-correct) in %.2fs", elapsed)
     logger.info("  Items with independent demand : %d", n_demand_items)
-    logger.info("  Items net-short               : %d (%.1f%%)", len(short), pct)
+    logger.info("  Items below safety stock      : %d (%.1f%%)", len(short), pct)
     logger.info("=" * 78)
-    logger.info("TOP %d net-short items — worst balance first:", args.top)
-    logger.info("  %-16s %-11s %14s %14s   %s", "item", "date", "net_balance", "deficit", "name")
+    logger.info("TOP %d items below safety — worst balance first:", args.top)
+    logger.info("  %-16s %-11s %14s %14s   %s", "item", "date", "proj_balance", "to_safety", "name")
     for item, sh in rows[: args.top]:
         logger.info("  %-16s %-11s %14.1f %14.1f   %s", d.names.get(item, str(item)[:8]), str(sh["date"]),
                     sh["balance"], sh["deficit"], (d.names.get(item, "") or "")[:28])

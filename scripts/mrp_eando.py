@@ -66,8 +66,8 @@ def main(argv=None) -> int:
         cls = e["class"]
         excess_units = e["excess_units"]
         cover = e["coverage_months"] if e["coverage_months"] is not None else math.inf
-        uc = d.unit_cost.get(item) or d.std_cost.get(item)
-        ccy = (d.cost_ccy.get(item) or d.std_ccy.get(item) or "USD")
+        uc, ccy = core.cost_of(d, item)
+        ccy = ccy or "USD"
         by_class_units[cls] += excess_units
         by_class_items[cls] += 1
         if uc is None:

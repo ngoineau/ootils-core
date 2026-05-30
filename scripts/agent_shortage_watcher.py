@@ -71,6 +71,7 @@ def main(argv=None) -> int:
         d = core.load_planning_data(conn, args.horizon_days)
         gross = core.consume_demand(d)
         r = core.run_timephased(d, gross)
+        short = core.first_shortage(d, gross)   # for the true deficit-to-safety per item
         today = d.horizon_start
 
         # FG procurement signal sourced from the TIME-PHASED engine (nets to safety,
@@ -111,6 +112,7 @@ def main(argv=None) -> int:
                 continue
             sid, sext, lt, uc, ccy, rel = sup
             qty = round(o["qty"], 2)          # already lot-sized & lead-time-offset by run_timephased
+            deficit = round(short.get(item, {}).get("deficit", qty), 2)   # true shortfall-to-safety (≠ lot-sized qty)
             cost = round(qty * float(uc), 2) if uc is not None else None
             ccy = ccy or "EUR"
             need_date = today + _dt.timedelta(weeks=o["need"])
@@ -127,7 +129,7 @@ def main(argv=None) -> int:
                         "rule": "earliest time-phased planned PURCHASE order from run_timephased "
                                 "(nets to safety, lot-sized, lead-time offset); consumed demand = max_only/DTF/prorated"}
             recs.append((AGENT_NAME, run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                         need_date, qty, qty, cost, ccy, sid, sext, lt, runway, margin,
+                         need_date, deficit, qty, cost, ccy, sid, sext, lt, runway, margin,
                          action, "L1", "DRAFT", conf, Jsonb(evidence)))
             display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": need_date, "qty": qty,
                             "cost": cost, "ccy": ccy, "action": action, "conf": conf, "margin": margin})

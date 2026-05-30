@@ -71,8 +71,8 @@ def main(argv=None) -> int:
             sc = d.sched_b.get(item, {})
             if pa == 0 and not g and not sc:
                 continue
-            uc = d.unit_cost.get(item) or d.std_cost.get(item)
-            ccy = (d.cost_ccy.get(item) or d.std_ccy.get(item) or "USD")
+            uc, ccy = core.cost_of(d, item)
+            ccy = ccy or "USD"
             last_in_month = {}
             for t in range(d.n_buckets):
                 pa += sc.get(t, 0.0) - g.get(t, 0.0)
@@ -102,10 +102,9 @@ def main(argv=None) -> int:
             loc_units[lext] += q
             loc_type[lext] = ltype
             loc_items[lext].add(item_id)
-            uc = d.unit_cost.get(item_id) or d.std_cost.get(item_id)
+            uc, ccy = core.cost_of(d, item_id)
             if uc is not None:
-                ccy = (d.cost_ccy.get(item_id) or d.std_ccy.get(item_id) or "USD")
-                loc_val[lext][ccy] += q * float(uc)
+                loc_val[lext][ccy] += q * uc
 
         # supply-side stale dates: past-due open receipts collapse onto week 0 and
         # inflate the opening projected position (mirror of stale demand).

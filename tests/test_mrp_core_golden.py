@@ -69,6 +69,16 @@ def test_apply_lot_rule_variants():
     assert core.apply_lot_rule("POQ", 10, 0, 0, {1: 20, 2: 30}, 0, 3, 0, 0, 0, 0, nb) == 60
 
 
+def test_apply_lot_rule_max_order_qty_cap():
+    """max_order_qty caps a single order for every rule EXCEPT MIN_MAX (which uses
+    maxoq as a target stock level, not a per-order ceiling)."""
+    nb = 12
+    # LOTFORLOT shortfall 5000 capped at max_order_qty 1000
+    assert core.apply_lot_rule("LOTFORLOT", 5000, 0, 0, {}, 0, 4, 0, 1000, 0, 0, nb) == 1000
+    # MIN_MAX NOT capped: (ss + maxoq) - pa = (0 + 1000) - (-100) = 1100
+    assert core.apply_lot_rule("MIN_MAX", 0, -100, 0, {}, 0, 4, 0, 1000, 0, 0, nb) == 1100
+
+
 # ───────────────────────── forecast proration ─────────────────────────
 
 def test_spread_period_conserves_mass_inside_horizon():
@@ -172,7 +182,9 @@ def test_excess_obsolete_classification():
             excess = 1000 - 12*(10/12) = 990.
        OBS: on_hand 200, no demand -> OBSOLETE, excess = 200.
        OK : on_hand 100, annual 200 -> coverage 6 mo -> not E&O (excluded)."""
-    d = build_pd(on_hand={"EXC": 1000, "OBS": 200, "OK": 100})
+    # n_buckets=53 ⇒ a full-year window (weeks_win=52, annualization factor 1.0),
+    # so the summed demand IS the annual figure.
+    d = build_pd(n_buckets=53, on_hand={"EXC": 1000, "OBS": 200, "OK": 100})
     gross = {"EXC": {1: 5.0, 10: 5.0}, "OK": {1: 200.0}}
     eo = core.excess_obsolete(d, gross, months=12.0)
     assert eo["EXC"]["class"] == "EXCESS"
@@ -180,3 +192,14 @@ def test_excess_obsolete_classification():
     assert eo["OBS"]["class"] == "OBSOLETE"
     assert eo["OBS"]["excess_units"] == pytest.approx(200.0)
     assert "OK" not in eo
+
+
+def test_excess_obsolete_annualizes_to_short_horizon():
+    """With a horizon shorter than a year, demand in the window is scaled up to an
+    annual rate (so coverage isn't over-stated and healthy stock isn't mis-flagged).
+    n_buckets=26 ⇒ weeks_win=26, factor 52/26=2. Demand 10 → annual 20, monthly
+    1.667, coverage = 100/1.667 = 60 mo > 12 → EXCESS; excess = 100 - 12*1.667 = 80."""
+    d = build_pd(n_buckets=26, on_hand={"E": 100})
+    eo = core.excess_obsolete(d, {"E": {0: 10.0}}, months=12.0)
+    assert eo["E"]["class"] == "EXCESS"
+    assert eo["E"]["excess_units"] == pytest.approx(80.0)

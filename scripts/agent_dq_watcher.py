@@ -111,7 +111,7 @@ def main(argv=None) -> int:
         sev = _severity_by_quantile(nosup)
         for it, q in nosup.items():
             rows.append({"etype": "item", "eid": it, "eext": d.names.get(it, str(it)[:8]),
-                         "severity": "HIGH" if q > 0 else sev.get(it, "LOW"),
+                         "severity": sev.get(it, "MEDIUM"),   # impact-ranked by planned volume
                          "desc": "Item is planned for purchase but has no sourceable supplier (no supplier_items with a lead time)",
                          "metric": "planned_volume_units", "impact": q,
                          "action": "Create a supplier_items link (supplier, lead_time_days, ideally unit_cost/MOQ)",
