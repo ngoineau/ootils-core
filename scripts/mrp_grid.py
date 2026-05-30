@@ -93,11 +93,13 @@ def main(argv=None) -> int:
     def bmonth(t):
         return (hs + _dt.timedelta(weeks=t)).strftime("%Y-%m")
 
-    prcpt = defaultdict(lambda: defaultdict(float))   # item -> month -> qty (at need)
-    prel = defaultdict(lambda: defaultdict(float))    # item -> month -> qty (at release)
+    prcpt = defaultdict(lambda: defaultdict(float))      # item -> month -> qty (at need)
+    prel = defaultdict(lambda: defaultdict(float))       # item -> month -> qty (at release)
+    prcpt_wk = defaultdict(lambda: defaultdict(float))   # item -> need_bucket -> qty (weekly, for the PAB walk)
     for item, qty, rel, need, kind, pd in r["planned"]:
         prcpt[item][bmonth(need)] += qty
         prel[item][bmonth(rel)] += qty
+        prcpt_wk[item][need] += qty
 
     # calendar month columns from today
     today = hs
@@ -109,9 +111,15 @@ def main(argv=None) -> int:
             mo, y = 1, y + 1
 
     def month_end_bucket(m):
+        """Weekly bucket containing the last day of month m, or None if that month
+        lies beyond the planning horizon (so the grid shows blank, not a stale
+        repeat of the last in-horizon PAB)."""
         yy, mm = (int(x) for x in m.split("-"))
         first_next = _dt.date(yy + 1, 1, 1) if mm == 12 else _dt.date(yy, mm + 1, 1)
-        return max(0, min((first_next - _dt.timedelta(days=1) - hs).days // 7, d.n_buckets - 1))
+        bk = (first_next - _dt.timedelta(days=1) - hs).days // 7
+        if bk < 0 or bk >= d.n_buckets:
+            return None
+        return bk
 
     def fmt(v):
         return f"{v:,.0f}" if abs(v) >= 0.5 else "·"
@@ -139,15 +147,12 @@ def main(argv=None) -> int:
             grossm[bmonth(t)] += v
         # PAB walk on weekly engine, sampled at calendar month-end (exact point-in-time)
         sched_wk = d.sched_b.get(item, {})
-        prcpt_wk = defaultdict(float)
-        for _it, qty, rel, need, knd, pdf in r["planned"]:
-            if _it == item:
-                prcpt_wk[need] += qty
+        item_prcpt = prcpt_wk.get(item, {})
         pa, pab_bucket = oh, []
         for t in range(d.n_buckets):
-            pa += sched_wk.get(t, 0.0) + prcpt_wk.get(t, 0.0) - gross_req_wk.get(t, 0.0)
+            pa += sched_wk.get(t, 0.0) + item_prcpt.get(t, 0.0) - gross_req_wk.get(t, 0.0)
             pab_bucket.append(pa)
-        pab_m = {m: pab_bucket[month_end_bucket(m)] for m in months}
+        pab_m = {m: pab_bucket[b] for m in months if (b := month_end_bucket(m)) is not None}
 
         lines = [
             ("Forecast", fc_m),

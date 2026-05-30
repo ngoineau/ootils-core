@@ -46,6 +46,20 @@ def lot_size(qty, moq, mult):
     return qty
 
 
+def cost_of(d, item):
+    """Unit cost + currency for an item, single source of the valuation precedence:
+    negotiated supplier unit_cost first, then item standard_cost. Returns
+    (None, None) when unpriced. A loaded cost of 0 is a real price, not 'missing' —
+    only None means unpriced (avoids the `unit_cost or std_cost` truthiness trap).
+    """
+    uc = d.unit_cost.get(item)
+    ccy = d.cost_ccy.get(item)
+    if uc is None:
+        uc = d.std_cost.get(item)
+        ccy = d.std_ccy.get(item)
+    return (float(uc), ccy or "USD") if uc is not None else (None, None)
+
+
 def _spread_period(qty, start, end, horizon_start, horizon_end, n_buckets, out):
     """Prorate qty across weekly buckets proportional to the days each bucket
     overlaps the period [start, end). Mass-conserving when the period is inside
@@ -80,7 +94,13 @@ def apply_lot_rule(rule, shortfall, pa, ss, netreq, t, P, eoq, maxoq, moq, mult,
         qty = math.ceil(shortfall / moq) * moq
     else:  # LOTFORLOT / MULTIPLE / fallback
         qty = shortfall
-    return lot_size(qty, moq, mult)
+    q = lot_size(qty, moq, mult)
+    # max_order_qty is a per-order ceiling. MIN_MAX already uses maxoq as a target
+    # stock level (ss+maxoq), so don't re-cap that rule with the same field. For
+    # every other rule, never exceed the supplier's max order quantity.
+    if maxoq and maxoq > 0 and rule != "MIN_MAX" and q > maxoq:
+        q = float(maxoq)
+    return q
 
 
 @dataclass
@@ -380,10 +400,15 @@ def excess_obsolete(d: PlanningData, gross: dict, months: float = 12.0) -> dict:
     Returns {item: {"class","on_hand","annual","coverage_months"(None=∞),"excess_units"}}.
     Only items with on_hand > 0 AND beyond the threshold are returned.
     """
-    WEEKS = 52
+    # Annualize over the available window: sum the first up-to-52 weeks of demand
+    # and scale to a full year. With the default horizon (>52 weeks) the factor is
+    # 1.0; for a shorter --horizon-days it prevents understating annual demand
+    # (which would over-state coverage and mis-flag healthy stock as E&O).
+    weeks_win = min(52, d.n_buckets)
+    scale = (52.0 / weeks_win) if weeks_win else 1.0
     indep12 = {}
     for item, buckets in gross.items():
-        s = sum(q for t, q in buckets.items() if t < WEEKS)
+        s = sum(q for t, q in buckets.items() if t < weeks_win) * scale
         if s:
             indep12[item] = s
     dep12 = defaultdict(float)

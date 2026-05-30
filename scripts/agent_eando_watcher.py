@@ -70,8 +70,8 @@ def main(argv=None) -> int:
             excess_units = e["excess_units"]
             cover = e["coverage_months"]                       # None = infinite
             firm_in = float(d.firm.get(item, 0) or 0)
-            uc = d.unit_cost.get(item) or d.std_cost.get(item)
-            ccy = (d.cost_ccy.get(item) or d.std_ccy.get(item) or "USD")
+            uc, ccy = core.cost_of(d, item)
+            ccy = ccy or "USD"
             value = round(excess_units * float(uc), 2) if uc is not None else None
 
             if firm_in > 0:
