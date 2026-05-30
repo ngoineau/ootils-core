@@ -5,7 +5,7 @@
 > À relire au début de chaque session, à mettre à jour à la fin. Les chiffres se
 > revérifient en live (audit) — ce doc est le cadre, pas la mesure.
 
-**Dernière mise à jour : 2026-05-30**
+**Dernière mise à jour : 2026-05-30 (hygiène repo + bascule chantier smoke-fleet)**
 
 ---
 
@@ -19,7 +19,25 @@
 
 ## 1. Chantier ACTIF
 
-> **Aucun chantier en cours.** Prochain à décider (voir §4).
+> **Smoke-test de régression CI de la fleet d'agents (5 watchers).**
+> Cadré (voir mini-plan ci-dessous). Pas encore lancé en exécution.
+>
+> **But** : chaque watcher s'instancie sur un jeu miniature seedé et produit un
+> run gouverné valide (agent_runs COMPLETED + recommandation DRAFT/L1 avec
+> evidence + confidence), sans planter, de façon idempotente. Objectif =
+> verrou anti-régression silencieuse, pas couverture exhaustive métier.
+>
+> **Constat de cadrage** : `tests/engine_service/test_agent_workflow.py` couvre
+> les primitives gRPC du moteur (fork, propagate-batch, heartbeat, get_node
+> scenario-aware) — PAS les 5 watchers Python (`scripts/agent_*_watcher.py`),
+> qui n'ont aujourd'hui **aucun test**. Le smoke-test est donc un NOUVEAU
+> fichier (`tests/integration/test_agent_fleet_smoke.py`), pas une extension.
+>
+> **Écart North Star noté** (hors périmètre smoke, à traiter ensuite) : les 5
+> watchers tournent sur `core.BASELINE` en dur — pas paramétrés par
+> `scenario_id` en entrée. Anti-pattern « only works on baseline ». Le smoke
+> verrouille le comportement actuel ; le passage scenario-first est un chantier
+> distinct (lié à P2.2 overlays).
 
 ---
 
@@ -41,8 +59,8 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 | Risque | Impact | Porteur |
 |---|---|---|
 | Couverture coût 25 % (9 023/36 635 items) | Valorisation sous-estimée | Données source (ERP) |
-| Zéro test d'intégration de la fleet d'agents | Régression silencieuse | À planifier (test-writer) |
-| 60+ branches remote stale | Bruit | Purge batch à faire |
+| Zéro test de la fleet d'agents (5 watchers sans aucun test) | Régression silencieuse | **EN COURS — chantier actif** (test-writer) |
+| ~55 branches remote stale (squash-mergées) | Bruit | Purge batch à faire (hors GO ciblé) |
 | mypy non-bloquant rouge | Dette qualité | Progressif, non urgent |
 
 ---
@@ -51,8 +69,8 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 
 ### Candidats prochain chantier (P0)
 1. **Unifier la vérité de demande + merge** — point d'entrée unique forecast + CO, vue réconciliée. *(Pré-sélectionné comme prochain.)*
-2. **Hygiène repo** — trier les fichiers non suivis (zips clients, `poc/`, `AGENTS.md`, `README.txt`), purger branches remote mergées, statuer sur les 5 PR ouvertes (dont 3 dependabot).
-3. **Smoke test CI de la fleet d'agents** — instancier chaque agent sur un jeu miniature.
+2. ~~**Hygiène repo**~~ — **FAIT** (PR #314) : gitignore zips clients + `poc/target/` + `README.txt` ; commit `.codex/` + `AGENTS.md` ; commit sources PoC Rust ; `docs/SPEC-INTERFACES-INBOUND-V1.md` + `scripts/_run_full_scope.sh`. Dependabot : #299 (rust) fermée, #298 (cache) + #300 (pandas) rebasées. Reste : purge batch des branches remote ; merge #314.
+3. **Smoke test CI de la fleet d'agents** — **PROMU CHANTIER ACTIF** (voir §1).
 
 ### Backlog technique (P1)
 - `P2.2.a/b/c` — Scenario overlays (PG schema + save/load + merge).
