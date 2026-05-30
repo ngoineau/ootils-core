@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import logging
 import os
 import sys
@@ -72,29 +73,37 @@ def main(argv=None) -> int:
     elapsed = round(time.perf_counter() - t0, 2)
     n_demand_items = sum(1 for g in gross.values() if g)
 
-    # ── Recommendation mode ─────────────────────────────────────────
+    # ── Recommendation mode (time-phased engine; mirrors shortage_watcher) ──
     if args.recommend:
+        r = core.run_timephased(d, gross)
+        fg_first = {}      # earliest planned PO per independent-demand buy item (LLC 0)
+        for it, qty_o, rel_o, need_o, kind_o, pd_o in r["planned"]:
+            if kind_o != "PO" or it not in gross or d.llc.get(it, 0) != 0:
+                continue
+            best = fg_first.get(it)
+            if best is None or need_o < best["need"]:
+                fg_first[it] = {"qty": qty_o, "need": need_o, "pd": pd_o}
         recs = []
         by_action, spend = {}, {}
-        for item, sh in short.items():
+        for item, o in fg_first.items():
             sup = d.best_sup.get(item)
             if not sup:
                 continue
             sid, sext, lt, uc, ccy, rel = sup
-            ss = float(d.safety.get(item, 0) or 0)
-            qty = round(core.lot_size(sh["deficit"] + ss, float(d.moq.get(item) or 0), float(d.mult.get(item) or 0)), 2)
+            qty = round(o["qty"], 2)         # already lot-sized & lead-time-offset by run_timephased
             cost = round(qty * float(uc), 2) if uc is not None else None
             ccy = ccy or "EUR"
-            runway = (sh["date"] - today).days
+            need_date = today + _dt.timedelta(weeks=o["need"])
+            runway = (need_date - today).days
             margin = runway - int(lt or core.DEFAULT_LT_DAYS)
-            action = "EXPEDITE" if margin < -14 else ("ORDER_RUSH" if margin < 0 else "ORDER_NOW")
+            action = "EXPEDITE" if (o["pd"] or margin < -14) else ("ORDER_RUSH" if margin < 0 else "ORDER_NOW")
             by_action[action] = by_action.get(action, 0) + 1
             if cost is not None:
                 spend[ccy] = spend.get(ccy, 0.0) + cost
-            recs.append((d.names.get(item, str(item)[:8]), sh["date"], action, qty, cost, ccy, sext, margin))
+            recs.append((d.names.get(item, str(item)[:8]), need_date, action, qty, cost, ccy, sext, margin))
         recs.sort(key=lambda r: r[7])
         logger.info("=" * 100)
-        logger.info("PURCHASE RECOMMENDATIONS (consumption-correct) in %.2fs — %d forward shortages with supplier",
+        logger.info("PURCHASE RECOMMENDATIONS (time-phased, mirrors shortage_watcher) in %.2fs — %d FG items with supplier",
                     elapsed, len(recs))
         for act in ("EXPEDITE", "ORDER_RUSH", "ORDER_NOW"):
             logger.info("      %-12s %d", act, by_action.get(act, 0))
