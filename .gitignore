@@ -29,3 +29,12 @@ env/
 !/data/processed/.gitkeep
 /data/rejected/*
 !/data/rejected/.gitkeep
+
+# Rust PoC build artifacts — sources are tracked, build output is not
+poc/rust_kernel/target/
+
+# Client data deliverables — operational payloads, not source
+data-input-canonique-v1-*.zip
+
+# Data-delivery notes that point at private workspace paths
+/README.txt
