@@ -62,12 +62,27 @@ aujourd'hui surtout du scaffolding.
   (`zone climatique→état→DC`) = hiérarchie **groupée** (plusieurs chemins vers un
   agrégat). Détail §3.
 
-### B — Modèles de fondation (Chronos / Moirai) *(la longue traîne)*
+### B — Modèles de fondation (Chronos) *(la longue traîne)*
 - Transformers TS **pré-entraînés**, **zero-shot** (pas d'entraînement par
-  série), sortie **probabiliste**. Chronos (Amazon, `chronos-forecasting`),
-  Moirai (Salesforce, `uni2ts`, any-variate → covariables).
+  série), sortie **probabiliste**.
+- **🔒 Licence — TRANCHÉ (vérifié à la source 2026-05-31)** :
+  - **Chronos / Chronos-Bolt** (Amazon) = **Apache-2.0** → usage commercial OK →
+    **modèle de fondation par défaut d'Ootils.**
+  - **Moirai** (Salesforce) = poids **`cc-by-nc-4.0`** (non-commercial,
+    « research purposes only » ; version proprio réservée à Salesforce) →
+    **EXCLU pour un usage commercial.** Le framework `uni2ts` est permissif mais
+    les *poids* ne le sont pas, et réentraîner est irréaliste. Réf :
+    fiche HF `Salesforce/moirai-2.0-R-small` + `amazon/chronos-bolt-small`.
+  - Réserve commerciale-safe alternative : **TimesFM** (Google, Apache-2.0).
+  - **Covariables** (météo/Buy qu'on visait via Moirai) → couvertes par **LGBM +
+    exogène (axe C)** ; pas besoin de Moirai.
 - **Pour toi** : milliers de SKU à **faible historique** (cold-start, longue
   traîne) où stat/ML échouent. Détail du routage §5.
+- **Câblage** : packages avec poids HuggingFace, **dépendance optionnelle**
+  (`ootils[foundation]`) + import paresseux + fallback (pattern existant). Charger
+  le modèle **une seule fois** (cache), **inférence par batch** (jamais série par
+  série), batch **offline** (runner → `forecasts` → matérialise `ForecastDemand`),
+  poids **pré-téléchargés** pour une VM hors-ligne.
 - **Caveats** : échelle (millions de séries → pas tout en FM, cf. §5/§6) ;
   **déterminisme** = moteur déterministe, FM au **bord stochastique**, forecast
   FM = artefact **daté, seedé, versionné, loggué** (jamais dans la propagation).
