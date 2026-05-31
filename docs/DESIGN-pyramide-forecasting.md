@@ -62,20 +62,24 @@ aujourd'hui surtout du scaffolding.
   (`zone climatique→état→DC`) = hiérarchie **groupée** (plusieurs chemins vers un
   agrégat). Détail §3.
 
-### B — Modèles de fondation (Chronos) *(la longue traîne)*
+### B — Modèles de fondation (Chronos-2) *(la longue traîne + le causal, fusionnés)*
 - Transformers TS **pré-entraînés**, **zero-shot** (pas d'entraînement par
   série), sortie **probabiliste**.
-- **🔒 Licence — TRANCHÉ (vérifié à la source 2026-05-31)** :
-  - **Chronos / Chronos-Bolt** (Amazon) = **Apache-2.0** → usage commercial OK →
-    **modèle de fondation par défaut d'Ootils.**
-  - **Moirai** (Salesforce) = poids **`cc-by-nc-4.0`** (non-commercial,
-    « research purposes only » ; version proprio réservée à Salesforce) →
-    **EXCLU pour un usage commercial.** Le framework `uni2ts` est permissif mais
-    les *poids* ne le sont pas, et réentraîner est irréaliste. Réf :
-    fiche HF `Salesforce/moirai-2.0-R-small` + `amazon/chronos-bolt-small`.
-  - Réserve commerciale-safe alternative : **TimesFM** (Google, Apache-2.0).
-  - **Covariables** (météo/Buy qu'on visait via Moirai) → couvertes par **LGBM +
-    exogène (axe C)** ; pas besoin de Moirai.
+- **🔒 Licence + capacités — TRANCHÉ (vérifié à la source 2026-05-31)** :
+  - **Chronos-2** (Amazon, 120M) = **Apache-2.0** ✅ commercial, et surtout
+    **multivarié + covariate-informed en zero-shot** → **modèle de fondation par
+    défaut d'Ootils.** Réf : `amazon/chronos-2` (HF), arXiv 2510.15821.
+  - **IBM Granite TTM** (TinyTimeMixer R2) = **Apache-2.0** ✅, **minuscule/rapide**,
+    covariables statiques, pré-entraîné sur données à licence commerciale validée
+    → **option « volume à bas coût » à l'échelle 325 DC.**
+  - **TimesFM-2.5** (Google) = Apache-2.0 ✅ → réserve.
+  - **Moirai-2** (Salesforce) = poids **`cc-by-nc-4.0`** → **EXCLU** (non-commercial,
+    research-only ; version proprio réservée à Salesforce). Ne pas re-proposer.
+- **💡 Conséquence majeure (met à jour l'axe C)** : Chronos-2 ingère les
+  **covariables nativement** (météo, calendrier Buy) en zero-shot → il **fusionne
+  B et C** sans pipeline d'entraînement et **sans le problème de licence Moirai**.
+  L'exogène via LGBM (axe C) devient une **alternative entraînée pour la tête**,
+  plus l'unique chemin.
 - **Pour toi** : milliers de SKU à **faible historique** (cold-start, longue
   traîne) où stat/ML échouent. Détail du routage §5.
 - **Câblage** : packages avec poids HuggingFace, **dépendance optionnelle**
@@ -90,9 +94,10 @@ aujourd'hui surtout du scaffolding.
 ### C — Variables exogènes *(l'avantage causal)*
 - Demande piscine **météo-dirigée** + rythmée par les **programmes Buy** (March/
   June/Early Buy → décalages de timing distributeurs).
-- **Comment** : LGBM/mlforecast (`static_features` + exogènes futurs), ARIMAX,
-  Moirai (covariables). Features : température par zone, jours avant/après chaque
-  Buy, phase de saison, fériés.
+- **Deux chemins** : (1) **via Chronos-2** (covariate-informed zero-shot — chemin
+  par défaut, voir B) ; (2) **LGBM/mlforecast** (`static_features` + exogènes
+  futurs) ou ARIMAX comme **modèle entraîné de la tête**. Features : température
+  par zone, jours avant/après chaque Buy, phase de saison, fériés.
 - **Subtilité** : l'exogène futur doit être **connu sur l'horizon** — programmes
   Buy ✅ (calendrier S&OP) ; météo ✅ ~2 semaines puis **normales climatiques**.
 - C'est ici que le modèle **apprend les décalages de timing** (early/late buy).
@@ -109,6 +114,27 @@ aujourd'hui surtout du scaffolding.
   **intervalles probabilistes** → safety stock par niveau de service.
 - **Fraîcheur** : liée au SLA d'ingestion `demand_history` (feed périmé → flag →
   blocage action autonome).
+
+### Périmètre V1 vs « frontier » (upside) — éviter le piège du labo
+
+Le différenciateur d'Ootils n'est **pas** le modèle de prévision (commodité
+qu'on branche) — c'est la **réconciliation hiérarchique**, la **vérité de demande**
+et la **gouvernance**. Dans un marché supply chain risk-averse, **explicabilité +
+confiance > 2 % d'accuracy d'un transformer opaque**. D'où ce cadrage :
+
+- **V1 (déjà très avancé, livrable)** : socle hiérarchique réconcilié **saisonnier**
+  (A) + **Chronos-2** sur traîne/cold-start (B, couvre aussi le causal C) +
+  **backtest avec intervalles conformal** pour la confiance (D). Lisible, gouvernable.
+- **Frontier = UPSIDE, hors V1** (à sortir quand l'accuracy devient le goulot —
+  ce qu'elle ne sera pas au début ; le goulot sera la **donnée** et l'**adoption**) :
+  - **Réconciliation probabiliste cohérente** (réconcilier des distributions, pas
+    juste des points — au-delà de MinT).
+  - **Conformal prediction hiérarchique** (couverture garantie sur les niveaux réconciliés).
+  - **TFT** (modèle entraîné, interprétable, covariables) — si on veut + d'explicabilité.
+  - **AutoGluon-TimeSeries** (ensemble auto stat+DL+FM) comme filet/benchmark.
+
+Règle : le frontier est un **amplificateur de moat plus tard**, une fois le
+substrat et un client de référence en place. On ne le construit pas en amont.
 
 ---
 
@@ -232,8 +258,9 @@ pourquoi ce routage) — déterministe, loggué, auditable, explicable.
                                cohérence tous niveaux
                                → MRP (agrégat, safety pooled) + DRP (Gen_Prod×DC)
 ```
-A = colonne vertébrale (saison + cohérence) ; B = longue traîne ; C = lift causal ;
-D = confiance + boucle dans A (covariance) et le safety stock.
+A = colonne vertébrale (saison + cohérence) ; B (Chronos-2) = longue traîne **+
+causal** (covariables natives, absorbe C) ; C = lift causal (via B, ou LGBM pour
+la tête) ; D = confiance + boucle dans A (covariance) et le safety stock.
 
 ---
 
@@ -242,15 +269,21 @@ D = confiance + boucle dans A (covariance) et le safety stock.
 Prérequis : `demand_history` chargé (booking+shipping+valeur) + specs `Gen_*` +
 table `dimension_hierarchy` (produit × géo) + carte DC↔états↔familles.
 
+**V1 (livrable, déjà très avancé)** :
 1. **A (socle)** : saisonnalité native + construction de `S` (par `Gen_Fam`) +
    MinT-shrink (Nixtla `statsforecast` + `hierarchicalforecast`).
-2. **D (gouvernance)** : backtest rolling-origin + MASE/WAPE/biais + score de
-   confiance. (A+D = couple socle indispensable.)
-3. **C (causal)** : exogène (météo + calendrier Buy) sur LGBM/ARIMAX.
-4. **B (traîne)** : câbler Chronos/Moirai (remplacer les stubs) + routage
-   tête/traîne complet.
+2. **D (gouvernance)** : backtest rolling-origin + MASE/WAPE/biais + **intervalles
+   conformal** + score de confiance. (A+D = couple socle indispensable.)
+3. **B (Chronos-2)** : remplacer le stub par Chronos-2 (Apache, **covariables
+   natives → absorbe C**) sur traîne/cold-start + routage tête/traîne. L'exogène
+   météo/Buy passe par les covariables de Chronos-2.
 
-B avant C/D donnerait des FM non gouvernés et non causaux — moins utile.
+**Upside (post-V1, quand l'accuracy devient le goulot)** : réconciliation
+probabiliste, conformal hiérarchique, TFT (tête entraînée + interprétable),
+AutoGluon-TS (ensemble/benchmark). Voir §2 « V1 vs frontier ».
+
+Le goulot initial sera la **donnée** et l'**adoption**, pas l'accuracy — d'où un
+V1 lisible et gouvernable avant tout raffinement de modèle.
 
 ---
 
