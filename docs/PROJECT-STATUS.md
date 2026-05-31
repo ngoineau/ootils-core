@@ -5,7 +5,7 @@
 > À relire au début de chaque session, à mettre à jour à la fin. Les chiffres se
 > revérifient en live (audit) — ce doc est le cadre, pas la mesure.
 
-**Dernière mise à jour : 2026-05-30 (smoke-fleet mergé #315 ; cadrage chantier demande)**
+**Dernière mise à jour : 2026-05-31 (refactor governed_run #317 ; purge branches 81→19 ; #276 mergé)**
 
 ---
 
@@ -60,7 +60,7 @@
 - **Ingestion V1** — 11 entités TSV canoniques, `bulk_ingest.py` (~9 000 rows/s, idempotent), `daily_load.py` (1 commande : load → LLC → cost_rollup → validate). Import quotidien **~123 s** (migration 046 a corrigé l'index manquant `nodes(parent_node_id)`).
 - **Moteur MRP** — `mrp_core.py` source unique (pure, DB-free, golden-master en CI). Proration, consommation forecast, lot sizing complet, LLC, lead-times, time fences, pegging, cost-aware sourcing, dedup multi-location. Projection virtuelle (window function).
 - **Outils** — `mrp_grid` (grille MPS mensuelle), `mrp_value` (valorisation $), `mrp_eando` (E&O), `mrp_projected_stock`, `shortage_scan`.
-- **Fleet d'agents** (5, tous L1 DRAFT gouvernés) — shortage_watcher, material_watcher, lot_policy_watcher, dq_watcher, eando_watcher. Gouvernance : `recommendations` + `agent_runs`, state machine DRAFT→approbation. **Smoke-test de régression CI** (`tests/integration/test_agent_fleet_smoke.py`, PR #315) : contrat universel run+idempotence ×5 + assertions ciblées shortage/material/dq/eando.
+- **Fleet d'agents** (5, tous L1 DRAFT gouvernés) — shortage_watcher, material_watcher, lot_policy_watcher, dq_watcher, eando_watcher. Gouvernance : `recommendations` + `agent_runs`, state machine DRAFT→approbation, **cycle de vie factorisé via la primitive partagée `governed_run`** (`scripts/agent_governance.py`, #317 — ferme aussi le trou `FAILED`-on-crash). **Smoke-test de régression CI** (`tests/integration/test_agent_fleet_smoke.py`, PR #315) : contrat universel run+idempotence ×5 + assertions ciblées shortage/material/dq/eando.
 - **Infra** — FastAPI + PostgreSQL 16, moteur Rust gRPC (ADR-017, non câblé au batch), CI verte (ruff + pytest + integration), 46 migrations, 18 ADR.
 - **DB pilote** (`ootils_pilote_test`) — chargée et propre (nodes purgés 3,1 GB → 66 MB le 30/05). 36 635 items, BOM LLC max 7, couverture coût 25 %.
 
@@ -74,7 +74,7 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 |---|---|---|
 | Couverture coût 25 % (9 023/36 635 items) | Valorisation sous-estimée | Données source (ERP) |
 | ~~Zéro test de la fleet d'agents~~ | ~~Régression silencieuse~~ | **CLOS** — smoke-test mergé (PR #315, CI verte) |
-| ~55 branches remote stale (squash-mergées) | Bruit | Purge batch à faire (hors GO ciblé) |
+| ~~~55 branches remote stale~~ | ~~Bruit~~ | **PURGÉ** 31/05 — 81→19 branches (62 PR-mergés supprimés ; 13 non-rattachées gardées pour revue) |
 | mypy non-bloquant rouge | Dette qualité | Progressif, non urgent |
 
 ---
@@ -90,7 +90,7 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 - `P2.2.a/b/c` — Scenario overlays (PG schema + save/load + merge).
 - `LANES-LATER` — ingest distribution_links + transportation_lanes.
 - `CUST-V1.1` — table customers + FK sur customer_orders.
-- Revue #8 — primitive partagée governed-agent (DRY les 5 agents).
+- ~~Revue #8 — primitive partagée governed-agent (DRY les 5 agents).~~ **FAIT** (#317, `governed_run`). **Suivi** : câbler un vrai `--scenario` CLI (lire/écrire sur un fork au lieu de `core.BASELINE` en dur) — la primitive centralise déjà le scenario_id, reste la propagation dans `load_planning_data` ; chantier distinct lié à P2.2.
 - Revue #10 — primitive unifiée de projection.
 
 ### WIP docs en décantation (P2)
