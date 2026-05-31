@@ -1,10 +1,22 @@
 # Manuel utilisateur Ootils — DRAFT
 
-> **Version** : 0.1 (draft)
-> **Date** : 2026-04-18
+> **Version** : 0.2 (draft)
+> **Date** : 2026-05-31
 > **Public** : directeurs supply chain, planificateurs lead, responsables IT impliqués dans le pilote.
 > **Ce que ce manuel n'est PAS** : une documentation développeur. Pour la référence API complète, voir `docs/SPEC-INTERFACES.md`. En environnement contrôlé, l'OpenAPI et Swagger peuvent être réactivés explicitement, mais ils ne doivent pas être supposés exposés par défaut.
 > **Note d'intégrité** : ce document ne vaut pas engagement produit complet. Il sert de support pilote et doit être relu contre le runtime effectivement déployé.
+
+### Changelog v0.2 (2026-05-31)
+
+- Bump version et date.
+- Correction du compte de migrations (21 → 46) dans §3.3.
+- Nouvelle section §6 **Flotte d'agents watchers (livré)** : 5 agents gouvernés, état DRAFT, primitive `governed_run`, smoke-test CI.
+- Nouvelle section §8 **Module de demande Pyramide — en conception** : modèle décidé (ADR-019), clairement marqué comme cible non encore livrée.
+- Mise à jour §1 (description produit) pour refléter les agents livrés.
+- Mise à jour §5.1 (tableau des retours) : recommandations d'agents ajoutées comme livrées.
+- Mise à jour §5.6 (machine à états des recommandations) pour coller à l'implémentation réelle.
+- Mise à jour §9.4 (limites connues) : ajout du bug prévision et du module Pyramide non livré ; mise à jour de l'échelle réelle (36 000+ items en base pilote).
+- Ajout §9.2 FAQ : question sur la prévision de demande.
 
 ---
 
@@ -14,28 +26,31 @@
 2. [Pré-requis avant de démarrer](#2-pré-requis-avant-de-démarrer)
 3. [Étape 1 — Paramétrer et installer](#3-étape-1--paramétrer-et-installer)
 4. [Étape 2 — Envoyer vos données réelles](#4-étape-2--envoyer-vos-données-réelles)
-5. [Étape 3 — Lire les retours du moteur et de l'équipe IA](#5-étape-3--lire-les-retours-du-moteur-et-de-léquipe-ia)
-6. [Cadence de travail recommandée](#6-cadence-de-travail-recommandée)
-7. [Annexes](#7-annexes)
+5. [Étape 3 — Lire les retours du moteur](#5-étape-3--lire-les-retours-du-moteur)
+6. [Flotte d'agents watchers (livré)](#6-flotte-dagents-watchers-livré)
+7. [Cadence de travail recommandée](#7-cadence-de-travail-recommandée)
+8. [Module de demande Pyramide — en conception](#8-module-de-demande-pyramide--en-conception)
+9. [Annexes](#9-annexes)
 
 ---
 
 ## 1. Ce que fait Ootils
 
-Ootils est un **moteur de décision supply chain**. Il prend en entrée votre état courant (articles, stocks, commandes, prévisions, nomenclatures, fournisseurs) et produit :
+Ootils est un **substrat opérationnel supply chain piloté par des agents**. Il prend en entrée votre état courant (articles, stocks, commandes, prévisions, nomenclatures, fournisseurs) et produit :
 
 - Une **projection de stock** à horizon configurable (jour/semaine/mois).
 - La **détection des ruptures** à venir, avec date et magnitude.
 - Une **explication causale** de chaque rupture — quelle est la demande qui n'est pas couverte, par quel flux entrant, pourquoi ce flux arrive trop tard ou trop peu.
-- Des **recommandations MRP** (par exemple suggestions d'approvisionnement et ordres planifiés sur le périmètre aujourd'hui démontré).
-- Des **analyses de scénario** sur le périmètre activé et validé. Selon la version déployée, certaines variantes avancées restent à confirmer ou à livrer.
+- Des **recommandations MRP** (suggestions d'approvisionnement et ordres planifiés, y compris lots, délais, time fences, valorisation).
+- Des **recommandations d'agents automatisés** (shortage watcher, material watcher, lot policy watcher, DQ watcher, E&O watcher) — soumises à validation humaine avant tout effet (voir §6).
+- Des **analyses de scénario** sur le périmètre activé : créez une branche de simulation, injectez un événement, comparez au baseline.
 
 **Particularité Ootils** : le moteur est conçu pour être opéré par des agents IA, pas cliqué par des humains dans une interface. Les humains (votre équipe) :
 - Fournissent les données (intégration avec votre ERP / WMS / fichiers).
-- **Auditent** les décisions produites par le moteur et/ou par les agents qui l'utilisent.
-- Valident ou rejettent les recommandations avant toute écriture vers l'ERP (*human-in-the-loop*).
+- **Auditent** les recommandations produites par les agents.
+- **Valident ou rejettent** chaque recommandation avant toute action vers l'ERP (*human-in-the-loop* garanti par architecture).
 
-Il n'y a donc **pas d'écran de planification** à proprement parler dans Ootils. Les sorties sont des données structurées (JSON, TSV) et des rapports d'audit (Markdown). Votre IT peut ensuite les brancher sur votre outil de visualisation préféré (Power BI, Tableau, Excel).
+Il n'y a donc **pas d'écran de planification** à proprement parler dans Ootils. Les sorties sont des données structurées (JSON, TSV) et des rapports d'audit. Votre IT peut les brancher sur votre outil de visualisation préféré (Power BI, Tableau, Excel).
 
 ---
 
@@ -49,7 +64,7 @@ Checklist à valider avec votre équipe supply chain **avant** toute installatio
 - [ ] **Objectif mesurable choisi** : réduction des ruptures de X %, réduction du stock de Y %, amélioration du taux de service, etc. Il faut pouvoir dire *"le pilote réussit si…"* en une phrase.
 - [ ] **Référent métier identifié** : une personne de votre équipe qui répondra aux questions Ootils sur les règles métier (politiques de stock, délais standards, règles de substitution).
 - [ ] **Référent IT identifié** : une personne capable d'extraire des données de l'ERP et de les pousser via API ou fichier (SAP, Dynamics, Sage, WMS — peu importe).
-- [ ] **Cadence de rafraîchissement décidée** : à quelle fréquence les données maîtres et transactionnelles seront-elles envoyées à Ootils ? Voir §6 pour la cadence recommandée.
+- [ ] **Cadence de rafraîchissement décidée** : à quelle fréquence les données maîtres et transactionnelles seront-elles envoyées à Ootils ? Voir §7 pour la cadence recommandée.
 
 ### 2.2 Côté technique (IT)
 
@@ -60,7 +75,7 @@ Checklist pour votre équipe IT :
 - [ ] HTTPS obligatoire en production — certificat SSL à prévoir (Let's Encrypt, certificat interne, ou reverse proxy).
 - [ ] 4 vCPU, 8 Go RAM, 100 Go disque minimum pour un périmètre pilote. Voir `docs/INFRA-RUNBOOK.md` pour le dimensionnement réel.
 - [ ] Port 8000 exposé à vos utilisateurs autorisés (jamais publiquement sur Internet sans whitelist IP).
-- [ ] Sauvegarde quotidienne de la base PostgreSQL (à mettre en place — **non automatisé aujourd'hui**, voir §7 FAQ).
+- [ ] Sauvegarde quotidienne de la base PostgreSQL (à mettre en place — **non automatisé aujourd'hui**, voir §9.2 FAQ).
 
 ---
 
@@ -104,7 +119,7 @@ Cette commande démarre deux conteneurs :
 - **postgres** : base de données PostgreSQL 16.
 - **api** : serveur Ootils, exposé sur le port 8000.
 
-Les migrations de schéma s'appliquent automatiquement au premier démarrage (21 migrations aujourd'hui).
+Les migrations de schéma s'appliquent automatiquement au premier démarrage (46 migrations à ce jour).
 
 ### 3.4 Vérifier que le serveur répond
 
@@ -276,20 +291,20 @@ Si votre IT préfère déposer des fichiers plutôt que coder des appels API, Oo
 
 ---
 
-## 5. Étape 3 — Lire les retours du moteur et de l'équipe IA
+## 5. Étape 3 — Lire les retours du moteur
 
 C'est là que la valeur arrive. Une fois les données envoyées, Ootils calcule, détecte les ruptures, et met à disposition plusieurs types de retours.
 
-### 5.1 Les quatre types de retours
+### 5.1 Les types de retours
 
 | Retour | Disponibilité | Pour qui | Format |
 |--------|---------------|----------|--------|
-| **Liste des ruptures à venir** | ✅ Aujourd'hui | Planificateur, directeur SC | JSON (API) — exportable Excel |
-| **Projection de stock** | ✅ Aujourd'hui | Planificateur | JSON — exportable Excel |
-| **Explication causale d'une rupture** | ✅ Aujourd'hui | Planificateur métier | JSON structuré |
-| **Analyses de scénario sur périmètre activé** | ✅ Selon version déployée | Décideur SC | JSON |
-| **Rapport d'audit Markdown** (synthèse humainement lisible) | 🛠 Planifié — voir §5.5 | Directeur SC / audit | Markdown / PDF |
-| **Recommandations agent IA** (décisions proposées) | 🛠 Planifié | Décideur SC | Rapport + flux push vers ERP |
+| **Liste des ruptures à venir** | Livré | Planificateur, directeur SC | JSON (API) — exportable Excel |
+| **Projection de stock** | Livré | Planificateur | JSON — exportable Excel |
+| **Explication causale d'une rupture** | Livré | Planificateur métier | JSON structuré |
+| **Recommandations d'agents watchers** (DRAFT, validation humaine) | Livré — voir §6 | Planificateur | JSON / TSV |
+| **Analyses de scénario sur périmètre activé** | Livré | Décideur SC | JSON |
+| **Rapport d'audit Markdown** (synthèse humainement lisible) | Planifié — voir §5.5 | Directeur SC / audit | Markdown / PDF |
 
 ### 5.2 Consulter la liste des ruptures
 
@@ -369,26 +384,65 @@ Cadence recommandée : un audit quotidien (le matin, après ingestion de nuit) o
 
 **Statut** : la spec est écrite, la CLI `ootils-audit <calc_run_id>` est planifiée pour les 6 prochaines semaines. En attendant, votre interlocuteur Ootils peut produire ce rapport sur demande.
 
-### 5.6 Décisions agent IA et validation humaine (🛠 en cours de livraison)
+### 5.6 Décisions agent IA et validation humaine
 
-Vision cible : un agent IA (Claude via interface MCP, voir `docs/SPEC-INTERFACES.md` §5) ausculte Ootils chaque matin, identifie les 3–5 décisions à prendre dans la journée, et les soumet à votre planificateur **au statut `DRAFT`** :
+Les agents watchers (décrits en §6) soumettent leurs recommandations **au statut `DRAFT`** dans une file de validation. La machine à états est la suivante :
 
 | État | Signification | Qui agit |
 |------|---------------|----------|
 | `DRAFT` | L'agent a proposé une décision | Planificateur la revoit |
-| `APPROVED` | Planificateur a validé | Système prêt à pousser vers ERP |
-| `SENT` | Décision envoyée à l'ERP | ERP traite |
-| `REJECTED` | Planificateur a rejeté avec motif | Feedback capturé pour apprentissage |
+| `APPROVED` | Planificateur a validé | Système prêt à enregistrer l'action |
+| `REJECTED` | Planificateur a rejeté avec motif | Feedback capturé, trace auditée |
+| `EXPIRED` | Supplanté par une recommandation plus récente du même agent | Automatique |
 
-**Règle absolue** : Ootils ne pousse **jamais** automatiquement vers votre ERP. Chaque décision passe par une validation humaine explicite. Ce n'est pas un garde-fou — c'est un principe architectural (voir `docs/SPEC-INTEGRATION-STRATEGY.md` §5.2 et `VISION.md`).
+**Règle absolue** : Ootils ne pousse **jamais** automatiquement vers votre ERP. Chaque décision passe par une validation humaine explicite. Ce n'est pas un garde-fou — c'est un principe architectural (voir `docs/SPEC-INTEGRATION-STRATEGY.md` §5.2).
+
+> L'interface MCP pour agents externes (Claude, etc.) est spécifiée dans `docs/SPEC-INTERFACES.md` §5 mais n'est pas encore livrée.
 
 ---
 
-## 6. Cadence de travail recommandée
+## 6. Flotte d'agents watchers (livré)
+
+Ootils embarque cinq agents automatisés (« watchers ») qui tournent sur votre périmètre et produisent des recommandations soumises à validation humaine.
+
+### 6.1 Les cinq agents
+
+| Agent | Ce qu'il surveille | Recommandations produites |
+|-------|-------------------|--------------------------|
+| **shortage_watcher** | Ruptures détectées par la projection de stock | Propositions d'action corrective (expediting, transfert inter-sites, ajustement ordre) |
+| **material_watcher** | Disponibilité des composants (BOM) | Alertes sur composants manquants avant lancement d'OF |
+| **lot_policy_watcher** | Cohérence des politiques de lot (MOQ, multiples, safety stock) | Suggestions de révision de paramètres de lot |
+| **dq_watcher** | Qualité des données ingérées | Signalement d'anomalies (quantités nulles, dates incohérentes, codes inconnus) |
+| **eando_watcher** | Exposition Excess & Obsolete (E&O) | Alertes sur stocks morts ou excédentaires, valorisation du risque |
+
+### 6.2 Cycle de vie commun (governed_run)
+
+Tous les agents partagent la même mécanique de gouvernance, implémentée dans `scripts/agent_governance.py` via la primitive `governed_run` :
+
+1. Avant tout calcul, l'agent ouvre une trace (`agent_runs`, statut `RUNNING`).
+2. Il marque ses recommandations précédentes comme `EXPIRED` (supersede).
+3. Il insère ses nouvelles recommandations en statut `DRAFT`.
+4. À la fin, il ferme sa trace (`COMPLETED`) ou, si une exception survient, la marque `FAILED` — garantissant qu'aucun run orphelin ne reste « RUNNING » indéfiniment.
+
+Cette factorisation signifie qu'**un agent crashé ne bloque pas les autres** et que l'état du système est toujours lisible.
+
+### 6.3 Ce que ça signifie pour votre équipe
+
+- Chaque matin, vos planificateurs trouvent dans l'API (`GET /v1/recommendations?status=DRAFT`) la liste des recommandations en attente.
+- Chaque recommandation est traçable : quel agent l'a produite, à quelle heure, sur quel périmètre, avec quelle justification.
+- Valider (`APPROVED`) ou rejeter (`REJECTED`) une recommandation est l'action métier attendue — pas la modifier manuellement dans l'ERP sans passer par ce flux.
+
+### 6.4 Garanties de non-régression
+
+Un smoke-test CI (`tests/integration/test_agent_fleet_smoke.py`) vérifie à chaque merge que les cinq agents s'exécutent sans erreur et respectent le contrat d'idempotence (run × 2 → pas de doublon). Les agents sont donc protégés des régressions.
+
+---
+
+## 7. Cadence de travail recommandée
 
 Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 
-### 6.1 Cadence d'ingestion
+### 7.1 Cadence d'ingestion
 
 | Donnée | Fréquence | Déclencheur |
 |--------|-----------|-------------|
@@ -398,7 +452,7 @@ Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 | PO / CO / WO / Transferts | **Quotidienne** minimum, idéalement événementiel | Webhook ERP ou batch |
 | Prévisions | Mensuelle ou à chaque révision S&OP | À la demande |
 
-### 6.2 Cadence de revue
+### 7.2 Cadence de revue
 
 | Activité | Fréquence | Durée | Qui |
 |----------|-----------|-------|-----|
@@ -411,9 +465,62 @@ Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 
 ---
 
-## 7. Annexes
+## 8. Module de demande Pyramide — en conception
 
-### 7.1 Glossaire
+> **Statut : EN CONCEPTION — PAS ENCORE LIVRÉ.** Les décisions d'architecture sont tranchées (ADR-019, 2026-05-30) mais aucune ligne de code correspondante n'est mergée sur main à ce jour. Cette section décrit la cible, pas l'existant.
+
+### 8.1 Le problème actuel (pourquoi ce module est nécessaire)
+
+Ootils ne dispose pas aujourd'hui d'une vraie prévision opérationnelle. La fonction de prévision actuelle lit une colonne (`time_span_start`) qui est vide sur toute donnée réellement ingérée en production, et mélange commandes et prévisions sans distinction — ce qui la rend non fonctionnelle en conditions réelles. Ce bug est identifié et sera corrigé dans le cadre du chantier Pyramide.
+
+### 8.2 Le modèle décidé (ADR-019)
+
+**Principe central : on prévoit la demande sur le *booking* (la prise de commande), jamais sur les expéditions.** Prévoir sur les expéditions revient à prévoir ses propres ruptures.
+
+Le modèle suit **trois séries** :
+
+| Série | Définition | Rôle |
+|-------|-----------|------|
+| **Booking** | Commandes reçues — la demande réelle du marché | Ce qu'on prévoit |
+| **Shipping** | Expéditions effectives | Ce qu'on pilote, piloté par l'ERP |
+| **Backlog** | Booking − Shipping cumulés | Indicateur de tension ou d'arriéré |
+
+Le **shipping plan** (commandes fermes + prévision nettée du backlog) est ce qui descend dans le MRP — c'est la demande en entrée du moteur de planification.
+
+### 8.3 La prévision granulaire automatique (Pyramide)
+
+La prévision est produite **au niveau famille de produits × zone climatique** (approche middle-out), puis désagrégée jusqu'au SKU et au centre de distribution. Elle intègre :
+
+- Les **dimensions métier** : canal de vente, région géographique, type de client, type de commande.
+- Le **calendrier S&OP** : programmes d'achat nommés (March Buy, June Buy, Early Buy), phases de saison — variables d'une année sur l'autre, éditables.
+- Les **deux mesures** : unités ET valeur (prix moyen glissant sur 12 mois, hors retours warranty à 0 €/$).
+
+L'automatisation par Pyramide est la condition pour gérer cette richesse dimensionnelle sans que le planificateur ait à paramétrer chaque série manuellement.
+
+### 8.4 Deux modèles d'opération avec la même prévision
+
+Pyramide sert deux organisations différentes :
+
+| Modèle | Description | Flux |
+|--------|-------------|------|
+| **Manufacturing** | Fabrication + distribution | Prévision → MRP (explosion fab/achat) → DRP (déploiement DC) |
+| **Distribution pure** | Pas de fabrication, réseau de centres de distribution | Prévision → DRP seul (réapprovisionnement + déploiement) |
+
+Dans les deux cas, le stock est planifié **en central** (safety stock mutualisé = moins de stock total) puis **déployé vers les centres de distribution via DRP**. Cette approche est directement chiffrable face aux organisations décentralisées où chaque DC porte son propre stock de sécurité.
+
+### 8.5 Ce qui n'est pas dans la cible V1
+
+Réconciliation statistique avancée (MinT) ; connecteurs ERP natifs ; modèles ML exogènes ; gestion multi-devises ; Demand Anomaly Watcher automatisé.
+
+### 8.6 Prochaine étape concrète
+
+Importer la première table `demand_history` (bookings + shippings + valeur + dimensions) dès disponibilité de l'extract réel. Aucune fonctionnalité Pyramide ne sera documentée comme livrée avant que le code soit mergé sur main et couvert par des tests.
+
+---
+
+## 9. Annexes
+
+### 9.1 Glossaire
 
 | Terme | Définition |
 |-------|------------|
@@ -427,14 +534,19 @@ Une fois le pilote lancé, voici le rythme opérationnel que nous recommandons :
 | **RCCP** | Rough-Cut Capacity Planning — détection des dépassements capacité ressource. |
 | **DQ agent** | Module de validation qualité des données à l'ingestion. |
 | **Ghost node** | Nœud virtuel (capacité agrégée ou transition) créé automatiquement par le moteur. |
+| **DRP** | Distribution Requirements Planning — planification du déploiement du stock vers les centres de distribution. |
+| **Watcher** | Agent automatisé qui surveille un périmètre (ruptures, lots, qualité…) et soumet des recommandations DRAFT. |
+| **governed_run** | Primitive partagée qui garantit qu'un agent ouvre et ferme proprement sa trace, même en cas de crash. |
+| **Booking** | Prise de commande (demande du marché) — série sur laquelle on prévoit (module Pyramide, en conception). |
+| **Shipping plan** | Commandes fermes + prévision nettée du backlog : entrée du MRP (module Pyramide, en conception). |
 
-### 7.2 FAQ
+### 9.2 FAQ
 
 **Q : Ootils remplace-t-il mon APS / Kinaxis / Blue Yonder ?**
 R : Non. Ootils est une couche de décision légère. Il peut coexister avec un APS existant, et vise plutôt les organisations qui tournent aujourd'hui sur Excel + ERP sans APS dédié.
 
 **Q : Mes données sont-elles envoyées à un cloud externe ?**
-R : Non, sauf pour un appel LLM optionnel sur l'agent qualité de données (voir §4.4 du manuel architecture). En déploiement on-premise, Ootils tourne intégralement chez vous.
+R : Non, sauf pour un appel LLM optionnel sur l'agent qualité de données. En déploiement on-premise, Ootils tourne intégralement chez vous.
 
 **Q : Combien de temps pour un pilote ?**
 R : Typiquement 4 à 8 semaines : 1 semaine installation + connexion des données, 2–3 semaines ingestion + ajustements de mapping, 2–3 semaines exploitation + feedback.
@@ -446,12 +558,15 @@ R : Techniquement oui (roadmap Phase 3). Contractuellement, jamais sans validati
 R : L'endpoint ingest a une limite de 10 Mo par appel. Pour les gros volumes, découper en lots (`batch_ref` différents). Votre interlocuteur Ootils peut fournir un script client.
 
 **Q : La base est-elle sauvegardée automatiquement ?**
-R : ⚠️ **Non, pas aujourd'hui.** C'est un point ouvert — votre IT doit mettre en place un `pg_dump` quotidien avec rotation 7 jours et copie offsite. Voir `docs/INFRA-RUNBOOK.md`.
+R : Non, pas aujourd'hui. C'est un point ouvert — votre IT doit mettre en place un `pg_dump` quotidien avec rotation 7 jours et copie offsite. Voir `docs/INFRA-RUNBOOK.md`.
 
 **Q : Comment réinitialiser le système en cas de problème ?**
-R : `docker-compose down -v` supprime les volumes (⚠️ perte de données). Puis `docker-compose up -d` relance une instance vierge. À faire uniquement avec un backup récent, ou en pilote avant premier chargement réel.
+R : `docker-compose down -v` supprime les volumes (perte de données). Puis `docker-compose up -d` relance une instance vierge. À faire uniquement avec un backup récent, ou en pilote avant premier chargement réel.
 
-### 7.3 Qui fait quoi
+**Q : Ootils fait-il des prévisions de demande aujourd'hui ?**
+R : Non en conditions de production réelles. La fonction de prévision actuelle présente un bug bloquant sur les données réelles (colonne vide). Le module de prévision (Pyramide) est en conception — voir §8.
+
+### 9.3 Qui fait quoi
 
 | Action | Responsable |
 |--------|-------------|
@@ -462,24 +577,26 @@ R : `docker-compose down -v` supprime les volumes (⚠️ perte de données). Pu
 | Mapping des champs ERP → Ootils | IT client (assistance Ootils) |
 | Revue qualité des données | Métier + IT |
 | Consultation des ruptures et explications | Planificateur |
-| Validation des recommandations agent IA | Planificateur |
+| Validation des recommandations d'agents | Planificateur |
 | Audit hebdomadaire direction | Directeur SC |
 | Ajustement des règles métier | Métier + équipe Ootils |
 | Évolutions du moteur, nouveaux connecteurs | Équipe Ootils |
 
-### 7.4 Limites connues (honnêteté intellectuelle)
+### 9.4 Limites connues (honnêteté intellectuelle)
 
-À date de rédaction de ce manuel (draft v0.1), le produit est en phase pilote. Les limites à connaître :
+À date de ce manuel (draft v0.2, 2026-05-31), le produit est en phase pilote. Les limites à connaître :
 
-- **Pas de push automatique vers l'ERP** — aujourd'hui, les recommandations se consultent en API ou se téléchargent en TSV (export TSV en cours de livraison).
+- **Pas de push automatique vers l'ERP** — les recommandations se consultent en API ou se téléchargent en TSV.
 - **Pas de connecteur SAP / Dynamics natif** — l'intégration passe par l'API générique. Les connecteurs natifs sont en Phase 2 roadmap.
 - **Pas de backup automatisé** — à configurer côté IT.
-- **Agent IA en cours d'intégration** — la surface MCP est spécifiée mais pas encore livrée.
-- **Rapport d'audit Markdown en cours de livraison** — peut être produit sur demande par l'équipe Ootils en attendant.
-- **Échelle validée à 50 articles aujourd'hui**, besoin de travaux de scaling au-delà de 500 articles (voir `docs/SCALABILITY.md`).
+- **Interface MCP (agents externes) non livrée** — la surface est spécifiée dans `docs/SPEC-INTERFACES.md` §5 mais pas encore câblée.
+- **Rapport d'audit Markdown non livré** — peut être produit sur demande par l'équipe Ootils en attendant.
+- **Prévision de demande non fonctionnelle en production** — bug `_get_historical_demand` identifié, sera corrigé dans le chantier Pyramide (voir §8).
+- **Module de demande Pyramide en conception** — aucune fonctionnalité livrée sur ce périmètre à ce jour.
+- **Échelle validée à 50 articles en démo** ; base pilote testée à 36 000+ items, travaux de scaling documentés dans `docs/SCALABILITY.md`.
 - **Mono-tenant** — un déploiement = un client. Pas de SaaS multi-tenant en v1.
 
-### 7.5 Contacts et ressources
+### 9.5 Contacts et ressources
 
 | Ressource | Où |
 |-----------|-----|
@@ -487,6 +604,7 @@ R : `docker-compose down -v` supprime les volumes (⚠️ perte de données). Pu
 | Documentation technique (référence) | `docs/SPEC-INTERFACES.md` |
 | Stratégie d'intégration | `docs/SPEC-INTEGRATION-STRATEGY.md` |
 | Spec validation & audit | `docs/SPEC-VALIDATION-HARNESS.md` |
+| Module demande (ADR) | `docs/ADR-019-demand-model-pyramide.md` |
 | Roadmap produit | `ROADMAP.md` |
 | Runbook infra | `docs/INFRA-RUNBOOK.md` |
 | Issues / bugs | GitHub `ngoineau/ootils-core/issues` |
@@ -494,4 +612,4 @@ R : `docker-compose down -v` supprime les volumes (⚠️ perte de données). Pu
 ---
 
 *Document vivant. Toute divergence entre ce manuel et le comportement réel du produit est un bug du manuel à corriger.*
-*Prochaine révision prévue : après premier pilote client complet.*
+*Prochaine révision prévue : à la livraison de la première brique du module de demande Pyramide.*
