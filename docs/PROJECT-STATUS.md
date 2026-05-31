@@ -36,6 +36,10 @@
 > - Mesures **units + valeur** (ASP = glissant 12 mois, hors warranty $0).
 > - Calendrier **S&OP** (March/June/Early Buy, phases saison) éditable par année,
 >   variable ; la prévision s'y aligne.
+> - **Deux modèles servis par la même prévision** : manufacturing (MRP) et
+>   distribution pure (DRP seul — ex. client à 325 DC). Mutualiser le stock en
+>   central + déployer via DRP = réduction de stock chiffrable (proposition de
+>   valeur face aux setups décentralisés).
 >
 > **Constat technique sous-jacent** : 3 implémentations divergentes de la
 > consommation de demande ; **aucune notion d'« actuals »** ; `_get_historical_demand`
