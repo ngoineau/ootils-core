@@ -177,4 +177,27 @@ PROFILE_M = Profile(
 )
 
 
-PROFILES = {"S": PROFILE_S, "M": PROFILE_M}
+# Profile L — 2× M, intended for scale validation (ADR-015 trigger D5-A:
+# "p95 propagation > 30s on 500-1K SKU malgré OOTILS_ENGINE=sql").
+# At ~1000 active FGs × 3 DCs × 90 daily PI buckets ≈ 230K PI nodes —
+# close to the 250K extrapolation target.
+PROFILE_L = Profile(
+    name="L",
+    pyramid=ItemPyramid(
+        fg=1000,
+        sub_assembly=1800,
+        component=2400,
+        part=2600,
+        raw_material=2200,
+    ),
+    status_dist=StatusDistribution(),
+    uom_mix=UomMix(),
+    locations=DEFAULT_LOCATIONS,
+    supplier_mix=SupplierMix(),
+    horizon_days_forward=365,
+    horizon_days_back=365,
+    target_shortage_pct=0.07,
+)
+
+
+PROFILES = {"S": PROFILE_S, "M": PROFILE_M, "L": PROFILE_L}
