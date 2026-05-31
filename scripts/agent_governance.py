@@ -98,6 +98,11 @@ class _Run:
         """Store the metrics dict that will be written to agent_runs on exit."""
         self._metrics = metrics
 
+    @property
+    def metrics(self) -> dict[str, Any]:
+        """The metrics dict set via set_metrics (read-back for summary logging)."""
+        return self._metrics
+
     # Internal helpers called by the context manager.
     def _bind(self, agent_name: str, scenario_id: object) -> None:
         self._agent_name = agent_name
