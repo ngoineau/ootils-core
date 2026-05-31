@@ -4,6 +4,7 @@
 **Owner** : ngoineau
 **Depends on** : [ADR-017](ADR-017-architecture-b-rust-engine-service.md), [ADR-018](ADR-018-per-scenario-propagation.md)
 **Décante** : [docs/WIP-demand-module-design-session.md](WIP-demand-module-design-session.md) (brouillon D1-D8, désormais tranché)
+**Architecture forecasting (addendum)** : [docs/DESIGN-pyramide-forecasting.md](DESIGN-pyramide-forecasting.md) — méthodes, réconciliation hiérarchique croisée (MinT), désagrégation middle-out, modèles de fondation, exogène, routage tête/traîne, accuracy/confiance.
 
 ---
 
