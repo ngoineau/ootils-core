@@ -19,36 +19,35 @@
 
 ## 1. Chantier ACTIF
 
-> **Unifier la vérité de demande** — point d'entrée unique forecast + CO, vue
-> réconciliée scenario-aware. **CADRÉ** (architecte, 2026-05-30). **En attente
-> d'arbitrage humain** sur 3 décisions ouvertes avant lancement implémentation.
+> **Module de demande (Pyramide)** — la « vérité de demande » s'est révélée être
+> la **porte d'entrée du module Pyramide** (gestion avancée de la demande), pas
+> un petit fix isolé. **Décisions D1-D8 + topologie de planif + 2 briques métier :
+> TRANCHÉES** (session 2026-05-30). Formalisées dans **[ADR-019](ADR-019-demand-model-pyramide.md)**.
 >
-> **Constat de cadrage** : la consommation de demande est correcte dans
-> `mrp_core` mais **dupliquée en 3 implémentations divergentes** —
-> (1) `scripts/mrp_core.py` (`load_planning_data` + `consume_demand`, vérité
-> réelle des watchers, mais `scenario=BASELINE` en dur) ; (2)
-> `src/ootils_core/engine/mrp/forecast_consumer.py` (2ᵉ impl APICS, doctrine
-> anti-double-comptage divergente) ; (3) `api/routers/forecasting.py:_get_historical_demand`
-> — **le bug vivant** : `SUM(quantity) WHERE node_type IN ('ForecastDemand','CustomerOrderDemand')`
-> → double-compte prévision + actuels, sans `scenario_id`.
+> **Cœur des décisions** (détail → ADR-019) :
+> - On **prévoit le booking** (jamais le shipping). 3 séries : booking / shipping /
+>   backlog. Le **shipping plan** (commandes + forecast netté) est la tête du MRP.
+> - Prévision **granulaire & automatique** (Pyramide) au niveau Gen_Fam/Group ×
+>   zone climatique, middle-out ; dimensions canal/région/client/type de commande.
+> - Historique en PG (`demand_history`, hors graphe RAM) ; faits booking **et**
+>   shipping ingérés de l'ERP ; backlog calculé.
+> - **Topologie push** : MRP central (safety pooled) → DRP répartit vers les DC ;
+>   la prévision granulaire remonte (MRP) et redescend (DRP).
+> - Mesures **units + valeur** (ASP = glissant 12 mois, hors warranty $0).
+> - Calendrier **S&OP** (March/June/Early Buy, phases saison) éditable par année,
+>   variable ; la prévision s'y aligne.
 >
-> **Périmètre V1 (proposé)** : promouvoir UNE primitive scenario-aware comme
-> source unique ; exposer `GET /v1/demand/reconciled?scenario_id=…` (vue
-> CO/forecast/consumed/strategy/freshness, déjà calculée en CLI par
-> `mrp_demand_query.py`) ; retirer le double-comptage du router. **HORS scope** :
-> `demand_history`, Pyramide, hiérarchies/réconciliation, dimensions
-> channel/region (= le WIP D1-D6, autre chantier).
+> **Constat technique sous-jacent** : 3 implémentations divergentes de la
+> consommation de demande ; **aucune notion d'« actuals »** ; `_get_historical_demand`
+> double-compte + lit `time_span_start` **NULL en prod** → prévision non
+> fonctionnelle en production aujourd'hui.
 >
-> **Décisions ouvertes (arbitrage requis)** :
-> 1. **Quelle est LA primitive ?** `mrp_core.consume_demand` (scripts, vérité
->    réelle) vs `engine/mrp/forecast_consumer` (src, APICS). Reco architecte :
->    promouvoir mrp_core dans `src/`, déprécier forecast_consumer.
-> 2. **Scope du read endpoint V1** : vue réconciliée forward seule, ou avec
->    freshness/confidence par série dès V1 ?
-> 3. **`_get_historical_demand`** : corriger maintenant (quick win) ou geler
->    jusqu'au chantier `demand_history` ?
+> **Bug bloquant identifié (à corriger dans le chantier)** :
+> `api/routers/forecasting.py:_get_historical_demand`.
 >
-> Détail complet du plan : cadrage architecte (session 2026-05-30).
+> **Prochaine étape** : cadrer la **1ʳᵉ brique concrète** = table `demand_history`
+> + import de l'extract réel (bookings + shippings + valeur), **dès l'arrivée de la
+> donnée (~31/05-01/06)**. Specs `Gen_*` attendues du métier. Aucun code avant ce cadrage.
 
 ---
 

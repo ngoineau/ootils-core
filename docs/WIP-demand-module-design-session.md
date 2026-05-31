@@ -1,7 +1,7 @@
 # WIP — Session design module Demand (Pyramide × Ootils)
 
 **Date** : 2026-05-25
-**Statut** : Brouillon, à décanter. Aucune décision tranchée, aucune ligne de code écrite.
+**Statut** : ✅ **DÉCANTÉ** — D1-D8 tranchés le 2026-05-30, voir **[ADR-019](ADR-019-demand-model-pyramide.md)** (décision faisant autorité). Ce doc reste la trace du brainstorm + recherche concurrence ; l'ADR-019 prime en cas d'écart (notamment D1 : on prévoit sur le **booking**, pas le shipping — corrige la reco « SHIPMENT par défaut » du §4 ci-dessous).
 **Contexte** : Suite intégration proposée par agent ChatGPT du module `pyramide/`. L'utilisateur a poussé pour creuser avant d'intégrer afin d'éviter le « classique module de demande complètement déconnecté du module de planif ».
 
 > **Lecture obligatoire avant d'avancer** : `docs/STRATEGY-autonomous-supply-chain-operations.md`
