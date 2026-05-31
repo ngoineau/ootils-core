@@ -37,6 +37,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
+from agent_governance import governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("lot_policy_watcher")
@@ -81,93 +82,89 @@ def main(argv=None) -> int:
 
         recs, display = [], []
         ct_count = defaultdict(int)
-        for item, a in agg.items():
-            tot_dem = sum(gross.get(item, {}).values())
-            active_wk = sum(1 for v in gross.get(item, {}).values() if v > 0)
-            if tot_dem <= 0 or a["n"] == 0:
-                continue
-            weekly = tot_dem / n_weeks
-            annual = weekly * 52.0
-            avg_qty = a["qty"] / a["n"]
-            wos = avg_qty / weekly if weekly > 0 else 0.0
-            moq, mult = a["moq"], a["mult"]
-            moq_bound = a["moq_hits"] >= max(1, a["n"] * 0.5)
 
-            # confidence from demand signal strength
-            if tot_dem < 10 or active_wk < 4:
-                conf = "NEEDS_DATA_REVIEW"
-            elif active_wk >= 12 and tot_dem >= 100:
-                conf = "HIGH"
-            else:
-                conf = "MEDIUM"
+        with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            for item, a in agg.items():
+                tot_dem = sum(gross.get(item, {}).values())
+                active_wk = sum(1 for v in gross.get(item, {}).values() if v > 0)
+                if tot_dem <= 0 or a["n"] == 0:
+                    continue
+                weekly = tot_dem / n_weeks
+                annual = weekly * 52.0
+                avg_qty = a["qty"] / a["n"]
+                wos = avg_qty / weekly if weekly > 0 else 0.0
+                moq, mult = a["moq"], a["mult"]
+                moq_bound = a["moq_hits"] >= max(1, a["n"] * 0.5)
 
-            param = cur_val = prop_val = change = rationale = None
-            impact = 0.0
-            if wos > args.wos_high and moq_bound and moq > 0:
-                # MOQ ties up capital: one order covers far more than the target band
-                target = max(1.0, weekly * args.wos_high)
-                prop = math.ceil(target)
-                if prop < moq:
-                    param, change, rationale = "moq", "RENEGOTIATE_MOQ", "MOQ_EXCESS_WOS"
-                    cur_val, prop_val = f"{moq:.0f}", f"{prop:.0f}"
-                    impact = -((moq - prop) / 2.0)  # cycle-stock reduction
-            elif wos > args.wos_high and mult and mult > 0 and weekly * args.wos_high < mult:
-                param, change, rationale = "order_multiple", "REVIEW_MULTIPLE", "MULTIPLE_OVERHANG"
-                prop = max(1.0, math.ceil(weekly * args.wos_low))
-                cur_val, prop_val = f"{mult:.0f}", f"{prop:.0f}"
-                impact = -((mult - prop) / 2.0)
-            elif wos < args.wos_low and a["rule"] == "LOTFORLOT" and not moq_bound:
-                # ordering every week or two with no MOQ discipline -> batch up
-                param, change, rationale = "lot_size_rule", "SET_LOT_RULE", "LFL_TOO_FREQUENT"
-                cur_val, prop_val = "LOTFORLOT", f"POQ:{args.poq_target}"
-                impact = +(weekly * args.poq_target / 2.0)  # cycle stock rises but order count falls
+                # confidence from demand signal strength
+                if tot_dem < 10 or active_wk < 4:
+                    conf = "NEEDS_DATA_REVIEW"
+                elif active_wk >= 12 and tot_dem >= 100:
+                    conf = "HIGH"
+                else:
+                    conf = "MEDIUM"
 
-            if param is None:
-                continue  # within the healthy band — leave the negotiated policy alone
+                param = cur_val = prop_val = change = rationale = None
+                impact = 0.0
+                if wos > args.wos_high and moq_bound and moq > 0:
+                    # MOQ ties up capital: one order covers far more than the target band
+                    target = max(1.0, weekly * args.wos_high)
+                    prop = math.ceil(target)
+                    if prop < moq:
+                        param, change, rationale = "moq", "RENEGOTIATE_MOQ", "MOQ_EXCESS_WOS"
+                        cur_val, prop_val = f"{moq:.0f}", f"{prop:.0f}"
+                        impact = -((moq - prop) / 2.0)  # cycle-stock reduction
+                elif wos > args.wos_high and mult and mult > 0 and weekly * args.wos_high < mult:
+                    param, change, rationale = "order_multiple", "REVIEW_MULTIPLE", "MULTIPLE_OVERHANG"
+                    prop = max(1.0, math.ceil(weekly * args.wos_low))
+                    cur_val, prop_val = f"{mult:.0f}", f"{prop:.0f}"
+                    impact = -((mult - prop) / 2.0)
+                elif wos < args.wos_low and a["rule"] == "LOTFORLOT" and not moq_bound:
+                    # ordering every week or two with no MOQ discipline -> batch up
+                    param, change, rationale = "lot_size_rule", "SET_LOT_RULE", "LFL_TOO_FREQUENT"
+                    cur_val, prop_val = "LOTFORLOT", f"POQ:{args.poq_target}"
+                    impact = +(weekly * args.poq_target / 2.0)  # cycle stock rises but order count falls
 
-            evidence = {
-                "orders_in_horizon": a["n"], "avg_order_qty": round(avg_qty, 1),
-                "weeks_of_supply_per_order": round(wos, 2), "weekly_demand": round(weekly, 2),
-                "active_demand_weeks": active_wk, "moq": moq, "order_multiple": mult,
-                "current_rule": a["rule"], "moq_bound": moq_bound,
-                "target_band_weeks": [args.wos_low, args.wos_high],
-                "rule": "WOS-per-order vs target band on the realized time-phased plan",
-            }
-            recs.append((AGENT_NAME, None, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                         param, cur_val, prop_val, change, rationale,
-                         round(wos, 2), round(annual, 1), round(impact, 1),
-                         "L1", "DRAFT", conf, Jsonb(evidence)))
-            display.append({"ext": d.names.get(item, str(item)[:8]), "param": param, "change": change,
-                            "cur": cur_val, "prop": prop_val, "wos": wos, "annual": annual,
-                            "impact": impact, "conf": conf})
-            ct_count[change] += 1
+                if param is None:
+                    continue  # within the healthy band — leave the negotiated policy alone
 
-        # persist: open run, supersede prior drafts, insert
-        cur = conn.cursor()
-        run_id = cur.execute(
-            "INSERT INTO agent_runs (agent_name, scenario_id, status) VALUES (%s,%s,'RUNNING') RETURNING agent_run_id",
-            (AGENT_NAME, core.BASELINE)).fetchone()[0]
-        recs = [(a, run_id, *rest) for (a, _none, *rest) in recs]  # fill agent_run_id
-        superseded = cur.execute(
-            "UPDATE parameter_recommendations SET status='EXPIRED', updated_at=now() "
-            "WHERE agent_name=%s AND scenario_id=%s AND status='DRAFT'", (AGENT_NAME, core.BASELINE)).rowcount
-        cur.executemany(
-            """INSERT INTO parameter_recommendations
-               (agent_name, agent_run_id, scenario_id, item_id, item_external_id,
-                parameter, current_value, proposed_value, change_type, rationale_code,
-                weeks_of_supply, annual_demand, est_inventory_impact_units,
-                decision_level, status, confidence, evidence)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", recs)
-        metrics = {"proposals": len(recs), "by_change_type": dict(ct_count), "superseded": superseded,
-                   "items_planned": len(agg), "elapsed_s": round(time.perf_counter() - t0, 2)}
-        cur.execute("UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s WHERE agent_run_id=%s",
-                    (Jsonb(metrics), run_id))
-        conn.commit()
+                evidence = {
+                    "orders_in_horizon": a["n"], "avg_order_qty": round(avg_qty, 1),
+                    "weeks_of_supply_per_order": round(wos, 2), "weekly_demand": round(weekly, 2),
+                    "active_demand_weeks": active_wk, "moq": moq, "order_multiple": mult,
+                    "current_rule": a["rule"], "moq_bound": moq_bound,
+                    "target_band_weeks": [args.wos_low, args.wos_high],
+                    "rule": "WOS-per-order vs target band on the realized time-phased plan",
+                }
+                recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
+                             param, cur_val, prop_val, change, rationale,
+                             round(wos, 2), round(annual, 1), round(impact, 1),
+                             "L1", "DRAFT", conf, Jsonb(evidence)))
+                display.append({"ext": d.names.get(item, str(item)[:8]), "param": param, "change": change,
+                                "cur": cur_val, "prop": prop_val, "wos": wos, "annual": annual,
+                                "impact": impact, "conf": conf})
+                ct_count[change] += 1
 
+            superseded = run.supersede("parameter_recommendations", "DRAFT", "EXPIRED")
+            run.insert(
+                "parameter_recommendations",
+                ["agent_name", "agent_run_id", "scenario_id", "item_id", "item_external_id",
+                 "parameter", "current_value", "proposed_value", "change_type", "rationale_code",
+                 "weeks_of_supply", "annual_demand", "est_inventory_impact_units",
+                 "decision_level", "status", "confidence", "evidence"],
+                recs,
+            )
+            run.set_metrics({
+                "proposals": len(recs), "by_change_type": dict(ct_count),
+                "superseded": superseded, "items_planned": len(agg),
+            })
+            metrics = run.metrics
+
+    elapsed = round(time.perf_counter() - t0, 2)
     logger.info("=" * 100)
-    logger.info("LOT POLICY WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], metrics["elapsed_s"])
+    logger.info("LOT POLICY WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
     logger.info("  Parameter proposals (DRAFT/L1) : %d   by type: %s", len(recs), dict(ct_count))
-    logger.info("  Prior drafts superseded        : %d", superseded)
+    logger.info("  Prior drafts superseded        : %d", metrics["superseded"])
     logger.info("=" * 100)
     display.sort(key=lambda x: -abs(x["impact"]))
     logger.info("TOP %d proposals (by |inventory impact|):", args.top)

@@ -33,6 +33,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
+from agent_governance import governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("dq_watcher")
@@ -200,28 +201,25 @@ def main(argv=None) -> int:
         emit("STALE_SUPPLY", rows)
 
         # ── persist: open run, supersede prior OPEN set, insert ──
-        run_id = cur.execute(
-            "INSERT INTO agent_runs (agent_name, scenario_id, status) VALUES (%s,%s,'RUNNING') RETURNING agent_run_id",
-            (AGENT_NAME, core.BASELINE)).fetchone()[0]
-        superseded = cur.execute(
-            "UPDATE dq_findings SET status='SUPERSEDED', updated_at=now() "
-            "WHERE agent_name=%s AND scenario_id=%s AND status='OPEN'", (AGENT_NAME, core.BASELINE)).rowcount
-        rows_to_insert = [(AGENT_NAME, run_id, core.BASELINE, *f) for f in findings]
-        cur.executemany(
-            """INSERT INTO dq_findings
-               (agent_name, agent_run_id, scenario_id, rule_code, entity_type, entity_id,
-                entity_external_id, severity, description, impact_metric, impact_value,
-                suggested_action, evidence)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", rows_to_insert)
-        metrics = {"findings_persisted": len(findings), "superseded": superseded,
-                   "by_rule": totals, "elapsed_s": round(time.perf_counter() - t0, 2)}
-        cur.execute("UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s WHERE agent_run_id=%s",
-                    (Jsonb(metrics), run_id))
-        conn.commit()
+        with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            rows_to_insert = [(AGENT_NAME, run.run_id, core.BASELINE, *f) for f in findings]
+            superseded = run.supersede("dq_findings", "OPEN", "SUPERSEDED")
+            run.insert(
+                "dq_findings",
+                ["agent_name", "agent_run_id", "scenario_id", "rule_code", "entity_type",
+                 "entity_id", "entity_external_id", "severity", "description",
+                 "impact_metric", "impact_value", "suggested_action", "evidence"],
+                rows_to_insert,
+            )
+            run.set_metrics({
+                "findings_persisted": len(findings), "superseded": superseded, "by_rule": totals,
+            })
+            metrics = run.metrics
 
+    elapsed = round(time.perf_counter() - t0, 2)
     logger.info("=" * 100)
-    logger.info("DQ WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], metrics["elapsed_s"])
-    logger.info("  Findings persisted (OPEN) : %d   (prior OPEN superseded: %d)", len(findings), superseded)
+    logger.info("DQ WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
+    logger.info("  Findings persisted (OPEN) : %d   (prior OPEN superseded: %d)", len(findings), metrics["superseded"])
     logger.info("  By rule (count / total impact / persisted):")
     for rule in ("MISSING_COST", "NO_SUPPLIER", "MAKE_WITHOUT_BOM", "STALE_DEMAND", "STALE_SUPPLY",
                  "ORPHAN_MAKE_FLAG", "EXPIRED_SUPPLIER_TERM"):

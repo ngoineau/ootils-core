@@ -35,6 +35,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
+from agent_governance import governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("eando_watcher")
@@ -62,7 +63,8 @@ def main(argv=None) -> int:
         gross = core.consume_demand(d)
         eo = core.excess_obsolete(d, gross, months=args.months)
 
-        built = []   # full reco tuples (pre-cap), each with its excess_value for ranking
+        # Pre-compute the full E&O set (needed for cap + ranking) before opening the run.
+        pre_built = []
         totals = defaultdict(lambda: {"items": 0, "units": 0.0, "value": 0.0})
         unpriced_items = 0
         for item, e in eo.items():
@@ -95,14 +97,16 @@ def main(argv=None) -> int:
                         "excess_units": round(excess_units, 2), "firm_inbound_units": round(firm_in, 2),
                         "unit_cost": float(uc) if uc is not None else None,
                         "rule": "on-hand beyond %.0f months of gross-usage coverage; value = excess_units × cost" % args.months}
-            built.append({
+            pre_built.append({
                 "value_sort": value if value is not None else 0.0,
-                "row": (AGENT_NAME, None, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                        cls, round(e["on_hand"], 2), round(e["annual"], 2),
-                        (round(cover, 4) if cover is not None else None), round(excess_units, 2), value, ccy,
-                        disposition, "L1", "DRAFT", conf, Jsonb(evidence)),
+                # agent_run_id placeholder filled once the run is open
+                "partial": (AGENT_NAME, core.BASELINE, item, d.names.get(item, str(item)[:8]),
+                            cls, round(e["on_hand"], 2), round(e["annual"], 2),
+                            (round(cover, 4) if cover is not None else None), round(excess_units, 2), value, ccy,
+                            disposition, "L1", "DRAFT", conf, Jsonb(evidence)),
                 "disp": disposition, "cls": cls, "value": value, "units": excess_units,
-                "ext": d.names.get(item, str(item)[:8]), "cover": cover, "conf": conf})
+                "ext": d.names.get(item, str(item)[:8]), "cover": cover, "conf": conf,
+                "ccy_col": ccy})
             t = totals[cls]
             t["items"] += 1
             t["units"] += excess_units
@@ -110,40 +114,41 @@ def main(argv=None) -> int:
             if uc is None:
                 unpriced_items += 1
 
-        built.sort(key=lambda x: -x["value_sort"])
-        kept = built[: args.cap]
+        pre_built.sort(key=lambda x: -x["value_sort"])
+        kept = pre_built[: args.cap]
 
-        cur = conn.cursor()
-        run_id = cur.execute(
-            "INSERT INTO agent_runs (agent_name, scenario_id, status) VALUES (%s,%s,'RUNNING') RETURNING agent_run_id",
-            (AGENT_NAME, core.BASELINE)).fetchone()[0]
-        superseded = cur.execute(
-            "UPDATE eando_recommendations SET status='EXPIRED', updated_at=now() "
-            "WHERE agent_name=%s AND scenario_id=%s AND status='DRAFT'", (AGENT_NAME, core.BASELINE)).rowcount
-        recs = [(a, run_id, *rest) for (a, _none, *rest) in (b["row"] for b in kept)]
-        cur.executemany(
-            """INSERT INTO eando_recommendations
-               (agent_name, agent_run_id, scenario_id, item_id, item_external_id, classification,
-                on_hand, annual_demand, coverage_months, excess_units, excess_value, currency,
-                disposition, decision_level, status, confidence, evidence)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", recs)
-        by_disp = defaultdict(int)
-        for b in kept:
-            by_disp[b["disp"]] += 1
-        metrics = {"eando_items": len(built), "persisted": len(kept), "superseded": superseded,
-                   "unpriced_items": unpriced_items, "by_disposition": dict(by_disp),
-                   "by_class": {k: {"items": v["items"], "units": round(v["units"], 0), "value": round(v["value"], 2)}
-                                for k, v in totals.items()},
-                   "elapsed_s": round(time.perf_counter() - t0, 2)}
-        cur.execute("UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s WHERE agent_run_id=%s",
-                    (Jsonb(metrics), run_id))
-        conn.commit()
+        with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            # Build final recs now that run.run_id is available.
+            recs = [
+                (b["partial"][0], run.run_id, *b["partial"][1:])
+                for b in kept
+            ]
+            superseded = run.supersede("eando_recommendations", "DRAFT", "EXPIRED")
+            run.insert(
+                "eando_recommendations",
+                ["agent_name", "agent_run_id", "scenario_id", "item_id", "item_external_id",
+                 "classification", "on_hand", "annual_demand", "coverage_months",
+                 "excess_units", "excess_value", "currency", "disposition",
+                 "decision_level", "status", "confidence", "evidence"],
+                recs,
+            )
+            by_disp = defaultdict(int)
+            for b in kept:
+                by_disp[b["disp"]] += 1
+            run.set_metrics({
+                "eando_items": len(pre_built), "persisted": len(kept), "superseded": superseded,
+                "unpriced_items": unpriced_items, "by_disposition": dict(by_disp),
+                "by_class": {k: {"items": v["items"], "units": round(v["units"], 0), "value": round(v["value"], 2)}
+                             for k, v in totals.items()},
+            })
+            metrics = run.metrics
 
+    elapsed = round(time.perf_counter() - t0, 2)
     m = metrics
     logger.info("=" * 100)
-    logger.info("E&O WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], m["elapsed_s"])
+    logger.info("E&O WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
     logger.info("  E&O items: %d  (persisted top %d by value; prior drafts superseded: %d)",
-                m["eando_items"], m["persisted"], superseded)
+                m["eando_items"], m["persisted"], m["superseded"])
     for cls in ("EXCESS", "OBSOLETE"):
         c = m["by_class"].get(cls)
         if c:
@@ -160,7 +165,7 @@ def main(argv=None) -> int:
         val_s = f"{b['value']:,.0f}" if b["value"] is not None else "—"
         logger.info("  %-16s %-9s %-9s %10s %14s %14s %-5s %-7s",
                     b["ext"], b["cls"], b["disp"], cov_s, f"{b['units']:,.0f}", val_s,
-                    b["row"][11], b["conf"])
+                    b["ccy_col"], b["conf"])
     logger.info("=" * 100)
     return 0
 

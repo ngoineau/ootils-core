@@ -26,6 +26,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
+from agent_governance import governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("material_watcher")
@@ -74,70 +75,68 @@ def main(argv=None) -> int:
             pastdue_need[item] = min(pastdue_need.get(item, need), need)
             kind_of[item] = kind
 
-        cur = conn.cursor()   # recommendations / agent_runs schema from migration 039
-        run_id = cur.execute(
-            "INSERT INTO agent_runs (agent_name, scenario_id, status) VALUES (%s,%s,'RUNNING') RETURNING agent_run_id",
-            (AGENT_NAME, core.BASELINE)).fetchone()[0]
-
         recs, display = [], []
         n_po = n_wo = 0
         spend = defaultdict(float)
-        for item, qty in pastdue_qty.items():
-            lvl = d.llc.get(item, 0)
-            kind = kind_of.get(item, "PO")
-            need_date = hs + _dt.timedelta(weeks=int(pastdue_need.get(item, 0)))
-            runway = (need_date - hs).days
-            org = origin.get(item, {})
-            tot = sum(org.values()) or 1.0
-            peg = [{"fg": d.names.get(fg, str(fg)[:8]), "pct": round(100 * q / tot, 1)}
-                   for fg, q in sorted(org.items(), key=lambda x: -x[1])[:5]]
-            sup = d.best_sup.get(item)
-            if kind == "PO" and sup:
-                sid, sext, lt, uc, ccy, rel = sup
-                ccy = ccy or "EUR"
-                cost = round(qty * float(uc), 2) if uc is not None else None
-                margin = runway - int(lt)
-                conf = _confidence(uc, rel)
-                if cost is not None:
-                    spend[ccy] += cost
-                n_po += 1
-            else:
-                sid = sext = lt = uc = None
-                ccy, cost = "EUR", None
-                margin = runway - int(d.make_lt.get(item) or core.DEFAULT_LT_DAYS)
-                conf = "MEDIUM"
-                n_wo += 1
-            evidence = {"kind": kind, "llc": lvl, "need_week": int(pastdue_need.get(item, 0)),
-                        "pastdue": True, "pegging": peg,
-                        "rule": "MRP time-phased past-due (need − lead_time < today)"}
-            recs.append((AGENT_NAME, run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                         need_date, qty, qty, cost, ccy, sid, sext, lt, runway, margin,
-                         "EXPEDITE", "L1", "DRAFT", conf, Jsonb(evidence)))
-            display.append({"ext": d.names.get(item, str(item)[:8]), "kind": kind, "llc": lvl,
-                            "qty": qty, "cost": cost, "ccy": ccy, "need": str(need_date),
-                            "peg": peg[0]["fg"] if peg else "—", "pegpct": peg[0]["pct"] if peg else 0})
 
-        superseded = cur.execute(
-            "UPDATE recommendations SET status='EXPIRED', updated_at=now() "
-            "WHERE agent_name=%s AND scenario_id=%s AND status='DRAFT'", (AGENT_NAME, core.BASELINE)).rowcount
-        cur.executemany(
-            """INSERT INTO recommendations
-               (agent_name, agent_run_id, scenario_id, item_id, item_external_id,
-                shortage_date, deficit_qty, recommended_qty, estimated_cost, currency,
-                supplier_id, supplier_external_id, lead_time_days, runway_days, margin_days,
-                action, decision_level, status, confidence, evidence)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", recs)
-        metrics = {"component_recommendations": len(recs), "po": n_po, "wo": n_wo,
-                   "superseded": superseded, "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
-                   "max_llc": d.max_llc, "elapsed_s": round(time.perf_counter() - t0, 2)}
-        cur.execute("UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s WHERE agent_run_id=%s",
-                    (Jsonb(metrics), run_id))
-        conn.commit()
+        with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            for item, qty in pastdue_qty.items():
+                lvl = d.llc.get(item, 0)
+                kind = kind_of.get(item, "PO")
+                need_date = hs + _dt.timedelta(weeks=int(pastdue_need.get(item, 0)))
+                runway = (need_date - hs).days
+                org = origin.get(item, {})
+                tot = sum(org.values()) or 1.0
+                peg = [{"fg": d.names.get(fg, str(fg)[:8]), "pct": round(100 * q / tot, 1)}
+                       for fg, q in sorted(org.items(), key=lambda x: -x[1])[:5]]
+                sup = d.best_sup.get(item)
+                if kind == "PO" and sup:
+                    sid, sext, lt, uc, ccy, rel = sup
+                    ccy = ccy or "EUR"
+                    cost = round(qty * float(uc), 2) if uc is not None else None
+                    margin = runway - int(lt)
+                    conf = _confidence(uc, rel)
+                    if cost is not None:
+                        spend[ccy] += cost
+                    n_po += 1
+                else:
+                    sid = sext = lt = uc = None
+                    ccy, cost = "EUR", None
+                    margin = runway - int(d.make_lt.get(item) or core.DEFAULT_LT_DAYS)
+                    conf = "MEDIUM"
+                    n_wo += 1
+                evidence = {"kind": kind, "llc": lvl, "need_week": int(pastdue_need.get(item, 0)),
+                            "pastdue": True, "pegging": peg,
+                            "rule": "MRP time-phased past-due (need − lead_time < today)"}
+                recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
+                             need_date, qty, qty, cost, ccy, sid, sext, lt, runway, margin,
+                             "EXPEDITE", "L1", "DRAFT", conf, Jsonb(evidence)))
+                display.append({"ext": d.names.get(item, str(item)[:8]), "kind": kind, "llc": lvl,
+                                "qty": qty, "cost": cost, "ccy": ccy, "need": str(need_date),
+                                "peg": peg[0]["fg"] if peg else "—", "pegpct": peg[0]["pct"] if peg else 0})
 
+            superseded = run.supersede("recommendations", "DRAFT", "EXPIRED")
+            run.insert(
+                "recommendations",
+                ["agent_name", "agent_run_id", "scenario_id", "item_id", "item_external_id",
+                 "shortage_date", "deficit_qty", "recommended_qty", "estimated_cost", "currency",
+                 "supplier_id", "supplier_external_id", "lead_time_days", "runway_days", "margin_days",
+                 "action", "decision_level", "status", "confidence", "evidence"],
+                recs,
+            )
+            run.set_metrics({
+                "component_recommendations": len(recs), "po": n_po, "wo": n_wo,
+                "superseded": superseded,
+                "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
+                "max_llc": d.max_llc,
+            })
+            metrics = run.metrics
+
+    elapsed = round(time.perf_counter() - t0, 2)
     logger.info("=" * 96)
-    logger.info("MATERIAL WATCHER — run %s COMPLETED in %.2fs", str(run_id)[:8], metrics["elapsed_s"])
+    logger.info("MATERIAL WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
     logger.info("  Component recommendations (DRAFT/L1) : %d  (PO %d / WO %d)", len(recs), n_po, n_wo)
-    logger.info("  Prior drafts superseded              : %d", superseded)
+    logger.info("  Prior drafts superseded              : %d", metrics["superseded"])
     logger.info("  Est. procurement spend               : %s", metrics["estimated_spend"])
     logger.info("=" * 96)
     display.sort(key=lambda x: -(x["cost"] or 0))
