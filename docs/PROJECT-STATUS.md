@@ -5,7 +5,7 @@
 > À relire au début de chaque session, à mettre à jour à la fin. Les chiffres se
 > revérifient en live (audit) — ce doc est le cadre, pas la mesure.
 
-**Dernière mise à jour : 2026-05-30 (hygiène repo + bascule chantier smoke-fleet)**
+**Dernière mise à jour : 2026-05-30 (smoke-fleet mergé #315 ; cadrage chantier demande)**
 
 ---
 
@@ -19,25 +19,39 @@
 
 ## 1. Chantier ACTIF
 
-> **Smoke-test de régression CI de la fleet d'agents (5 watchers).**
-> Cadré (voir mini-plan ci-dessous). Pas encore lancé en exécution.
+> **Module de demande (Pyramide)** — la « vérité de demande » s'est révélée être
+> la **porte d'entrée du module Pyramide** (gestion avancée de la demande), pas
+> un petit fix isolé. **Décisions D1-D8 + topologie de planif + 2 briques métier :
+> TRANCHÉES** (session 2026-05-30). Formalisées dans **[ADR-019](ADR-019-demand-model-pyramide.md)**.
 >
-> **But** : chaque watcher s'instancie sur un jeu miniature seedé et produit un
-> run gouverné valide (agent_runs COMPLETED + recommandation DRAFT/L1 avec
-> evidence + confidence), sans planter, de façon idempotente. Objectif =
-> verrou anti-régression silencieuse, pas couverture exhaustive métier.
+> **Cœur des décisions** (détail → ADR-019) :
+> - On **prévoit le booking** (jamais le shipping). 3 séries : booking / shipping /
+>   backlog. Le **shipping plan** (commandes + forecast netté) est la tête du MRP.
+> - Prévision **granulaire & automatique** (Pyramide) au niveau Gen_Fam/Group ×
+>   zone climatique, middle-out ; dimensions canal/région/client/type de commande.
+> - Historique en PG (`demand_history`, hors graphe RAM) ; faits booking **et**
+>   shipping ingérés de l'ERP ; backlog calculé.
+> - **Topologie push** : MRP central (safety pooled) → DRP répartit vers les DC ;
+>   la prévision granulaire remonte (MRP) et redescend (DRP).
+> - Mesures **units + valeur** (ASP = glissant 12 mois, hors warranty $0).
+> - Calendrier **S&OP** (March/June/Early Buy, phases saison) éditable par année,
+>   variable ; la prévision s'y aligne.
+> - **Deux modèles servis par la même prévision** : manufacturing (MRP) et
+>   distribution pure (DRP seul — ex. client à 325 DC). Mutualiser le stock en
+>   central + déployer via DRP = réduction de stock chiffrable (proposition de
+>   valeur face aux setups décentralisés).
 >
-> **Constat de cadrage** : `tests/engine_service/test_agent_workflow.py` couvre
-> les primitives gRPC du moteur (fork, propagate-batch, heartbeat, get_node
-> scenario-aware) — PAS les 5 watchers Python (`scripts/agent_*_watcher.py`),
-> qui n'ont aujourd'hui **aucun test**. Le smoke-test est donc un NOUVEAU
-> fichier (`tests/integration/test_agent_fleet_smoke.py`), pas une extension.
+> **Constat technique sous-jacent** : 3 implémentations divergentes de la
+> consommation de demande ; **aucune notion d'« actuals »** ; `_get_historical_demand`
+> double-compte + lit `time_span_start` **NULL en prod** → prévision non
+> fonctionnelle en production aujourd'hui.
 >
-> **Écart North Star noté** (hors périmètre smoke, à traiter ensuite) : les 5
-> watchers tournent sur `core.BASELINE` en dur — pas paramétrés par
-> `scenario_id` en entrée. Anti-pattern « only works on baseline ». Le smoke
-> verrouille le comportement actuel ; le passage scenario-first est un chantier
-> distinct (lié à P2.2 overlays).
+> **Bug bloquant identifié (à corriger dans le chantier)** :
+> `api/routers/forecasting.py:_get_historical_demand`.
+>
+> **Prochaine étape** : cadrer la **1ʳᵉ brique concrète** = table `demand_history`
+> + import de l'extract réel (bookings + shippings + valeur), **dès l'arrivée de la
+> donnée (~31/05-01/06)**. Specs `Gen_*` attendues du métier. Aucun code avant ce cadrage.
 
 ---
 
@@ -46,7 +60,7 @@
 - **Ingestion V1** — 11 entités TSV canoniques, `bulk_ingest.py` (~9 000 rows/s, idempotent), `daily_load.py` (1 commande : load → LLC → cost_rollup → validate). Import quotidien **~123 s** (migration 046 a corrigé l'index manquant `nodes(parent_node_id)`).
 - **Moteur MRP** — `mrp_core.py` source unique (pure, DB-free, golden-master en CI). Proration, consommation forecast, lot sizing complet, LLC, lead-times, time fences, pegging, cost-aware sourcing, dedup multi-location. Projection virtuelle (window function).
 - **Outils** — `mrp_grid` (grille MPS mensuelle), `mrp_value` (valorisation $), `mrp_eando` (E&O), `mrp_projected_stock`, `shortage_scan`.
-- **Fleet d'agents** (5, tous L1 DRAFT gouvernés) — shortage_watcher, material_watcher, lot_policy_watcher, dq_watcher, eando_watcher. Gouvernance : `recommendations` + `agent_runs`, state machine DRAFT→approbation.
+- **Fleet d'agents** (5, tous L1 DRAFT gouvernés) — shortage_watcher, material_watcher, lot_policy_watcher, dq_watcher, eando_watcher. Gouvernance : `recommendations` + `agent_runs`, state machine DRAFT→approbation. **Smoke-test de régression CI** (`tests/integration/test_agent_fleet_smoke.py`, PR #315) : contrat universel run+idempotence ×5 + assertions ciblées shortage/material/dq/eando.
 - **Infra** — FastAPI + PostgreSQL 16, moteur Rust gRPC (ADR-017, non câblé au batch), CI verte (ruff + pytest + integration), 46 migrations, 18 ADR.
 - **DB pilote** (`ootils_pilote_test`) — chargée et propre (nodes purgés 3,1 GB → 66 MB le 30/05). 36 635 items, BOM LLC max 7, couverture coût 25 %.
 
@@ -59,7 +73,7 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 | Risque | Impact | Porteur |
 |---|---|---|
 | Couverture coût 25 % (9 023/36 635 items) | Valorisation sous-estimée | Données source (ERP) |
-| Zéro test de la fleet d'agents (5 watchers sans aucun test) | Régression silencieuse | **EN COURS — chantier actif** (test-writer) |
+| ~~Zéro test de la fleet d'agents~~ | ~~Régression silencieuse~~ | **CLOS** — smoke-test mergé (PR #315, CI verte) |
 | ~55 branches remote stale (squash-mergées) | Bruit | Purge batch à faire (hors GO ciblé) |
 | mypy non-bloquant rouge | Dette qualité | Progressif, non urgent |
 
@@ -68,9 +82,9 @@ PRs #301→#312 mergées (sessions 27-30 mai).
 ## 4. Backlog priorisé
 
 ### Candidats prochain chantier (P0)
-1. **Unifier la vérité de demande + merge** — point d'entrée unique forecast + CO, vue réconciliée. *(Pré-sélectionné comme prochain.)*
-2. ~~**Hygiène repo**~~ — **FAIT** (PR #314) : gitignore zips clients + `poc/target/` + `README.txt` ; commit `.codex/` + `AGENTS.md` ; commit sources PoC Rust ; `docs/SPEC-INTERFACES-INBOUND-V1.md` + `scripts/_run_full_scope.sh`. Dependabot : #299 (rust) fermée, #298 (cache) + #300 (pandas) rebasées. Reste : purge batch des branches remote ; merge #314.
-3. **Smoke test CI de la fleet d'agents** — **PROMU CHANTIER ACTIF** (voir §1).
+1. **Unifier la vérité de demande** — **PROMU CHANTIER ACTIF** (voir §1, cadré, en attente d'arbitrage).
+2. ~~**Hygiène repo**~~ — **FAIT** (PR #314 mergé). Reste : purge batch des branches remote stale.
+3. ~~**Smoke test CI de la fleet d'agents**~~ — **FAIT** (PR #315 mergé, CI verte).
 
 ### Backlog technique (P1)
 - `P2.2.a/b/c` — Scenario overlays (PG schema + save/load + merge).
