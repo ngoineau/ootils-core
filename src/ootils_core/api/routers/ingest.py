@@ -466,7 +466,7 @@ class IngestItemsRequest(BaseModel):
 
 
 @router.post("/items", response_model=IngestResponse, summary="Import items", description="Upsert a batch of items. Upsert key: external_id.")
-async def ingest_items(
+def ingest_items(
     body: IngestItemsRequest,
     request: Request,
     response: Response,
@@ -574,7 +574,7 @@ class IngestLocationsRequest(BaseModel):
 
 
 @router.post("/locations", response_model=IngestResponse, summary="Import locations", description="Upsert a batch of sites/DCs. Upsert key: external_id.")
-async def ingest_locations(
+def ingest_locations(
     body: IngestLocationsRequest,
     request: Request,
     response: Response,
@@ -698,7 +698,7 @@ class IngestSuppliersRequest(BaseModel):
 
 
 @router.post("/suppliers", response_model=IngestResponse, summary="Import suppliers", description="Upsert a batch of suppliers.")
-async def ingest_suppliers(
+def ingest_suppliers(
     body: IngestSuppliersRequest,
     request: Request,
     response: Response,
@@ -798,7 +798,7 @@ class IngestSupplierItemsRequest(BaseModel):
 
 
 @router.post("/supplier-items", response_model=IngestResponse, summary="Import supplier items", description="Upsert supply conditions per (supplier × item) pair.")
-async def ingest_supplier_items(
+def ingest_supplier_items(
     body: IngestSupplierItemsRequest,
     request: Request,
     response: Response,
@@ -937,7 +937,7 @@ class IngestOnHandRequest(BaseModel):
 
 
 @router.post("/on-hand", response_model=IngestResponse, summary="Import on-hand stock", description="Upsert available stock (OnHandSupply) per (item × location).")
-async def ingest_on_hand(
+def ingest_on_hand(
     body: IngestOnHandRequest,
     request: Request,
     response: Response,
@@ -1101,7 +1101,7 @@ class IngestPurchaseOrdersRequest(BaseModel):
 
 
 @router.post("/purchase-orders", response_model=IngestResponse, summary="Import purchase orders", description="Upsert purchase orders (PurchaseOrderSupply) with ERP external_id tracking.")
-async def ingest_purchase_orders(
+def ingest_purchase_orders(
     body: IngestPurchaseOrdersRequest,
     request: Request,
     response: Response,
@@ -1262,7 +1262,7 @@ class IngestForecastRequest(BaseModel):
 
 
 @router.post("/forecast-demand", response_model=IngestResponse, summary="Import forecast demand", description="Upsert forecasts (ForecastDemand) per (item × location × bucket × grain).")
-async def ingest_forecast_demand(
+def ingest_forecast_demand(
     body: IngestForecastRequest,
     request: Request,
     response: Response,
@@ -1449,7 +1449,7 @@ class IngestResourcesRequest(BaseModel):
     summary="Import resources",
     description="Upsert a batch of resources. Upsert key: external_id. Also creates/updates a Resource node in the graph.",
 )
-async def ingest_resources(
+def ingest_resources(
     body: IngestResourcesRequest,
     request: Request,
     response: Response,
@@ -1619,7 +1619,7 @@ class IngestWorkOrdersRequest(BaseModel):
     summary="Import work orders",
     description="Upsert work orders (WorkOrderSupply) with ERP external_id tracking.",
 )
-async def ingest_work_orders(
+def ingest_work_orders(
     body: IngestWorkOrdersRequest,
     request: Request,
     response: Response,
@@ -1773,7 +1773,7 @@ class IngestCustomerOrdersRequest(BaseModel):
     summary="Import customer orders",
     description="Upsert customer orders (CustomerOrderDemand) with ERP external_id tracking.",
 )
-async def ingest_customer_orders(
+def ingest_customer_orders(
     body: IngestCustomerOrdersRequest,
     request: Request,
     response: Response,
@@ -1931,7 +1931,7 @@ class IngestTransfersRequest(BaseModel):
         "The node is wired to the PI of the **destination** (to_location)."
     ),
 )
-async def ingest_transfers(
+def ingest_transfers(
     body: IngestTransfersRequest,
     request: Request,
     response: Response,
@@ -2251,7 +2251,7 @@ def _row_to_db_dict(row: PlanningParamsRow, supplier_id: Optional[UUID]) -> dict
         "(same-day) or rotates (closes active + inserts new with effective_from=today)."
     ),
 )
-async def ingest_planning_params(
+def ingest_planning_params(
     body: IngestPlanningParamsRequest,
     request: Request,
     response: Response,
@@ -2514,7 +2514,7 @@ def _normalize_op_time_unit(op: RoutingOperationRow) -> tuple[str, float, float]
         "match the target resource's capacity_unit — mismatch = 422."
     ),
 )
-async def ingest_routings(
+def ingest_routings(
     body: IngestRoutingsRequest,
     request: Request,
     response: Response,

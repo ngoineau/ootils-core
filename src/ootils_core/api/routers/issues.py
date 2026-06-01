@@ -54,7 +54,7 @@ class IssuesResponse(BaseModel):
 
 
 @router.get("", response_model=IssuesResponse)
-async def get_issues(
+def get_issues(
     severity: str = Query(default="all", description="low / medium / high / all"),
     horizon_days: int = Query(default=90, description="Look-ahead window in days"),
     item_id: Optional[str] = Query(default=None, description="Filter by item ID"),

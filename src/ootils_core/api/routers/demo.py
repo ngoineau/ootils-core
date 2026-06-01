@@ -66,7 +66,7 @@ def _json_safe(value: Any) -> Any:
     summary="Run Phase 1 planning demo",
     description="Run the live Forecast -> MPS -> Approve -> MRP -> CRP -> ATP demo flow with unique seeded demo data.",
 )
-async def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
+def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
     """Run the executable Phase 1 demo flow."""
     try:
         return _json_safe(run_phase1_demo_from_env())
@@ -84,7 +84,7 @@ async def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
     summary="List Phase 1 demo runs",
     description="Return recent persisted Phase 1 demo proof artifacts.",
 )
-async def list_phase1_demo_runs(
+def list_phase1_demo_runs(
     limit: int = Query(default=5, ge=1, le=50),
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

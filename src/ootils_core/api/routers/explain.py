@@ -43,7 +43,7 @@ class ExplainResponse(BaseModel):
 
 
 @router.get("", response_model=ExplainResponse)
-async def get_explanation(
+def get_explanation(
     node_id: str = Query(..., description="Target node UUID to explain"),
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

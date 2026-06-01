@@ -243,11 +243,23 @@ At 50M rows:
 
 ---
 
-### Breaking point #6: Synchronous DB calls in async FastAPI handlers
+### Breaking point #6: Synchronous DB calls in async FastAPI handlers — **FIXED**
 
-All FastAPI handlers are `async def` but use synchronous `psycopg.Connection`. Every `db.execute()` blocks the event loop. With 10 concurrent API requests, the server is effectively single-threaded.
+**Status:** Resolved 2026-05-31. All 62 route handlers across the 19 routers
+were converted from `async def` to `def`; FastAPI now dispatches them to its
+anyio worker thread pool, so a blocking `psycopg` call no longer freezes the
+event loop. Only `require_auth` (a trivial-CPU dependency, no I/O) stays async.
 
-**Fix (Tier 1):** Switch handlers to `def` (non-async), letting FastAPI dispatch them to a thread pool — unblocks the event loop immediately with minimal code change. Tier 2 alternative: migrate to `psycopg3 async` connection pool.
+**Thread-pool sizing (important):** the worker pool is now bounded to the DB
+connection pool size via `OOTILS_THREADPOOL_SIZE` (defaults to
+`OOTILS_DB_POOL_MAX_SIZE`, i.e. 10). This is deliberate: anyio's default of 40
+worker threads would have 40 handlers fighting over ≤10 connections, moving the
+bottleneck without resolving it. Raise **both** together to scale concurrency
+(threads must not exceed available connections, or threads block on
+`pool.connection()`). Set in the `app.py` lifespan startup.
+
+Tier 2 alternative (deferred): migrate to a `psycopg3 async` connection pool for
+true async I/O instead of thread-pool offload.
 
 ---
 

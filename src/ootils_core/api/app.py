@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from anyio import to_thread
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -174,6 +176,20 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        # Cap the anyio threadpool to the DB pool size so sync handlers
+        # (dispatched to threads by FastAPI) never exceed the number of
+        # available DB connections. OOTILS_THREADPOOL_SIZE overrides;
+        # falls back to OOTILS_DB_POOL_MAX_SIZE (default 10).
+        _threadpool_size = int(
+            os.environ.get(
+                "OOTILS_THREADPOOL_SIZE",
+                os.environ.get("OOTILS_DB_POOL_MAX_SIZE", "10"),
+            )
+        )
+        limiter = to_thread.current_default_thread_limiter()
+        limiter.total_tokens = _threadpool_size
+        logger.info("threadpool.sized tokens=%d", _threadpool_size)
+
         if os.environ.get("OOTILS_ENABLE_STARTUP_RECOVERY", "0").lower() in {"1", "true", "yes", "on"}:
             from ootils_core.api.dependencies import _get_ootils_db
             from ootils_core.api.routers.events import _build_propagation_engine

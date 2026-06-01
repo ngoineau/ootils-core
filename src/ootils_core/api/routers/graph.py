@@ -53,7 +53,7 @@ class GraphResponse(BaseModel):
 
 
 @router.get("", response_model=GraphResponse)
-async def get_graph(
+def get_graph(
     item_id: str = Query(..., description="Item UUID or name"),
     location_id: str = Query(..., description="Location UUID or name"),
     depth: int = Query(default=2, ge=1, le=5, description="Graph traversal depth"),
@@ -203,7 +203,7 @@ nodes_router = APIRouter(prefix="/v1/nodes", tags=["nodes"])
 
 
 @nodes_router.get("", response_model=NodeListResponse)
-async def list_nodes(
+def list_nodes(
     item_id: Optional[UUID] = Query(default=None),
     location_id: Optional[UUID] = Query(default=None),
     node_type: Optional[str] = Query(default=None),

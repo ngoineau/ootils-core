@@ -176,7 +176,7 @@ def _count_working_days(
         "et la compare à la capacité disponible par bucket (day / week / month)."
     ),
 )
-async def get_rccp(
+def get_rccp(
     resource_external_id: str,
     from_date: date = Query(default=None, description="Début de l'horizon (YYYY-MM-DD). Défaut : today."),
     to_date: date = Query(default=None, description="Fin de l'horizon (YYYY-MM-DD). Défaut : from_date + 84 jours."),

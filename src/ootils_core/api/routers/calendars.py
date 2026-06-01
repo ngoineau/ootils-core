@@ -118,7 +118,7 @@ class WorkingDaysResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/v1/ingest/calendars", response_model=IngestCalendarsResponse, summary="Import calendar", description="Import non-working days for a location. Upsert per (location × date). Missing entry = working day by default.")
-async def ingest_calendars(
+def ingest_calendars(
     body: IngestCalendarsRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -218,7 +218,7 @@ async def ingest_calendars(
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/v1/calendars/{location_external_id}", response_model=GetCalendarsResponse, summary="Get calendar", description="List calendar entries for a location (optional: filter by date range).")
-async def get_calendars(
+def get_calendars(
     location_external_id: str,
     from_date: Optional[date] = Query(default=None),
     to_date: Optional[date] = Query(default=None),
@@ -289,7 +289,7 @@ async def get_calendars(
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/v1/calendars/working-days", response_model=WorkingDaysResponse, summary="Compute working days", description="Return the date resulting from adding N working days to a start date, respecting the location calendar.")
-async def compute_working_days(
+def compute_working_days(
     body: WorkingDaysRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

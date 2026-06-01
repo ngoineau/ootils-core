@@ -33,7 +33,7 @@ class CalcRunResponse(BaseModel):
 
 
 @router.post("/run", response_model=CalcRunResponse)
-async def trigger_calc_run(
+def trigger_calc_run(
     body: CalcRunRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

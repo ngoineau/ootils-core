@@ -36,7 +36,7 @@ class PlanningParamsResponse(BaseModel):
 
 
 @router.get("/planning-params", response_model=PlanningParamsResponse)
-async def get_planning_params(
+def get_planning_params(
     item_id: Optional[str] = Query(default=None, description="Filter by item UUID"),
     location_id: Optional[str] = Query(default=None, description="Filter by location UUID"),
     db: psycopg.Connection = Depends(get_db),

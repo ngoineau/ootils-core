@@ -259,7 +259,7 @@ def _clear_existing_planned_supply(
         "forecast consumption, and time-phased planning. Returns extended response format."
     ),
 )
-async def run_mrp(
+def run_mrp(
     body: MrpRunRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -276,13 +276,13 @@ async def run_mrp(
     
     if body.apics_mode:
         # Delegate to APICS engine
-        return await _run_apics_mrp(body, db, scenario_uuid)
+        return _run_apics_mrp(body, db, scenario_uuid)
     else:
         # Use simple single-level MRP
-        return await _run_simple_mrp(body, db, scenario_uuid)
+        return _run_simple_mrp(body, db, scenario_uuid)
 
 
-async def _run_simple_mrp(
+def _run_simple_mrp(
     body: MrpRunRequest,
     db: psycopg.Connection,
     scenario_uuid: UUID,
@@ -440,7 +440,7 @@ async def _run_simple_mrp(
     )
 
 
-async def _run_apics_mrp(
+def _run_apics_mrp(
     body: MrpRunRequest,
     db: psycopg.Connection,
     scenario_uuid: UUID,
