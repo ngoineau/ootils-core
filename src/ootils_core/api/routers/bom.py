@@ -317,7 +317,7 @@ def _recalculate_llc(db: psycopg.Connection, affected_item_ids: list[UUID]) -> i
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/ingest/bom", response_model=IngestBOMResponse, summary="Import BOM", description="Import a complete Bill of Materials for an item. Automatically computes Low-Level Codes (LLC).")
-async def ingest_bom(
+def ingest_bom(
     body: IngestBOMRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -454,7 +454,7 @@ async def ingest_bom(
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/bom/{parent_external_id}", response_model=BOMResponse, summary="Get BOM", description="Return the active BOM for an item with its components and LLC.")
-async def get_bom(
+def get_bom(
     parent_external_id: str,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -500,7 +500,7 @@ async def get_bom(
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/bom/explode", response_model=ExplodeResponse, summary="MRP explosion", description="Compute gross and net component requirements for a given quantity (multi-level explosion, netting against available stock).")
-async def explode_bom(
+def explode_bom(
     body: ExplodeRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

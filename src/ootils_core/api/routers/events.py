@@ -157,7 +157,7 @@ class EventListResponse(BaseModel):
 
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
-async def create_event(
+def create_event(
     body: EventRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -261,7 +261,7 @@ async def create_event(
 
 
 @router.get("", response_model=EventListResponse)
-async def list_events(
+def list_events(
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
     limit: int = Query(default=50, ge=1, le=500, description="Max events to return"),

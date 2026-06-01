@@ -221,7 +221,7 @@ def _fetch_supply_demand_details(
 # ─────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ProjectionResponse)
-async def get_projection(
+def get_projection(
     item_id: str = Query(..., description="Item identifier (UUID or external_id)"),
     location_id: str = Query(..., description="Location identifier (UUID or external_id)"),
     grain: Optional[str] = Query(default=None, description="day / week / month — aggregates daily buckets"),
@@ -344,7 +344,7 @@ async def get_projection(
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/portfolio", response_model=PortfolioResponse)
-async def get_portfolio(
+def get_portfolio(
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
@@ -400,7 +400,7 @@ async def get_portfolio(
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/pegging/{node_id}", response_model=PeggingResponse)
-async def get_pegging(
+def get_pegging(
     node_id: str,
     depth: int = Query(default=3, ge=1, le=5, description="Max traversal depth"),
     db: psycopg.Connection = Depends(get_db),

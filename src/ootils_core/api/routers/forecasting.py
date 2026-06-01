@@ -299,7 +299,7 @@ def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
         "- Total forecast quantity across the horizon"
     ),
 )
-async def generate_forecast(
+def generate_forecast(
     body: ForecastGenerateRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -449,7 +449,7 @@ async def generate_forecast(
     summary="Get forecast",
     description="Retrieve a specific forecast with all its values and adjustments.",
 )
-async def get_forecast(
+def get_forecast(
     forecast_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -587,7 +587,7 @@ async def get_forecast(
         "- method: Filter by forecasting method"
     ),
 )
-async def list_forecasts(
+def list_forecasts(
     item_id: Optional[str] = Query(default=None),
     location_id: Optional[str] = Query(default=None),
     date_from: Optional[date] = Query(default=None),
@@ -723,7 +723,7 @@ async def list_forecasts(
         "- value_id: Specific forecast value to adjust (NULL for entire forecast)"
     ),
 )
-async def adjust_forecast(
+def adjust_forecast(
     forecast_id: UUID,
     body: ForecastAdjustRequest,
     db: psycopg.Connection = Depends(get_db),
@@ -836,7 +836,7 @@ async def adjust_forecast(
         "This operation is idempotent."
     ),
 )
-async def delete_forecast(
+def delete_forecast(
     forecast_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

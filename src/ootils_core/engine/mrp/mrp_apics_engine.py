@@ -304,46 +304,83 @@ class MrpApicsEngine:
         start_date: date,
         time_buckets: List[TimeBucket],
     ):
-        """Apply lot sizing and time fence rules to bucket records."""
+        """Apply lot sizing and time fences, CHAINING planned orders forward.
+
+        The gross-to-net pass computes `net_requirements = safety_stock - PAB`
+        per bucket against a PAB that chains only scheduled receipts and gross
+        requirements — it cannot see the planned orders this method creates.
+        The previous implementation ordered against that stale per-bucket
+        net_req and only mutated the *current* record's projected_on_hand, never
+        re-chaining the running balance forward. Result: every bucket below
+        safety stock regenerated the FULL deficit and ordered it again — serial
+        over-ordering measured up to ~48× vs the canonical cascade in
+        scripts/mrp_core.py (see docs/ADR-020). The fix mirrors
+        mrp_core.run_timephased's `pa += qty`: carry a single running balance
+        that includes planned orders, and recompute net requirements against it.
+        """
         time_fence = TimeFenceChecker.from_planning_params(params)
+        safety_stock = self.gross_to_net._coalesce_decimal(
+            params.get("safety_stock_qty"), Decimal("0")
+        )
+        # Running projected-on-hand INCLUDING planned orders placed so far.
+        prev_close: Optional[Decimal] = None
 
         for i, record in enumerate(records):
-            # Check time fence
             fence_result = time_fence.check_zone(record.period_start, start_date)
             record.time_fence_zone = fence_result.zone.value
 
-            if record.net_requirements <= 0:
+            # Re-chain the balance through prior planned orders. Bucket 0's
+            # stored projected_on_hand is already on_hand + SR - GR (no planned
+            # order can precede it); later buckets must rebuild from the prior
+            # chained close so earlier orders count as available supply.
+            if prev_close is None:
+                pab = record.projected_on_hand
+            else:
+                pab = prev_close + record.scheduled_receipts - record.gross_requirements
+            record.projected_on_hand = pab
+
+            # Net requirement against the CHAINED balance, not the stale one.
+            net_req = safety_stock - pab if pab < safety_stock else Decimal("0")
+            record.net_requirements = net_req
+            record.has_shortage = pab < safety_stock
+            record.shortage_qty = net_req if record.has_shortage else Decimal("0")
+
+            if net_req <= 0:
+                record.planned_order_receipts = Decimal("0")
+                record.planned_order_releases = Decimal("0")
+                record.projected_on_hand_after = pab
+                prev_close = pab
                 continue
 
-            # Get future net requirements for POQ
+            # Frozen zone: no order can be placed; the shortage stands and
+            # cascades (no supply added to the running balance).
+            if fence_result.zone == TimeFenceZone.FROZEN:
+                record.planned_order_receipts = Decimal("0")
+                record.planned_order_releases = Decimal("0")
+                record.projected_on_hand_after = pab
+                prev_close = pab
+                continue
+
+            # Future net requirements for POQ windowing.
             future_net_reqs = [
                 r.net_requirements
                 for r in records[i + 1:i + int(params.get("lot_size_poq_periods") or 1)]
                 if r.net_requirements > 0
             ]
-
-            # Apply lot sizing
             lot_qty, rule_applied = self.lot_sizing.calculate_lot_size(
-                net_requirements=record.net_requirements,
-                projected_on_hand=record.projected_on_hand,
+                net_requirements=net_req,
+                projected_on_hand=pab,
                 planning_params=params,
                 future_net_reqs=future_net_reqs,
             )
-
             record.planned_order_receipts = lot_qty
+            record.planned_order_releases = lot_qty
             record.lot_size_rule_applied = rule_applied
 
-            # Recalculate projected on hand with lot size
-            record.projected_on_hand += lot_qty
-
-            # Lead time offset: release date = receipt date - lead time
-            record.planned_order_releases = lot_qty
-
-            # Handle frozen zone: push orders to frozen boundary
-            if fence_result.zone == TimeFenceZone.FROZEN:
-                record.planned_order_receipts = Decimal("0")
-                record.planned_order_releases = Decimal("0")
-                # Still record the shortage
+            # Carry the planned order forward so later buckets net against it.
+            pab_after = pab + lot_qty
+            record.projected_on_hand_after = pab_after
+            prev_close = pab_after
 
     def _explode_dependent_demand(
         self,

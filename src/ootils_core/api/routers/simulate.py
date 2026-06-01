@@ -69,7 +69,7 @@ class SimulateResponse(BaseModel):
 
 
 @router.post("", response_model=SimulateResponse, status_code=status.HTTP_201_CREATED)
-async def create_simulation(
+def create_simulation(
     body: SimulateRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),

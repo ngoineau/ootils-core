@@ -52,7 +52,7 @@ class ScenariosListResponse(BaseModel):
 
 
 @router.get("", response_model=ScenariosListResponse)
-async def list_scenarios(
+def list_scenarios(
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
     status_filter: Optional[str] = Query(default=None, alias="status"),
@@ -96,7 +96,7 @@ async def list_scenarios(
 
 
 @router.get("/{scenario_id}", response_model=ScenarioOut)
-async def get_scenario(
+def get_scenario(
     scenario_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -116,7 +116,7 @@ async def get_scenario(
 
 
 @router.delete("/{scenario_id}", status_code=204)
-async def delete_scenario(
+def delete_scenario(
     scenario_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -198,7 +198,7 @@ def _engine_unavailable_response(exc: Exception) -> HTTPException:
     response_model=SandboxScenarioOut,
     status_code=201,
 )
-async def create_sandbox_scenario(
+def create_sandbox_scenario(
     body: SandboxScenarioCreateRequest,
     _token: str = Depends(require_auth),
 ) -> SandboxScenarioOut:
@@ -253,7 +253,7 @@ async def create_sandbox_scenario(
     "/sandbox",
     response_model=SandboxScenariosListResponse,
 )
-async def list_sandbox_scenarios(
+def list_sandbox_scenarios(
     _token: str = Depends(require_auth),
 ) -> SandboxScenariosListResponse:
     """List all ephemeral scenarios currently in the engine's RAM.
@@ -287,7 +287,7 @@ async def list_sandbox_scenarios(
 
 
 @router.delete("/sandbox/{scenario_id}", status_code=204)
-async def delete_sandbox_scenario(
+def delete_sandbox_scenario(
     scenario_id: UUID,
     _token: str = Depends(require_auth),
 ) -> None:

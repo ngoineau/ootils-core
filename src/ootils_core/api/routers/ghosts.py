@@ -153,7 +153,7 @@ def _validate_membership(ghost_type: str, members: list[GhostMemberInput]) -> li
     summary="Ingest ghost",
     description="Create or update a ghost_node with its members. Also creates Ghost node + edges in the graph.",
 )
-async def ingest_ghost(
+def ingest_ghost(
     body: IngestGhostRequest,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -317,7 +317,7 @@ async def ingest_ghost(
     summary="List ghosts",
     description="List all ghost_nodes with their members.",
 )
-async def list_ghosts(
+def list_ghosts(
     ghost_type: Optional[str] = None,
     scenario_id: Optional[UUID] = None,
     ghost_status: Optional[str] = None,
@@ -389,7 +389,7 @@ async def list_ghosts(
     summary="Get ghost detail",
     description="Get a ghost's detail including members and graph node.",
 )
-async def get_ghost(
+def get_ghost(
     ghost_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -477,7 +477,7 @@ async def get_ghost(
     summary="Run ghost logic",
     description="Execute ghost engine over a time window. Returns alerts and summary.",
 )
-async def run_ghost_endpoint(
+def run_ghost_endpoint(
     ghost_id: UUID,
     body: GhostRunRequest,
     db: psycopg.Connection = Depends(get_db),

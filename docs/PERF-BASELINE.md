@@ -185,6 +185,62 @@ Configuration :
 | 2026-05-24 | post-#273 | M | 74.7s | **12.4s** | **6.0×** | Direct LAN, Postgres infra refondue |
 | 2026-05-24 | post-#275 | L | 165.7s | **34.5s** | **4.81×** | Profile L (10K SKU, 227K PI), seuil 30s franchi |
 
+## Addendum 2026-05-31 — dé-corrélation `PROPAGATE_SQL` + perf MRP
+
+### Dé-corrélation des sous-requêtes `inflows`/`outflows` (propagator_sql.py)
+
+Le CTE `per_bucket` calculait `inflows` et `outflows` via deux **sous-requêtes
+scalaires corrélées**, évaluées une paire par PI dirty (~450K exécutions à 227K
+PI) — cause mécanique de la chute de throughput non-linéaire S→M→L. Réécrites en
+**deux CTE agrégées séparées** (`inflows_agg`, `outflows_agg`, LEFT JOIN +
+COALESCE — CTE distinctes pour éviter le produit cartésien inflow×outflow).
+
+Mesure EXPLAIN ANALYZE de la requête de projection (read-only, bench isolée
+`ootils_test_bench`, 18 000 PI dirty, 3 runs) :
+
+| Variante | Médiane | SubPlans corrélés | Spill disque |
+|---|---|---|---|
+| Corrélée (avant) | 279 ms | 6 | non |
+| Dé-corrélée (après) | **71 ms** | 2 | non |
+
+→ **3.9× sur la requête chaude**, sans spill. Parité validée **bit-exacte vs
+l'original** (`scripts/parity_sql_vs_python.py`, 200×90, full+incremental) : la
+réécriture ne change **aucune** valeur — mêmes résultats que la version corrélée.
+
+### ⚠️ Bug de parité pré-existant découvert — `has_shortage` au bord de zéro
+
+La campagne de parité (200 items × 90 buckets, supplies/demands mixtes) révèle
+une divergence **pré-existante** (présente AVANT la dé-corrélation, donc non
+introduite par elle) : **10 nœuds sur 18 000** ont `has_shortage` Python=`False`
+mais SQL=`True`, et 10 shortages SQL "en trop". Tous les champs **numériques**
+(opening/inflows/outflows/closing/shortage_qty) concordent à 1e-12.
+
+Cause racine : `has_shortage` est un **test de signe strict à 0** (`closing < 0`,
+identique dans les deux moteurs). Sur les nœuds où le prorating multi-jours
+amène `closing` à ~0, l'arithmétique exacte mais différemment arrondie
+(`Decimal` 28 digits vs `numeric(50,28)` Postgres) place la valeur de part et
+d'autre de zéro (écart < 1e-12). Un `closing` de −1e-13 n'est pas une vraie
+rupture mais le test strict les départage. **Fix recommandé** (non appliqué —
+décision sémantique) : seuil epsilon partagé (`closing < -1e-9`) dans les deux
+moteurs. Le harness de parité full **échoue** sur ce point ; l'incrémental passe.
+
+### Perf MRP (#301) — `scripts/bench_mrp.py`, lecture seule sur la pilote
+
+Première mesure du MRP (jamais benché). DB pilote : 36 635 items, BOM 7 niveaux,
+17 181 items impliqués, 220K ordres planifiés (horizon 540 j).
+
+| Phase | Avant consolidation | Après consolidation |
+|---|---|---|
+| load (DB) | 2.58 s | **1.87 s** |
+| cascade (compute) | 1.46 s | 1.46 s |
+| **total** | 4.05 s | **2.88 s** (−29%) |
+
+Constat : le MRP est **DB-bound** (load = 60-74% du temps), pas compute-bound
+(la cascade 7-niveaux tourne à 120-150K ordres/s). Le levier appliqué :
+consolidation des scans répétés dans `load_planning_data` (12 scans de
+`item_planning_params` → 1, idem nodes/supplier_items/items), parité dict-exacte
+vérifiée sur les 19 champs. Mesure isolée : 12 scans 473 ms → 1 scan 87 ms (5.5×).
+
 ## Hardware / contexte
 
 - Postgres 16.13 sur VM Debian (192.168.1.176:5432) — infra refondue 2026-05-24

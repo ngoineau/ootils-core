@@ -81,7 +81,7 @@ class DQIssuesResponse(BaseModel):
     summary="Run DQ pipeline on a batch",
     description="Execute L1 (structural) + L2 (referential) checks on all rows of a batch.",
 )
-async def run_dq_batch(
+def run_dq_batch(
     batch_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -128,7 +128,7 @@ async def run_dq_batch(
     summary="List unresolved DQ issues",
     description="Returns all unresolved data quality issues. Filterable by severity, dq_level, entity_type.",
 )
-async def list_issues(
+def list_issues(
     severity: Optional[str] = Query(default=None, description="Filter by severity: error | warning | info"),
     dq_level: Optional[int] = Query(default=None, description="Filter by DQ level: 1 | 2 | 3 | 4"),
     entity_type: Optional[str] = Query(default=None, description="Filter by entity_type (e.g. purchase_orders)"),
@@ -205,7 +205,7 @@ async def list_issues(
     summary="Get DQ results for a batch",
     description="Returns all DQ issues (resolved or not) for a specific batch.",
 )
-async def get_batch_dq(
+def get_batch_dq(
     batch_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -330,7 +330,7 @@ class AgentRunsResponse(BaseModel):
         "The agent enriches data_quality_issues with impact_score and LLM insights."
     ),
 )
-async def run_agent_batch(
+def run_agent_batch(
     batch_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -374,7 +374,7 @@ async def run_agent_batch(
     summary="Get DQ Agent report for a batch",
     description="Returns the full agent report: narrative, priority actions, and enriched issues.",
 )
-async def get_agent_report(
+def get_agent_report(
     batch_id: UUID,
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
@@ -475,7 +475,7 @@ async def get_agent_report(
     summary="List DQ Agent run history",
     description="Returns the history of DQ Agent runs across all batches.",
 )
-async def list_agent_runs(
+def list_agent_runs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: psycopg.Connection = Depends(get_db),

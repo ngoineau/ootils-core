@@ -79,7 +79,11 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 - `kernel/shortage/`, `kernel/explanation/`, `kernel/allocation/`, `kernel/temporal/` — specialized kernels.
 - `orchestration/propagator.py` — `PropagationEngine.process_event()` is the main entry point: acquires advisory lock → expands dirty subgraph → topo sort → compute → persist → cascade. Pairs with `orchestration/calc_run.py` which tracks run status.
 - `scenario/manager.py` — scenario forking via deep-copy (the original CoW vocabulary doesn't match the implementation; see REVIEW-2026-05 R10).
-- `dq/`, `ghost/`, `mrp/` — capability modules; the `dq/agent/` subtree is an LLM-driven remediation agent.
+- `dq/`, `ghost/` — capability modules under `engine/`; the `dq/agent/` subtree is an LLM-driven remediation agent.
+- **MRP exists in TWO implementations — know which one you're touching:**
+  1. `scripts/mrp_core.py` — a shared **script-level** module (single source of MRP truth for the operational tooling: planning-data load, forecast consumption, the LLC level-by-level time-phased cascade with lot sizing + lead-time offsetting, pegging), consumed by the CLIs (`scripts/mrp_*.py`) and the watcher agents (`scripts/agent_*_watcher.py`). It is **read-only** (load is SELECT-only; cascade is in-memory Python) and **scenario-parameterized** (`load_planning_data(conn, horizon_days, scenario=...)`). Perf harness: `scripts/bench_mrp.py`. The planned "real-time MRP inside scenarios" wedge builds on this module.
+  2. `src/ootils_core/engine/mrp/` — the **APICS MRP engine** package (`mrp_apics_engine`, `forecast_consumer`, `gross_to_net`, `lot_sizing`, `llc_calculator`, `time_fences`, `graph_integration`) that backs the API routers `mrp.py` (`POST /v1/mrp/run`) and `mrp_apics.py`. This one **writes** nodes/edges into the graph.
+  The two are not unified — confirm the call path before changing MRP behaviour.
 
 ### Storage
 - PostgreSQL 16 via `psycopg[binary]` 3.x — **not** SQLite (ADR-005 proposes SQLite but the project has moved past the proof stage).

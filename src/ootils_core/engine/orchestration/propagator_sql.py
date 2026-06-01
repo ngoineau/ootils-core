@@ -100,6 +100,64 @@ seed_openings AS (
         END AS seed_opening
     FROM series_first_dirty sfd
 ),
+-- inflows + outflows were originally two CORRELATED scalar subqueries
+-- evaluated once PER dirty PI (~2 per row → ~450K executions at 227K PI),
+-- the dominant cost behind the documented S→M→L throughput collapse
+-- (docs/PERF-BASELINE.md). They are de-correlated below into two SEPARATE
+-- aggregate CTEs scanned once over the whole dirty subgraph, then LEFT JOINed
+-- back. Kept as two distinct CTEs on purpose: a single JOIN spanning both
+-- edge types would cross-multiply inflow×outflow rows and double-count.
+-- The per-row expressions (numeric(50,28) Decimal-precision cast, the
+-- consumes prorating CASE) are preserved verbatim so parity stays bit-exact.
+inflows_agg AS (
+    SELECT dp.node_id, SUM(s.quantity) AS inflows
+    FROM dirty_pi dp
+    JOIN edges r
+      ON r.to_node_id = dp.node_id
+     AND r.edge_type = 'replenishes'
+     AND r.scenario_id = dp.scenario_id
+     AND r.active = TRUE
+    JOIN nodes s
+      ON s.node_id = r.from_node_id
+     AND s.node_type IN ('PurchaseOrderSupply','WorkOrderSupply','TransferSupply','PlannedSupply')
+     AND s.active = TRUE
+     AND s.time_ref >= dp.time_span_start
+     AND s.time_ref <  dp.time_span_end
+    GROUP BY dp.node_id
+),
+outflows_agg AS (
+    SELECT dp.node_id, SUM(
+        CASE
+            WHEN d.time_span_start IS NOT NULL
+                 AND d.time_span_end IS NOT NULL
+                 AND d.time_span_end > d.time_span_start THEN
+                -- numeric(50,28) cast matches Python Decimal default precision
+                d.quantity::numeric(50, 28)
+                / (d.time_span_end - d.time_span_start)::numeric
+                * GREATEST(
+                    0,
+                    LEAST(dp.time_span_end, d.time_span_end)
+                    - GREATEST(dp.time_span_start, d.time_span_start)
+                  )::numeric
+            WHEN COALESCE(d.time_ref, d.time_span_start) IS NOT NULL
+                 AND COALESCE(d.time_ref, d.time_span_start) >= dp.time_span_start
+                 AND COALESCE(d.time_ref, d.time_span_start) <  dp.time_span_end THEN
+                d.quantity
+            ELSE 0
+        END
+    ) AS outflows
+    FROM dirty_pi dp
+    JOIN edges c
+      ON c.to_node_id = dp.node_id
+     AND c.edge_type = 'consumes'
+     AND c.scenario_id = dp.scenario_id
+     AND c.active = TRUE
+    JOIN nodes d
+      ON d.node_id = c.from_node_id
+     AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
+     AND d.active = TRUE
+    GROUP BY dp.node_id
+),
 per_bucket AS (
     SELECT
         dp.node_id,
@@ -109,51 +167,12 @@ per_bucket AS (
         dp.time_span_end,
         CASE WHEN dp.bucket_sequence = so.seed_seq THEN so.seed_opening
              ELSE 0::numeric END AS oh_seed,
-        COALESCE((
-            SELECT SUM(s.quantity)
-            FROM edges r
-            JOIN nodes s ON s.node_id = r.from_node_id
-            WHERE r.to_node_id = dp.node_id
-              AND r.edge_type = 'replenishes'
-              AND r.scenario_id = dp.scenario_id
-              AND r.active = TRUE
-              AND s.node_type IN ('PurchaseOrderSupply','WorkOrderSupply','TransferSupply','PlannedSupply')
-              AND s.active = TRUE
-              AND s.time_ref >= dp.time_span_start
-              AND s.time_ref <  dp.time_span_end
-        ), 0)::numeric AS inflows,
-        COALESCE((
-            SELECT SUM(
-                CASE
-                    WHEN d.time_span_start IS NOT NULL
-                         AND d.time_span_end IS NOT NULL
-                         AND d.time_span_end > d.time_span_start THEN
-                        -- numeric(50,28) cast matches Python Decimal default precision
-                        d.quantity::numeric(50, 28)
-                        / (d.time_span_end - d.time_span_start)::numeric
-                        * GREATEST(
-                            0,
-                            LEAST(dp.time_span_end, d.time_span_end)
-                            - GREATEST(dp.time_span_start, d.time_span_start)
-                          )::numeric
-                    WHEN COALESCE(d.time_ref, d.time_span_start) IS NOT NULL
-                         AND COALESCE(d.time_ref, d.time_span_start) >= dp.time_span_start
-                         AND COALESCE(d.time_ref, d.time_span_start) <  dp.time_span_end THEN
-                        d.quantity
-                    ELSE 0
-                END
-            )
-            FROM edges c
-            JOIN nodes d ON d.node_id = c.from_node_id
-            WHERE c.to_node_id = dp.node_id
-              AND c.edge_type = 'consumes'
-              AND c.scenario_id = dp.scenario_id
-              AND c.active = TRUE
-              AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
-              AND d.active = TRUE
-        ), 0)::numeric AS outflows
+        COALESCE(ia.inflows, 0)::numeric AS inflows,
+        COALESCE(oa.outflows, 0)::numeric AS outflows
     FROM dirty_pi dp
     JOIN seed_openings so ON so.projection_series_id = dp.projection_series_id
+    LEFT JOIN inflows_agg  ia ON ia.node_id = dp.node_id
+    LEFT JOIN outflows_agg oa ON oa.node_id = dp.node_id
 ),
 projected AS (
     SELECT
@@ -178,9 +197,13 @@ SET opening_stock = p.opening_stock,
     closing_stock = p.opening_stock + p.inflows - p.outflows,
     -- Mirrors ProjectionKernel: a "negative closing stock" shortage.
     -- Safety-stock-based shortages are detected in SHORTAGES_SQL below.
-    has_shortage  = (p.opening_stock + p.inflows - p.outflows) < 0,
+    -- The -1e-9 tolerance matches SHORTAGE_EPSILON in the Python kernel
+    -- (engine/kernel/shortage/detector.py): a closing within ±1e-9 of zero is
+    -- effectively-zero stock, not a stockout — keeps the sign test deterministic
+    -- across both engines at the ~0 boundary. See docs/PERF-BASELINE.md.
+    has_shortage  = (p.opening_stock + p.inflows - p.outflows) < -1e-9,
     shortage_qty  = CASE
-                        WHEN (p.opening_stock + p.inflows - p.outflows) < 0
+                        WHEN (p.opening_stock + p.inflows - p.outflows) < -1e-9
                             THEN -(p.opening_stock + p.inflows - p.outflows)
                         ELSE 0
                     END,
@@ -194,8 +217,10 @@ WHERE nodes.node_id = p.node_id;
 
 SHORTAGES_SQL = """
 -- Mirror ShortageDetector.detect_with_params + persist in pure SQL.
---   closing < 0                            -> 'stockout',           qty = -closing
---   0 <= closing < safety_stock_qty        -> 'below_safety_stock', qty = safety_stock - closing
+--   closing < -EPS                         -> 'stockout',           qty = -closing
+--   -EPS <= closing < safety_stock_qty     -> 'below_safety_stock', qty = safety_stock - closing
+-- EPS = 1e-9, matching SHORTAGE_EPSILON in the Python kernel (deterministic
+-- sign test across engines at the ~0 boundary; see docs/PERF-BASELINE.md).
 -- severity_score = shortage_qty * days_in_bucket * 1 (unit-cost proxy)
 -- shortage_date  = COALESCE(time_span_start, time_ref)
 -- Restricted to the dirty subgraph for this calc_run; clean PIs' shortages
@@ -238,19 +263,19 @@ shortage_rows AS (
         location_id,
         shortage_date,
         CASE
-            WHEN closing_stock < 0 THEN -closing_stock
+            WHEN closing_stock < -1e-9 THEN -closing_stock
             ELSE safety_stock_qty - closing_stock
         END AS shortage_qty,
         CASE
-            WHEN closing_stock < 0 THEN 'stockout'
+            WHEN closing_stock < -1e-9 THEN 'stockout'
             ELSE 'below_safety_stock'
         END AS severity_class,
         days_in_bucket
     FROM pi_with_ss
-    WHERE closing_stock < 0
+    WHERE closing_stock < -1e-9
        OR (
             safety_stock_qty IS NOT NULL
-            AND closing_stock >= 0
+            AND closing_stock >= -1e-9
             AND closing_stock < safety_stock_qty
        )
 )

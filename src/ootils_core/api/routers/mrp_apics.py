@@ -21,10 +21,11 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from psycopg import Connection
 from pydantic import BaseModel, Field
 
+from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id, BASELINE_SCENARIO_ID
 from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
 from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
@@ -153,20 +154,30 @@ class LlcResponse(BaseModel):
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.post("/apics/run", response_model=MrpApicsRunResponse)
-async def run_mrp_apics(
+@router.post("/apics/run", response_model=MrpApicsRunResponse, deprecated=True)
+def run_mrp_apics(
     request: MrpApicsRunRequest,
+    response: Response,
     db: Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
 ):
     """
     [DEPRECATED] Execute a full APICS-compliant multi-level MRP run.
-    
+
     ⚠️  DEPRECATED: Use POST /v1/mrp/run with apics_mode=true instead.
-    
+    This endpoint is a thin alias kept for backward compatibility; it has no
+    behaviour the unified endpoint lacks and will be removed in a future
+    release (date TBD). The route is flagged `deprecated` in the OpenAPI schema
+    and every response carries RFC 8594 deprecation headers.
+
     Processes items from LLC 0 (finished goods) through LLC N (raw materials),
     consuming forecast, calculating gross-to-net, applying lot sizing and time fences,
     and exploding dependent demand through the BOM.
     """
+    # RFC 8594 — signal deprecation to programmatic clients (the docstring/log
+    # only reach humans). No `Sunset` date: removal is not yet scheduled.
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</v1/mrp/run>; rel="successor-version"'
     logger.warning(
         "DEPRECATED: /v1/mrp/apics/run called. Use /v1/mrp/run with apics_mode=true instead."
     )
@@ -220,9 +231,10 @@ async def run_mrp_apics(
 
 
 @router.post("/consumption", response_model=ConsumptionResponse)
-async def run_consumption(
+def run_consumption(
     request: ConsumptionRequest,
     db: Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
 ):
     """
     Run forecast consumption against customer orders.
@@ -327,9 +339,10 @@ async def run_consumption(
 
 
 @router.post("/lot-sizing", response_model=LotSizingResponse)
-async def calculate_lot_sizing(
+def calculate_lot_sizing(
     request: LotSizingRequest,
     db: Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
 ):
     """
     Calculate lot sizing for a given net requirement.
@@ -371,9 +384,10 @@ async def calculate_lot_sizing(
 
 
 @router.get("/apics/llc", response_model=LlcResponse)
-async def get_llc(
+def get_llc(
     recalculate: bool = Query(default=False, description="Recalculate LLCs from BOM"),
     db: Connection = Depends(get_db),
+    _token: str = Depends(require_auth),
 ):
     """
     Get Low-Level Codes for all items.

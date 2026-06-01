@@ -532,11 +532,16 @@ def test_mrp_run_no_auth(api_client, test_item_location):
 
 @requires_db
 def test_mrp_apics_run_no_auth(api_client, test_item_location):
-    """POST /v1/mrp/apics/run without auth returns 500 (UUID parsing fails before auth)."""
+    """POST /v1/mrp/apics/run without auth returns 401 — auth is now enforced.
+
+    Previously the endpoint had NO auth dependency (a security gap), so a no-auth
+    request fell through to UUID parsing and 500'd. require_auth was added (it was
+    the only router missing it); the endpoint now rejects unauthenticated calls
+    with 401, matching test_mrp_run_no_auth.
+    """
     payload = {"location_id": test_item_location["location_id"]}
     resp = api_client.post("/v1/mrp/apics/run", json=payload)
-    # Note: API returns 500 due to UUID parsing error before auth check
-    assert resp.status_code == 500
+    assert resp.status_code == 401
 
 
 @requires_db
