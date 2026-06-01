@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 # Unit cost proxy for PoC — will be replaced with actual item cost in future milestones.
 _UNIT_COST_PROXY = Decimal("1")
 
+# Shortage sign-test tolerance. A "stockout" is closing_stock < 0, but the
+# Python kernel (Decimal, 28 sig digits) and the SQL engine (numeric(50,28))
+# round multi-day demand proration differently in the ~24-26th digit. On nodes
+# whose closing lands at ~0 that sub-1e-12 difference straddles zero, making the
+# two engines disagree on the boolean stockout flag (a -1e-13 closing is not a
+# real shortage). Treating |closing| < EPS as "effectively zero stock" aligns
+# both engines deterministically. EPS is parts-per-billion — ~9 orders of
+# magnitude below any business-meaningful inventory quantity, far above the
+# 1e-12 rounding noise. The SQL engine uses the same literal (-1e-9); keep them
+# in sync. See docs/PERF-BASELINE.md "has_shortage au bord de zéro".
+SHORTAGE_EPSILON = Decimal("1e-9")
+
 
 class ShortageDetector:
     """
@@ -87,13 +99,16 @@ class ShortageDetector:
 
         effective_unit_cost = unit_cost if unit_cost is not None else _UNIT_COST_PROXY
 
-        # Determine severity_class and shortage_qty
-        if closing < Decimal("0"):
+        # Determine severity_class and shortage_qty. The -EPS / +EPS boundary
+        # keeps the sign test deterministic across the Python and SQL engines
+        # (see SHORTAGE_EPSILON above): a closing within ±EPS of zero is treated
+        # as effectively zero stock, never a stockout.
+        if closing < -SHORTAGE_EPSILON:
             severity_class = "stockout"
             shortage_qty = abs(closing)
         elif (
             safety_stock_qty is not None
-            and Decimal("0") <= closing < safety_stock_qty
+            and -SHORTAGE_EPSILON <= closing < safety_stock_qty
         ):
             severity_class = "below_safety_stock"
             shortage_qty = safety_stock_qty - closing

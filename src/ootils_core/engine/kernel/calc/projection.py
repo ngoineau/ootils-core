@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from ootils_core.engine.kernel.shortage.detector import SHORTAGE_EPSILON
+
 
 class ProjectionKernel:
     """
@@ -65,7 +67,9 @@ class ProjectionKernel:
 
         closing_stock = opening_stock + inflows - outflows
 
-        has_shortage = closing_stock < Decimal("0")
+        # -EPS tolerance keeps the stockout sign test deterministic vs the SQL
+        # engine at the ~0 boundary (see SHORTAGE_EPSILON in shortage.detector).
+        has_shortage = closing_stock < -SHORTAGE_EPSILON
         shortage_qty = abs(closing_stock) if has_shortage else Decimal("0")
 
         return {
