@@ -1,0 +1,29 @@
+# Buy-program / S&OP seasonal calendar — template to fill (Pyramide axis C).
+# One row per (season_year, program[, phase][, scope]). Dates as YYYY-MM-DD.
+# Goal: tell the forecast WHEN demand lands each year, in the business's own
+# seasonal calendar (buy programs), because the timing shifts year to year.
+# We have 6 seasons of history (2020..2026) — give those + the upcoming season.
+#
+# Columns:
+#   season_year   : the selling season the program belongs to (e.g. 2025)
+#   program       : named program — March Buy / June Buy / Early Buy / In-Season ...
+#   phase         : optional sub-window inside a program ('' if none) — e.g. pre / peak / late
+#   booking_start : date orders OPEN for this program (the booking signal we forecast)
+#   booking_end   : date orders CLOSE
+#   scope_type    : 'ALL' | 'family' | 'channel' | 'family+channel'  (who the program covers)
+#   scope_value   : GEN_FAM code(s) and/or channel; '' when scope_type=ALL
+#                   (comma-separate multiple, e.g. 'F001,F007')
+#   ship_start    : optional — when the program's demand starts shipping ('' if n/a)
+#   ship_end      : optional
+#   notes
+#
+# The example rows below are PLACEHOLDERS — replace with your real S&OP dates.
+# Note how March Buy 2024 vs 2025 have DIFFERENT windows: that year-to-year
+# shift is exactly what we need to capture (and why calendar-month is wrong).
+season_year	program	phase	booking_start	booking_end	scope_type	scope_value	ship_start	ship_end	notes
+2024	March Buy		2024-01-15	2024-03-31	ALL		2024-02-01	2024-04-30	example — replace
+2024	June Buy		2024-05-01	2024-06-30	ALL		2024-05-15	2024-07-15	example — replace
+2024	Early Buy		2024-09-01	2024-10-31	ALL		2024-09-15	2024-11-30	example — replace
+2025	March Buy		2025-01-10	2025-03-20	ALL		2025-01-25	2025-04-20	example — note earlier than 2024
+2025	June Buy		2025-05-05	2025-07-05	ALL		2025-05-20	2025-07-20	example — replace
+2025	Early Buy		2025-09-05	2025-11-05	ALL		2025-09-20	2025-12-05	example — replace

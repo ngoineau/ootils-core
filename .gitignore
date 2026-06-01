@@ -1,6 +1,11 @@
 # Environment secrets — never commit
 .env
 
+# Raw ERP extracts — large input data, never commit (SALES_MARINE.full.tsv ~2.3 GB)
+Raw Data/
+*.tsv.rar
+.valve_*.txt
+
 # Python byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
