@@ -1,0 +1,86 @@
+# LINE_TYPE -> demand classification (SALES_MARINE). Decided 2026-05-31. See memory demand-business-rule-booking.
+# Demand = positive quantities only; negatives = returns (separate series, never netted into demand).
+# in_asp=no for warranty($0), intercompany(at-cost), drop-ship(at-cost). PROMO=REGULAR. All confirmed 2026-05-31.
+# fulfillment: direct = ships supplier->customer, BYPASSES DCs (no DRP deploy); inter_entity = Group replenishment.
+line_type	class	in_demand	in_asp	forecast_stream	fulfillment	sign	demand_units	returns_units	lines	pos_value
+STANDARD LINE	REGULAR	yes	yes	regular	standard	positive	59977994	0	2165188	5824389406
+INTERCOMPANY LINE	INTERCOMPANY	yes	no	regular	inter_entity	positive	4329436	0	37524	119553531
+CMP DROP SHIP LINE	DROP_SHIP	yes	no	regular	direct	positive	4109772	0	2201	9943013
+SRS IMPORT LINE	REGULAR	yes	yes	regular	standard	positive	1822047	0	388858	436833869
+WARRANTY CS	WARRANTY	yes	no	warranty	standard	positive	1353242	0	1106263	6921
+CN STANDARD LINE	REGULAR	yes	yes	regular	standard	positive	1137152	0	86277	251719261
+INVOICE ONLY LINE	EXCLUDE_INVOICE	no	no	-	-	positive	691691	0	15017	95754632
+NO BILL LINE	EXCLUDE_NOBILL	no	no	-	-	positive	580620	0	119904	250675
+REP NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	84641	0	32762	0
+NO BILL REG	EXCLUDE_NOBILL	no	no	-	-	positive	53166	0	14622	20855
+DROP INTERCO	INTERCOMPANY	yes	no	regular	inter_entity	positive	39600	0	56	3600835
+CN WARRANTY	WARRANTY	yes	no	warranty	standard	positive	35755	0	30339	0
+CN NO BILL LINE	EXCLUDE_NOBILL	no	no	-	-	positive	28953	0	12140	25623
+CUSTOMER OPS NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	20333	0	14542	0
+BR NO BILL	EXCLUDE_NOBILL	no	no	-	-	positive	16903	0	1395	0
+SERVICE CENTER NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	15154	0	8568	0
+FREE GOOD - NO BILL LINE	EXCLUDE_NOBILL	no	no	-	-	positive	12581	0	634	0
+SERVICE PROMO	REGULAR	yes	yes	regular	standard	positive	9694	0	2334	1130
+DISTRIBUTION WARRANTY	WARRANTY	yes	no	warranty	standard	positive	7525	0	3371	0
+TECH TOOL CS	EXCLUDE_INTERNAL	no	no	-	-	positive	7070	0	3939	0
+ASTRAL EXIT RESOLUTION	EXCLUDE_INTERNAL	no	no	-	-	positive	5351	0	54	0
+DROP SHIP	DROP_SHIP	yes	no	regular	direct	positive	4400	0	11	2801700
+TRAINING PRODUCT	EXCLUDE_INTERNAL	no	no	-	-	positive	3742	0	725	0
+CLEANING SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	3289	0	381	0
+RETAIL PROMO	REGULAR	yes	yes	regular	standard	positive	3048	0	2858	2653
+LAB SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	2473	0	160	0
+CN NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	1448	0	628	5037
+HYDRAULICS SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	1130	0	237	0
+VI QUALIFICATION	EXCLUDE_INTERNAL	no	no	-	-	positive	977	0	79	0
+TS NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	885	0	568	0
+PCC INVOICE ONLY	EXCLUDE_INVOICE	no	no	-	-	positive	651	0	218	62425
+PPP WARRANTY CS	WARRANTY	yes	no	warranty	standard	positive	635	0	534	0
+AUTOMATION SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	579	0	174	0
+ELECTRO NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	571	0	129	0
+ELECTRO SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	461	0	119	0
+CLEANING NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	374	0	91	0
+OPTIMA ENGINEERING	EXCLUDE_INTERNAL	no	no	-	-	positive	338	0	92	0
+HYDRAULICS NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	294	0	65	0
+HEAT SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	264	0	79	0
+LAB NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	232	0	53	0
+SAFETY COMPLIANCE	EXCLUDE_INTERNAL	no	no	-	-	positive	216	0	85	0
+AUTOMATION NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	209	0	66	0
+FILTRATION - SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	192	0	45	0
+FIELD TEST SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	177	0	61	0
+STANDARD DROP SHIP	DROP_SHIP	yes	no	regular	direct	positive	149	0	115	1267129
+HEAT NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	118	0	54	0
+MFG ENGINEER	EXCLUDE_INTERNAL	no	no	-	-	positive	93	0	47	0
+COMMERCIAL NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	87	0	21	0
+BUILT RIGHT NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	68	0	4	0
+BUILDER PROMO	REGULAR	yes	yes	regular	standard	positive	64	0	63	0
+DISTRIBUTION NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	62	0	23	0
+DTV LAB TESTING	EXCLUDE_INTERNAL	no	no	-	-	positive	55	0	24	0
+WATERCARE NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	55	0	11	0
+FILTRATION - NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	49	0	11	0
+WATERCARE SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	41	0	13	0
+FIELD TEST NEW	EXCLUDE_INTERNAL	no	no	-	-	positive	34	0	16	0
+FEATURES SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	24	0	8	0
+COMMERCIAL SUSTAINING	EXCLUDE_INTERNAL	no	no	-	-	positive	19	0	8	0
+SALES SUPPORT NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	13	0	11	0
+CUSTOMER SAMPLE CS	EXCLUDE_INTERNAL	no	no	-	-	positive	5	0	3	0
+PROD QUALITY NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	4	0	4	0
+AM PROMO NO BILL LINE	EXCLUDE_NOBILL	no	no	-	-	positive	3	0	3	0
+3900 GEN 2 NON WARRANTY	EXCLUDE_SERVICE	no	no	-	-	positive	3	0	2	0
+FRAME WARRANTY CS	WARRANTY	yes	no	warranty	standard	positive	1	0	1	0
+CREDIT ONLY	RETURN	no	no	-	-	negative	0	-889390	34468	11040
+CN RETURN ONLY	RETURN	no	no	-	-	negative	0	-827	242	0
+RMA DEFECTIVE PRODUCT CS	RETURN	no	no	-	-	negative	0	-815	55	0
+BR RETURN LINE	RETURN	no	no	-	-	negative	0	-72	4	0
+DD REPLACEMENT CREDIT ONLY	RETURN	no	no	-	-	negative	0	-71074	52608	0
+APPROVE, RECEIVE, CREDIT LINE	RETURN	no	no	-	-	negative	0	-69129	2660	391
+CN RMA CREDIT ONLY LINE	RETURN	no	no	-	-	negative	0	-5222	437	0
+INTERCOMPANY CREDIT ONLY	RETURN	no	no	-	-	negative	0	-28392	602	0
+INTERCOMPANY RETURN LINE	RETURN	no	no	-	-	negative	0	-204	4	0
+RMA FG ENGINEERING CS	RETURN	no	no	-	-	negative	0	-2	2	0
+RMA RETURN TO STOCK CS	RETURN	no	no	-	-	negative	0	-19704	92	0
+CANADA INTERCO CREDIT ONLY	RETURN	no	no	-	-	negative	0	-1925	53	0
+RMA ENGINEERING CS	RETURN	no	no	-	-	negative	0	-16	14	0
+RMA FG RETURN TO STOCK CS	RETURN	no	no	-	-	negative	0	-150	25	0
+RECEIVE ONLY LINE	RETURN	no	no	-	-	negative	0	-116237	8412	106657
+CN RETURN WITH CREDIT	RETURN	no	no	-	-	negative	0	-11076	2394	0
+RMA FG DEFECTIVE PRODUCT CS	RETURN	no	no	-	-	negative	0	-1	1	0
