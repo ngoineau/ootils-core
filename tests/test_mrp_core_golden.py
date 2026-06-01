@@ -14,14 +14,13 @@ the DB), so this runs with no database — just the engine math.
 from __future__ import annotations
 
 import datetime as dt
-import os
-import sys
 from collections import defaultdict
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-import mrp_core as core  # noqa: E402
+# Canonical home of the MRP math (ADR-020 PAS 3): the packaged, DB-free core.
+# scripts/mrp_core.py is now a re-export shim — see test_mrp_shim_compat.py.
+from ootils_core.engine.mrp import core  # noqa: E402
 
 HS = dt.date(2026, 1, 5)  # fixed Monday horizon start
 
