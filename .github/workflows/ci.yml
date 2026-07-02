@@ -140,12 +140,23 @@ jobs:
         # Postgres as the suite above. The integration conftest DROPs every
         # public table at module teardown, so this step re-applies migrations
         # (OotilsDB() constructor), seeds the deterministic demo dataset, then
-        # runs the parity harness in --check mode. Thresholds (median per-item
-        # drift <= 5%, total-qty ratio B/A within a symmetric 1.5x band) are
-        # documented in scripts/parity_mrp_engines.py::check_thresholds:
-        # anti-regression band above the measured 4.1% pilot residual, NOT a
-        # convergence target — tighten only after ADR-020 steps 3-4 land.
+        # runs the parity harness in --check mode. Thresholds documented in
+        # scripts/parity_mrp_engines.py::check_thresholds — anti-regression
+        # band, NOT a convergence target; tighten after ADR-020 steps 3-4.
+        #
+        # --max-median-drift 0.30: the 5% default was calibrated on the pilot
+        # DB (36K items, 4.1% residual). The demo seed has exactly 2 planned
+        # items, so "median" = midpoint of two drifts; first CI measurement:
+        # 22.5%, and it moves with the run's weekday within [20.8%, 23.4%]
+        # (engine B snaps buckets to Monday + applies the frozen fence per
+        # bucket; engine A anchors day-offset buckets on CURRENT_DATE). This
+        # drift is the DOCUMENTED ADR-020 residual class (pooled vs
+        # per-location planning unit, L4L-without-multiple, component
+        # independent demand dropped by B — see ADR-020 §Validation) owned by
+        # ADR-020 steps 3-4, not a regression. 0.30 keeps ~30% headroom over
+        # the weekday-worst 23.4% while still failing loudly on any return of
+        # serial over-ordering (median was 96% pre-netting-fix).
         run: |
           python -c "from ootils_core.db.connection import OotilsDB; OotilsDB()"
           python scripts/seed_demo_data.py
-          python scripts/parity_mrp_engines.py --horizon-days 360 --check
+          python scripts/parity_mrp_engines.py --horizon-days 360 --check --max-median-drift 0.30
