@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,6 +12,8 @@ import psycopg
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
 
 from .models import PyramideRunResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,23 +108,84 @@ def get_historical_demand(
     item_id: UUID,
     location_id: UUID,
     lookback_days: int,
+    scenario_id: UUID = BASELINE_SCENARIO_ID,
 ) -> list[Decimal]:
+    """
+    Historical demand series for (item, location): daily booked sums, sorted
+    date ASC. The series is sparse — days without demand are absent, not
+    zero-filled (contract consumed by ForecastingEngine / PyramideRunner).
+
+    Primary source: ``demand_history`` booking facts (migration 047), the
+    forecast-on-booking signal — stream='regular' only (warranty is a
+    separate forecast), inter-entity flows excluded (PPS→PCC double-count,
+    migration 048), strict past (booked_date < today). The location is
+    mapped through ``locations.external_id = demand_history.warehouse_id``
+    (warehouse_id stores the ERP DC code; resolution happens at read time
+    per migration 047). Rows with NULL/unmatched warehouse_id drop out of
+    the per-site series by design.
+
+    ``demand_history`` deliberately carries no scenario_id: actuals are
+    invariant across scenarios. ``scenario_id`` is used ONLY by the
+    degraded fallback below.
+
+    Degraded fallback: if demand_history has no rows for the pair, read
+    past CustomerOrderDemand graph nodes filtered by ``scenario_id``
+    (fork copies carry the fork's scenario_id, so no baseline+fork union).
+    NEVER ForecastDemand — a forecast must not train on forecasts (#333).
+    The fallback keeps fresh installs (orders ingested as graph nodes,
+    ingest_demand_history never run) usable; a warning logs the degraded
+    mode (fail-loudly).
+    """
+    loc_row = db.execute(
+        "SELECT external_id FROM locations WHERE location_id = %s",
+        (location_id,),
+    ).fetchone()
+    warehouse_external_id = loc_row["external_id"] if loc_row else None
+
+    if warehouse_external_id is not None:
+        rows = db.execute(
+            """
+            SELECT dh.booked_date AS demand_date,
+                   COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+            FROM demand_history dh
+            WHERE dh.item_id = %s
+              AND dh.warehouse_id = %s
+              AND dh.stream = 'regular'
+              AND (dh.fulfillment IS NULL OR dh.fulfillment <> 'inter_entity')
+              AND dh.booked_date IS NOT NULL
+              AND dh.booked_date < CURRENT_DATE
+              AND dh.booked_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+            GROUP BY dh.booked_date
+            ORDER BY dh.booked_date ASC
+            """,
+            (item_id, warehouse_external_id, lookback_days),
+        ).fetchall()
+        if rows:
+            return [Decimal(str(row["total_qty"])) for row in rows]
+
+    logger.warning(
+        "historical demand: no demand_history rows in the %s-day lookback "
+        "window for item=%s location=%s (external_id=%s) — falling back to "
+        "CustomerOrderDemand nodes (degraded, scenario=%s)",
+        lookback_days, item_id, location_id, warehouse_external_id, scenario_id,
+    )
     rows = db.execute(
         """
-        SELECT
-            COALESCE(time_span_start, time_ref)::date AS demand_date,
-            COALESCE(SUM(quantity), 0) AS total_qty
+        SELECT COALESCE(time_span_start, time_ref)::date AS demand_date,
+               COALESCE(SUM(quantity), 0) AS total_qty
         FROM nodes
-        WHERE node_type IN ('ForecastDemand', 'CustomerOrderDemand')
+        WHERE node_type = 'CustomerOrderDemand'
+          AND scenario_id = %s
           AND item_id = %s
           AND location_id = %s
           AND active = TRUE
           AND COALESCE(time_span_start, time_ref) IS NOT NULL
-          AND COALESCE(time_span_start, time_ref) >= (CURRENT_DATE - (%s::int * INTERVAL '1 day'))
-        GROUP BY COALESCE(time_span_start, time_ref)::date
-        ORDER BY demand_date ASC
+          AND COALESCE(time_span_start, time_ref)::date < CURRENT_DATE
+          AND COALESCE(time_span_start, time_ref)::date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+        GROUP BY 1
+        ORDER BY 1 ASC
         """,
-        (item_id, location_id, lookback_days),
+        (scenario_id, item_id, location_id, lookback_days),
     ).fetchall()
     return [Decimal(str(row["total_qty"])) for row in rows]
 

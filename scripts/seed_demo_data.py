@@ -425,6 +425,7 @@ def seed_enrichment(conn):
     _seed_po_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump_atl, series_valve_lax)
     _seed_forecast_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump_atl, series_valve_lax)
     _seed_co_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump_atl, series_valve_lax)
+    _seed_demand_history(conn, pump_id, valve_id)
 
     conn.commit()
     print("  ✅ Enrichment complete — full causal graph inserted.")
@@ -696,6 +697,59 @@ def _seed_co_nodes(conn, pump_id, valve_id, atl_id, lax_id, series_pump, series_
             _insert_edge(conn, f"drives:{co_id}:bucket{bucket}", "consumes", co_id, pi_row["node_id"])
 
     print("  ✓ Edges: CustomerOrderDemand → ProjectedInventory (drives)")
+
+
+def _seed_demand_history(conn, pump_id, valve_id):
+    """
+    demand_history — 90 days of PAST booking facts (forecast-on-booking rule):
+      PUMP-01  @ warehouse DC-ATL : 15 units/day  (matches 105/week ForecastDemand)
+      VALVE-02 @ warehouse DC-LAX :  8 units/day  (matches  56/week ForecastDemand)
+
+    This is the PRIMARY training source for the demand-history readers
+    (forecasting.py:_get_historical_demand, pyramide/repository.py:
+    get_historical_demand) since #331 — the graph ForecastDemand /
+    CustomerOrderDemand nodes above are all FUTURE and no longer feed the
+    forecast signal. warehouse_id carries the DC external_id ('DC-ATL' /
+    'DC-LAX'); the readers resolve it via locations.external_id at read time
+    (migration 047 contract).
+
+    Idempotency: demand_history has a bigserial PK and no natural key, so we
+    tag seeded rows with order_number='SEED-DH' and delete-then-insert.
+    """
+    deleted = conn.execute(
+        "DELETE FROM demand_history WHERE order_number = 'SEED-DH'"
+    ).rowcount
+    if deleted:
+        print(f"  ✓ demand_history: cleared {deleted} previously seeded rows")
+
+    rows = []
+    for days_ago in range(90, 0, -1):  # TODAY-90 … TODAY-1 (strict past)
+        booked = TODAY - timedelta(days=days_ago)
+        rows.append((
+            pump_id, "PUMP-01", "regular", booked, booked,
+            15, 15, Decimal("187.50"), True,           # 15 × $12.50
+            "GA", "US", "DC-ATL", "distribution", "standard",
+            "SEED-DH", f"SEED-DH-PUMP-{days_ago}", "PPS", "STANDARD VISTA",
+        ))
+        rows.append((
+            valve_id, "VALVE-02", "regular", booked, booked,
+            8, 8, Decimal("70.00"), True,               # 8 × $8.75
+            "CA", "US", "DC-LAX", "distribution", "standard",
+            "SEED-DH", f"SEED-DH-VALVE-{days_ago}", "PPS", "STANDARD VISTA",
+        ))
+
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT INTO demand_history (
+                item_id, item_code, stream, booked_date, shipment_date,
+                ordered_quantity, fulfilled_quantity, value_ext, counts_for_asp,
+                ship_state, ship_country, warehouse_id, channel, fulfillment,
+                order_number, line_id, org_id, order_type
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, rows)
+
+    print(f"  ✓ demand_history: {len(rows)} past booking facts "
+          f"(90 days × PUMP-01@DC-ATL 15/day + VALVE-02@DC-LAX 8/day)")
 
 
 def seed_bom(conn):
