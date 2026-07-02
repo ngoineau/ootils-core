@@ -134,3 +134,18 @@ jobs:
         # REVIEW-2026-05 closed that gap by fixing the failures and
         # widening the scope.
         run: python -m pytest tests/integration/ -q --tb=short
+
+      - name: MRP A-vs-B parity guard (#332)
+        # ADR-020 step 1 — cross-engine drift guard on the same ephemeral
+        # Postgres as the suite above. The integration conftest DROPs every
+        # public table at module teardown, so this step re-applies migrations
+        # (OotilsDB() constructor), seeds the deterministic demo dataset, then
+        # runs the parity harness in --check mode. Thresholds (median per-item
+        # drift <= 5%, total-qty ratio B/A within a symmetric 1.5x band) are
+        # documented in scripts/parity_mrp_engines.py::check_thresholds:
+        # anti-regression band above the measured 4.1% pilot residual, NOT a
+        # convergence target — tighten only after ADR-020 steps 3-4 land.
+        run: |
+          python -c "from ootils_core.db.connection import OotilsDB; OotilsDB()"
+          python scripts/seed_demo_data.py
+          python scripts/parity_mrp_engines.py --horizon-days 360 --check
