@@ -130,6 +130,17 @@ class MrpApicsEngine:
             # 1. Create MRP run record
             self._create_run_record(run_id, config)
 
+            # 1b. Regeneration contract: every APICS run rebuilds the FULL
+            # planned-supply picture for the scenario, so deactivate ALL
+            # previous PlannedSupply nodes/edges first (run_id=None → scenario
+            # scope). Without this, each re-run stacks new PlannedSupply on
+            # top of the previous run's, double-counting planned supply
+            # (issue #337). FPOs don't exist yet (chantier C2.2); when they
+            # do, firmed orders must survive this purge. Runs in the same
+            # transaction as the persist steps below: on failure the except
+            # branch rolls back, restoring the previous plan.
+            self.graph.cleanup_previous_run()
+
             # 2. Calculate or retrieve LLCs
             if config.recalculate_llc:
                 self.llc_calculator.calculate_all()
@@ -278,11 +289,18 @@ class MrpApicsEngine:
             errors.append(str(e))
             elapsed_ms = (time.monotonic() - start_time) * 1000
 
-            # Mark run as failed
+            # Coherence on failure: run() does not re-raise (it returns a
+            # FAILED result), so the caller's commit-on-success path would
+            # otherwise persist the cleanup (1b) and any partial writes.
+            # Roll back to restore the previous planned-supply picture, then
+            # re-record the run as FAILED (the original run record was part
+            # of the rolled-back transaction).
             try:
+                self.db.rollback()
+                self._create_run_record(run_id, config)
                 self._complete_run_record(run_id, "FAILED", elapsed_ms, str(e))
             except Exception:
-                pass
+                logger.exception("Failed to record FAILED status for MRP run %s", run_id)
 
             return MrpRunResult(
                 run_id=run_id,

@@ -348,9 +348,7 @@ class GrossToNetCalculator:
     def _get_initial_on_hand(
         self, item_id: UUID, location_id: Optional[UUID]
     ) -> Decimal:
-        """Get current on-hand inventory for item/location from baseline scenario."""
-        BASELINE = UUID("00000000-0000-0000-0000-000000000001")
-
+        """Get current on-hand inventory for item/location in the run's scenario."""
         if location_id:
             row = self.db.execute("""
                 SELECT COALESCE(SUM(quantity), 0) AS qty
@@ -360,7 +358,7 @@ class GrossToNetCalculator:
                   AND location_id = %s
                   AND scenario_id = %s
                   AND active = true
-            """, (item_id, location_id, BASELINE)).fetchone()
+            """, (item_id, location_id, self.scenario_id)).fetchone()
         else:
             row = self.db.execute("""
                 SELECT COALESCE(SUM(quantity), 0) AS qty
@@ -369,7 +367,7 @@ class GrossToNetCalculator:
                   AND item_id = %s
                   AND scenario_id = %s
                   AND active = true
-            """, (item_id, BASELINE)).fetchone()
+            """, (item_id, self.scenario_id)).fetchone()
 
         if row and row["qty"] is not None:
             return Decimal(str(row["qty"]))

@@ -466,6 +466,80 @@ class TestPostSimulate:
         finally:
             _cleanup_scenario(seeded_db, scenario_id)
 
+    def test_simulate_no_overrides_propagation_skipped(self, api_client, auth, seeded_db):
+        """
+        #339 — with no applied override, propagation never runs: the response
+        must say so explicitly (propagation_status='skipped', delta_computed
+        False) instead of pretending an empty delta was computed.
+        """
+        name = f"int-skip-sim-{uuid4().hex[:8]}"
+        resp = api_client.post(
+            "/v1/simulate",
+            json={"scenario_name": name},
+            headers=auth,
+        )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        try:
+            assert data["propagation_status"] == "skipped"
+            assert data["delta_computed"] is False
+            assert data["calc_run_id"] is None
+            assert data["delta"]["new_shortages"] == []
+            assert data["delta"]["resolved_shortages"] == []
+        finally:
+            _cleanup_scenario(seeded_db, data["scenario_id"])
+
+    def test_simulate_with_override_propagation_ok(self, api_client, auth, seeded_db):
+        """
+        #339 — when an override is applied and the recompute succeeds, the
+        response carries propagation_status='ok' and delta_computed=True so
+        agents can trust the (possibly empty) shortage delta.
+        """
+        with _conn(seeded_db) as c:
+            row = c.execute(
+                """
+                SELECT node_id FROM nodes
+                WHERE scenario_id = %s
+                  AND node_type IN ('PurchaseOrderSupply', 'CustomerOrderDemand',
+                                    'WorkOrderSupply', 'WorkOrderDemand')
+                  AND quantity IS NOT NULL
+                  AND active = TRUE
+                LIMIT 1
+                """,
+                (BASELINE_SCENARIO_ID,),
+            ).fetchone()
+        if row is None:
+            pytest.skip("Seed produced no overridable supply/demand nodes")
+
+        name = f"int-prop-ok-sim-{uuid4().hex[:8]}"
+        resp = api_client.post(
+            "/v1/simulate",
+            json={
+                "scenario_name": name,
+                "overrides": [
+                    {
+                        "node_id": str(row["node_id"]),
+                        "field_name": "quantity",
+                        "new_value": "500",
+                    }
+                ],
+            },
+            headers=auth,
+        )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        try:
+            assert data["override_count"] == 1
+            assert data["propagation_status"] == "ok"
+            assert data["delta_computed"] is True
+            assert data["calc_run_id"] is not None
+            # Delta is structurally present (content depends on seed dynamics)
+            assert isinstance(data["delta"]["new_shortages"], list)
+            assert isinstance(data["delta"]["resolved_shortages"], list)
+            assert isinstance(data["delta"]["net_shortage_change"], int)
+        finally:
+            _cleanup_scenario(seeded_db, data["scenario_id"])
+
     def test_simulate_all_overrides_fail_returns_422(self, api_client, auth, seeded_db):
         """
         Non-regression #48 (DB-backed half): if every override targets a node

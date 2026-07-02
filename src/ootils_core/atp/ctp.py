@@ -19,6 +19,7 @@ import psycopg
 
 from ootils_core.atp.engine import ATPEngine
 from ootils_core.atp.models import ATPResult, ATPConfig
+from ootils_core.constants import BASELINE_SCENARIO_ID
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +137,11 @@ class CTPEngine:
         requested_date: date,
         horizon_days: Optional[int] = None,
         include_capacity: bool = True,
+        scenario_id: Optional[UUID] = None,
     ) -> CTPResult:
         """
         Check CTP (Capable-to-Promise) for an item.
-        
+
         Args:
             item_id: The item to check
             location_id: The location to check
@@ -147,20 +149,22 @@ class CTPEngine:
             requested_date: Date when quantity is needed
             horizon_days: Number of days to look ahead (default: 365)
             include_capacity: Whether to check capacity constraints (default: True)
-        
+            scenario_id: Scenario to read supply/demand/load from (default: baseline)
+
         Returns:
             CTPResult with ATP result + capacity feasibility
         """
         if self._conn is None:
             raise ValueError("Database connection not set. Call engine.connection = conn first.")
-        
+
         horizon_days = horizon_days or 365
-        
+        scenario_id = scenario_id or BASELINE_SCENARIO_ID
+
         logger.debug(
-            "CTP check started: item=%s, location=%s, qty=%s, date=%s, horizon=%s",
-            item_id, location_id, quantity, requested_date, horizon_days,
+            "CTP check started: item=%s, location=%s, qty=%s, date=%s, horizon=%s, scenario=%s",
+            item_id, location_id, quantity, requested_date, horizon_days, scenario_id,
         )
-        
+
         # Step 1: Calculate ATP (material availability)
         atp_result = self._atp_engine.calculate(
             item_id=item_id,
@@ -168,6 +172,7 @@ class CTPEngine:
             quantity=quantity,
             request_date=requested_date,
             horizon_days=horizon_days,
+            scenario_id=scenario_id,
         )
         
         # If no material availability, return early
@@ -206,6 +211,7 @@ class CTPEngine:
             atp_result.available_date or requested_date,
             critical_resources,
             horizon_days,
+            scenario_id,
         )
         
         capacity_feasible = len(violations) == 0
@@ -285,10 +291,11 @@ class CTPEngine:
         available_date: date,
         critical_resources: List[str],
         horizon_days: int,
+        scenario_id: UUID,
     ) -> List[CapacityViolation]:
         """
         Check capacity constraints on critical resources.
-        
+
         Args:
             item_id: The item to check
             location_id: The location to check
@@ -296,18 +303,19 @@ class CTPEngine:
             available_date: Date when material is available
             critical_resources: List of critical resource external IDs
             horizon_days: Number of days to check
-        
+            scenario_id: Scenario to read the existing load from
+
         Returns:
             List of CapacityViolation for any overloaded resources
         """
         violations = []
-        
+
         for resource_external_id in critical_resources:
             resource_violations = self._check_single_resource_capacity(
-                resource_external_id, quantity, available_date, horizon_days,
+                resource_external_id, quantity, available_date, horizon_days, scenario_id,
             )
             violations.extend(resource_violations)
-        
+
         return violations
     
     def _check_single_resource_capacity(
@@ -316,16 +324,18 @@ class CTPEngine:
         quantity: Decimal,
         required_date: date,
         horizon_days: int,
+        scenario_id: UUID,
     ) -> List[CapacityViolation]:
         """
         Check capacity for a single resource.
-        
+
         Args:
             resource_external_id: Resource external ID
             quantity: Quantity requiring capacity
             required_date: Date when capacity is needed
             horizon_days: Days to look ahead
-        
+            scenario_id: Scenario to read the existing load from
+
         Returns:
             List of CapacityViolation (empty if no violations)
         """
@@ -360,7 +370,9 @@ class CTPEngine:
             override_row = cur.fetchone()
             available_capacity = Decimal(str(override_row["capacity"])) if override_row else capacity_per_day
             
-            # Check existing load on that date
+            # Check existing load on that date.
+            # Scenario isolation: supply nodes, edges and the Resource node are
+            # all scenario-scoped (deep-copy fork), so filter every leg of the join.
             cur.execute("""
                 SELECT COALESCE(SUM(n.quantity), 0) AS total_load
                 FROM nodes n
@@ -370,10 +382,13 @@ class CTPEngine:
                   AND e.edge_type = 'consumes_resource'
                   AND e.active = TRUE
                   AND n.active = TRUE
+                  AND n.scenario_id = %s
+                  AND e.scenario_id = %s
                   AND rn.node_type = 'Resource'
                   AND rn.external_id = %s
+                  AND rn.scenario_id = %s
                   AND n.time_ref = %s
-            """, (resource_external_id, required_date))
+            """, (scenario_id, scenario_id, resource_external_id, scenario_id, required_date))
             
             load_row = cur.fetchone()
             existing_load = Decimal(str(load_row["total_load"])) if load_row else Decimal("0")
@@ -403,24 +418,27 @@ class CTPEngine:
         quantity: Decimal,
         start_date: Optional[date] = None,
         max_days: int = 30,
+        scenario_id: Optional[UUID] = None,
     ) -> List[Tuple[date, bool, Dict[str, Any]]]:
         """
         Binary search over dates to find first feasible CTP date.
-        
+
         Args:
             item_id: The item to check
             location_id: The location to check
             quantity: Quantity requested
             start_date: Start date for search (default: today)
             max_days: Maximum days to search (default: 30)
-        
+            scenario_id: Scenario to read supply/demand/load from (default: baseline)
+
         Returns:
             List of (date, feasible, capacity_status) tuples for each tested date
         """
         if self._conn is None:
             raise ValueError("Database connection not set.")
-        
+
         start_date = start_date or date.today()
+        scenario_id = scenario_id or BASELINE_SCENARIO_ID
         results = []
         
         # Binary search approach
@@ -438,6 +456,7 @@ class CTPEngine:
                 quantity=quantity,
                 requested_date=test_date,
                 horizon_days=max_days - mid,
+                scenario_id=scenario_id,
             )
             
             feasible = result.capacity_feasible and result.atp_result.is_fully_available
@@ -464,6 +483,7 @@ class CTPEngine:
                     quantity=quantity,
                     requested_date=test_date,
                     horizon_days=1,
+                    scenario_id=scenario_id,
                 )
                 feasible = result.capacity_feasible and result.atp_result.is_fully_available
                 results.append((test_date, feasible, {
