@@ -235,51 +235,42 @@ class CTPEngine:
     ) -> List[str]:
         """
         Get list of critical resource external IDs for an item.
-        
-        Critical resources are those that are bottlenecks or have limited capacity.
-        They are defined in item_resource_priority or routing tables.
-        
+
+        Currently: every active resource on the item's active routing
+        (routings → routing_operations → resources, the same join the CRP
+        engine uses). There is no criticality model yet — the historical
+        queries here referenced a table (item_resource_priority) and columns
+        (routing_operations.item_id/location_id/is_bottleneck) that no
+        migration creates, so this method crashed on any migrated DB. A real
+        priority/bottleneck model is future design work (see revue APS
+        2026-07 / issue #350).
+
         Args:
             item_id: The item to check
-            location_id: The location to check
-        
+            location_id: The location to check. Unused for now: routings are
+                item-scoped (no location dimension in migration 028).
+
         Returns:
-            List of resource external IDs
+            List of resource external IDs (deterministic order)
         """
         resources = []
-        
+
         with self._conn.cursor() as cur:
-            # Query item_resource_priority for critical resources (priority <= 2)
             cur.execute("""
-                SELECT r.external_id
-                FROM item_resource_priority irp
-                JOIN resources r ON r.resource_id = irp.resource_id
-                WHERE irp.item_id = %s
-                  AND irp.location_id = %s
-                  AND irp.priority <= 2
-                  AND r.active = TRUE
-                ORDER BY irp.priority
-            """, (item_id, location_id))
-            
+                SELECT DISTINCT r.external_id
+                FROM routings rt
+                JOIN routing_operations ro
+                  ON ro.routing_id = rt.routing_id AND ro.active = TRUE
+                JOIN resources r
+                  ON r.resource_id = ro.resource_id AND r.active = TRUE
+                WHERE rt.item_id = %s
+                  AND rt.active = TRUE
+                ORDER BY r.external_id
+            """, (item_id,))
+
             for row in cur.fetchall():
                 resources.append(row["external_id"])
-        
-        # Fallback: check routing operations for bottleneck resources
-        if not resources:
-            with self._conn.cursor() as cur:
-                cur.execute("""
-                    SELECT DISTINCT r.external_id
-                    FROM routing_operations ro
-                    JOIN resources r ON r.resource_id = ro.resource_id
-                    WHERE ro.item_id = %s
-                      AND ro.location_id = %s
-                      AND ro.is_bottleneck = TRUE
-                      AND r.active = TRUE
-                """, (item_id, location_id))
-                
-                for row in cur.fetchall():
-                    resources.append(row["external_id"])
-        
+
         logger.debug("Found %d critical resources for item=%s", len(resources), item_id)
         return resources
     
