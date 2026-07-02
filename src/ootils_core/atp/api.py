@@ -17,7 +17,7 @@ from fastapi import Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.atp.engine import ATPEngine
 from ootils_core.atp.models import ATPBucket, ATPResult
 
@@ -137,6 +137,7 @@ def _extract_shortage_details(result: ATPResult) -> List[ShortageDetail]:
 
 async def check_atp_availability(
     body: ATPCheckRequest,
+    scenario_id: UUID = Depends(resolve_scenario_id),
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ATPCheckResponse:
@@ -171,6 +172,7 @@ async def check_atp_availability(
             quantity=body.quantity,
             request_date=body.requested_date,
             horizon_days=body.horizon_days,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("ATP calculation failed: %s", e)

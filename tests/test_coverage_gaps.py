@@ -648,6 +648,83 @@ class TestSimulateRouterBranches:
         # The propagation succeeded — calc_run_id should be set
         assert body["calc_run_id"] is not None
         assert body["nodes_recalculated"] == 5
+        # #339 contract: success is reported explicitly
+        assert body["propagation_status"] == "ok"
+        assert body["delta_computed"] is True
+
+    def test_simulate_propagation_failure_surfaced_and_lock_released(self):
+        """simulate.py except branch (#339) — a propagation crash must NOT be
+        swallowed into a 'created'-with-empty-delta response, and the calc
+        run's advisory lock must be released via fail_calc_run."""
+        from ootils_core.engine.scenario.manager import ScenarioManager
+        from ootils_core.models import Scenario
+
+        fake_scenario = Scenario(
+            scenario_id=uuid4(),
+            name="x",
+            parent_scenario_id=UUID("00000000-0000-0000-0000-000000000001"),
+            is_baseline=False,
+            status="active",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        from ootils_core.api.routers import events as events_module
+        from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+        from ootils_core.engine.orchestration.calc_run import CalcRunManager
+        from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+
+        calc_run = MagicMock()
+        calc_run.calc_run_id = uuid4()
+        calc_run.nodes_recalculated = 0
+
+        # The propagation engine crashes mid-run (after start_calc_run, before
+        # _finish_run) — the advisory lock is held at that point.
+        fake_engine = MagicMock()
+        fake_engine._propagate.side_effect = RuntimeError("propagation boom")
+
+        pi_node_id = uuid4()
+        conn = _make_db_with_responses([
+            None,  # INSERT events
+            [{"node_id": pi_node_id}],  # SELECT all_pi_nodes
+        ])
+
+        with patch.object(ScenarioManager, "create_scenario", return_value=fake_scenario), \
+             patch.object(ScenarioManager, "apply_override"), \
+             patch.object(ShortageDetector, "get_active_shortages", return_value=[]), \
+             patch.object(CalcRunManager, "start_calc_run", return_value=calc_run), \
+             patch.object(CalcRunManager, "fail_calc_run") as fail_mock, \
+             patch.object(DirtyFlagManager, "mark_dirty"), \
+             patch.object(DirtyFlagManager, "flush_to_postgres"), \
+             patch.object(events_module, "_build_propagation_engine", return_value=fake_engine):
+            client = _make_client(conn)
+            resp = client.post(
+                "/v1/simulate",
+                json={
+                    "scenario_name": "crash-case",
+                    "overrides": [
+                        {
+                            "node_id": str(uuid4()),
+                            "field_name": "quantity",
+                            "new_value": "100",
+                        }
+                    ],
+                },
+                headers=AUTH_HEADERS,
+            )
+
+        # Scenario creation succeeded — not an HTTP error...
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        # ...but the failure is explicit: an agent can tell "no new shortages"
+        # from "the calc crashed".
+        assert body["propagation_status"] == "failed"
+        assert body["delta_computed"] is False
+        assert body["delta"]["new_shortages"] == []
+        assert body["delta"]["resolved_shortages"] == []
+        # The started-but-unfinished calc run was failed → advisory lock released.
+        fail_mock.assert_called_once()
+        assert fail_mock.call_args[0][0] is calc_run
 
 
 # ============================================================================

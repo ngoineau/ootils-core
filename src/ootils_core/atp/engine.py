@@ -29,6 +29,7 @@ from ootils_core.atp.models import (
     ATPDemand,
     ATPConfig,
 )
+from ootils_core.constants import BASELINE_SCENARIO_ID
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +88,19 @@ class ATPEngine:
         quantity: Decimal,
         request_date: date,
         horizon_days: Optional[int] = None,
+        scenario_id: Optional[UUID] = None,
     ) -> ATPResult:
         """
         Calculate ATP for an item at a location.
-        
+
         Args:
             item_id: The item to check availability for
             location_id: The location to check availability at
             quantity: Quantity requested
             request_date: Date when quantity is needed
             horizon_days: Number of days to look ahead (default: config.default_horizon_days)
-        
+            scenario_id: Scenario to read supplies/demands from (default: baseline)
+
         Returns:
             ATPResult with available quantity, date, and bucket breakdown
         
@@ -109,20 +112,21 @@ class ATPEngine:
             raise ValueError("Database connection not set. Call engine.connection = conn first.")
         
         start_time = time.perf_counter()
-        
+
         horizon_days = horizon_days or self._config.default_horizon_days
         horizon_end = request_date + timedelta(days=horizon_days)
-        
+        scenario_id = scenario_id or BASELINE_SCENARIO_ID
+
         logger.debug(
-            "ATP calculation started: item=%s, location=%s, qty=%s, date=%s, horizon=%s days",
-            item_id, location_id, quantity, request_date, horizon_days
+            "ATP calculation started: item=%s, location=%s, qty=%s, date=%s, horizon=%s days, scenario=%s",
+            item_id, location_id, quantity, request_date, horizon_days, scenario_id
         )
-        
+
         # Step 1: Fetch supplies (OnHand + PlannedSupply)
-        supplies = self._fetch_supplies(item_id, location_id, request_date, horizon_end)
-        
+        supplies = self._fetch_supplies(item_id, location_id, request_date, horizon_end, scenario_id)
+
         # Step 2: Fetch demands (Customer Orders)
-        demands = self._fetch_demands(item_id, location_id, request_date, horizon_end)
+        demands = self._fetch_demands(item_id, location_id, request_date, horizon_end, scenario_id)
         
         # Step 3: Build daily buckets and calculate cumulative ATP
         buckets = self._calculate_cumulative_atp(
@@ -160,20 +164,22 @@ class ATPEngine:
         location_id: UUID,
         start_date: date,
         end_date: date,
+        scenario_id: UUID,
     ) -> List[ATPSupply]:
         """
         Fetch supply sources from database.
-        
+
         Sources:
         - OnHandSupply: Current on-hand inventory (snapshot at start_date)
         - PlannedSupply: Released MPS/MRP planned supplies (scheduled receipts)
-        
+
         Args:
             item_id: The item to fetch supplies for
             location_id: The location to fetch supplies at
             start_date: Start of horizon
             end_date: End of horizon
-        
+            scenario_id: Scenario to read planned supplies from
+
         Returns:
             List of ATPSupply records, sorted by available_date
         """
@@ -183,7 +189,9 @@ class ATPEngine:
 
         with self._conn.cursor() as cur:
             # Fetch OnHandSupply (snapshot at start_date)
-            # OnHand is treated as available at start_date with highest priority
+            # OnHand is treated as available at start_date with highest priority.
+            # NOTE: on_hand_supply (migration 030) has no scenario_id column —
+            # the physical inventory snapshot is shared across scenarios.
             cur.execute("""
                 SELECT 
                     oh.on_hand_id,
@@ -229,11 +237,12 @@ class ATPEngine:
                 FROM planned_supply ps
                 WHERE ps.item_id = %s
                   AND ps.location_id = %s
+                  AND ps.scenario_id = %s
                   AND ps.due_date >= %s
                   AND ps.due_date < %s
                   AND ps.status IN ('RELEASED', 'APPROVED')
                 ORDER BY ps.due_date, ps.priority
-            """, (item_id, location_id, start_date, end_date))
+            """, (item_id, location_id, scenario_id, start_date, end_date))
             
             for row in cur.fetchall():
                 ps_id, ps_item, ps_loc, qty, due_date, priority = _row_values(
@@ -262,19 +271,21 @@ class ATPEngine:
         location_id: UUID,
         start_date: date,
         end_date: date,
+        scenario_id: UUID,
     ) -> List[ATPDemand]:
         """
         Fetch demand commitments from database.
-        
+
         Sources:
         - CustomerOrderDemand: Committed customer orders
-        
+
         Args:
             item_id: The item to fetch demands for
             location_id: The location to fetch demands at
             start_date: Start of horizon
             end_date: End of horizon
-        
+            scenario_id: Scenario to read demands from
+
         Returns:
             List of ATPDemand records, sorted by demand_date
         """
@@ -296,11 +307,12 @@ class ATPEngine:
                 FROM customer_order_demand cod
                 WHERE cod.item_id = %s
                   AND cod.location_id = %s
+                  AND cod.scenario_id = %s
                   AND cod.requested_date >= %s
                   AND cod.requested_date < %s
                   AND cod.status IN ('CONFIRMED', 'RELEASED')
                 ORDER BY cod.requested_date, cod.priority
-            """, (item_id, location_id, start_date, end_date))
+            """, (item_id, location_id, scenario_id, start_date, end_date))
             
             for row in cur.fetchall():
                 cod_id, cod_item, cod_loc, qty, req_date, priority, is_committed = _row_values(
@@ -464,20 +476,22 @@ class ATPEngine:
         location_id: UUID,
         quantity: Decimal,
         request_date: date,
+        scenario_id: Optional[UUID] = None,
     ) -> bool:
         """
         Quick check if quantity is available on request_date.
-        
+
         Args:
             item_id: The item to check
             location_id: The location to check
             quantity: Quantity needed
             request_date: Date when needed
-        
+            scenario_id: Scenario to check availability in (default: baseline)
+
         Returns:
             True if quantity is available on request_date, False otherwise
         """
-        result = self.calculate(item_id, location_id, quantity, request_date)
+        result = self.calculate(item_id, location_id, quantity, request_date, scenario_id=scenario_id)
         return result.is_fully_available
     
     def get_available_date(
@@ -485,17 +499,19 @@ class ATPEngine:
         item_id: UUID,
         location_id: UUID,
         quantity: Decimal,
+        scenario_id: Optional[UUID] = None,
     ) -> Optional[date]:
         """
         Get the earliest date when quantity will be available.
-        
+
         Args:
             item_id: The item to check
             location_id: The location to check
             quantity: Quantity needed
-        
+            scenario_id: Scenario to check availability in (default: baseline)
+
         Returns:
             Earliest available date, or None if never available in horizon
         """
-        result = self.calculate(item_id, location_id, quantity, date.today())
+        result = self.calculate(item_id, location_id, quantity, date.today(), scenario_id=scenario_id)
         return result.available_date
