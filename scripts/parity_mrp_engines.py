@@ -16,6 +16,12 @@ read-only.
 Usage:
     DATABASE_URL=postgresql://ootils:ootils@host:5432/ootils_pilote_test \
         python scripts/parity_mrp_engines.py --horizon-days 360
+
+CI mode (#332 / ADR-020 step 1):
+    python scripts/parity_mrp_engines.py --horizon-days 360 --check
+exits 1 when the drift leaves the tolerated band (see check_thresholds for
+how the default band was chosen). The band is an anti-regression guard, NOT
+a convergence target — the residual drift is owned by ADR-020 steps 3-4.
 """
 from __future__ import annotations
 
@@ -25,7 +31,6 @@ import statistics
 import sys
 import time
 from collections import defaultdict
-from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -33,10 +38,6 @@ import logging
 
 import psycopg
 from psycopg.rows import dict_row
-
-# The APICS engine logs one warning per item when location_id is NULL — silence
-# the flood so the parity report is readable (the calc itself still proceeds).
-logging.disable(logging.WARNING)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mrp_core as core  # noqa: E402
@@ -103,7 +104,8 @@ def run_engine(dsn: str, horizon_days: int, sample: int | None) -> tuple[dict[st
     return out, result
 
 
-def diff(a: dict[str, float], b: dict[str, float], sampled: bool) -> None:
+def diff(a: dict[str, float], b: dict[str, float], sampled: bool) -> dict:
+    """Print the parity report and return the headline metrics for --check."""
     ka, kb = set(a), set(b)
     only_a, only_b, common = ka - kb, kb - ka, ka & kb
 
@@ -114,9 +116,10 @@ def diff(a: dict[str, float], b: dict[str, float], sampled: bool) -> None:
         print(f"  only in A                     : {len(only_a):>7}")
     print(f"  planned by B but NOT by A     : {len(only_b):>7}  <- B says order, A says none")
     print(f"  common (both plan an order)   : {len(common):>7}")
-    a_on_b = sum(a[k] for k in common)
-    print(f"  total qty A (common items)    : {a_on_b:>15,.1f}")
-    print(f"  total qty B (common items)    : {sum(b[k] for k in common):>15,.1f}")
+    total_a = sum(a[k] for k in common)
+    total_b = sum(b[k] for k in common)
+    print(f"  total qty A (common items)    : {total_a:>15,.1f}")
+    print(f"  total qty B (common items)    : {total_b:>15,.1f}")
     print()
 
     # Per-item relative drift on the common set
@@ -153,6 +156,59 @@ def diff(a: dict[str, float], b: dict[str, float], sampled: bool) -> None:
         for k, va, vb, rel in worst[:10]:
             print(f"    {k}  A={va:>12,.1f}  B={vb:>12,.1f}  rel={rel:.2f}")
 
+    return {
+        "common": len(common),
+        "only_b": len(only_b),
+        "total_a_common": total_a,
+        "total_b_common": total_b,
+        "median_rel": statistics.median(rels) if rels else None,
+        "max_rel": max(rels) if rels else None,
+    }
+
+
+def check_thresholds(m: dict, max_median: float, max_ratio: float) -> list[str]:
+    """CI drift guard (#332 / ADR-020 step 1). Returns failure messages ([] = pass).
+
+    The band is an ANTI-REGRESSION guard, not a convergence target. Where the
+    defaults come from (ADR-020 "Validation du fix de netting", pilot DB,
+    500 items, horizon 360 d):
+
+    - median per-item drift: measured 4.1% AFTER the netting fix. Default
+      cap 5% sits just above that residual, which is owned by planning-unit
+      (pooled vs per-location) and lot-rule nuances slated for ADR-020
+      steps 3-4. Tighten only after those land — do not chase it sooner.
+    - total-qty ratio B/A on common items: the netting bug made B over-plan
+      ~48x (worst x261); post-fix ratio is ~1.02x. A symmetric 1.5x band
+      catches any return of serial over-counting — or a new under-planning
+      bug — while it is still orders of magnitude below pilot impact.
+    - zero common items means parity is unmeasurable (bad seed / empty DB),
+      which must fail loudly rather than vacuously pass.
+    """
+    if m["common"] == 0:
+        return ["no item planned by BOTH engines — parity unmeasurable (empty or missing seed?)"]
+    failures: list[str] = []
+    if m["median_rel"] is None:
+        # diff() guarantees median_rel when common > 0; a None here means the
+        # metrics contract was broken upstream — fail loudly, never skip.
+        failures.append("median_rel is None despite common > 0 — metrics contract broken")
+    elif m["median_rel"] > max_median:
+        failures.append(
+            f"median per-item drift {m['median_rel']:.4f} > cap {max_median:.4f}"
+        )
+    if m["total_a_common"] <= 0 or m["total_b_common"] <= 0:
+        failures.append(
+            f"degenerate totals on common items: A={m['total_a_common']:.1f} "
+            f"B={m['total_b_common']:.1f} — ratio guard unusable"
+        )
+    else:
+        ratio = m["total_b_common"] / m["total_a_common"]
+        if not (1.0 / max_ratio <= ratio <= max_ratio):
+            failures.append(
+                f"total qty ratio B/A {ratio:.3f} outside "
+                f"[{1.0 / max_ratio:.3f}, {max_ratio:.3f}]"
+            )
+    return failures
+
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
@@ -161,10 +217,24 @@ def main() -> int:
     p.add_argument("--sample-items", type=int, default=500,
                    help="Cap engine B to the N highest-demand items + their BOM "
                         "explosion (B queries per-item; full 36K is minutes). 0 = full.")
+    p.add_argument("--check", action="store_true",
+                   help="CI mode: exit 1 when drift leaves the tolerated band "
+                        "(see check_thresholds for how the defaults were set).")
+    p.add_argument("--max-median-drift", type=float, default=0.05,
+                   help="--check cap on median per-item relative drift "
+                        "(default 0.05, just above the 4.1%% pilot residual).")
+    p.add_argument("--max-total-ratio", type=float, default=1.5,
+                   help="--check symmetric band on total qty B/A over common "
+                        "items: fail outside [1/R, R] (default 1.5; the netting "
+                        "bug was ~48x, post-fix ~1.02x).")
     args = p.parse_args()
     if not args.dsn:
         print("ERROR: set DATABASE_URL or pass --dsn", file=sys.stderr)
         return 2
+
+    # The APICS engine logs one warning per item when location_id is NULL —
+    # silence the flood so the parity report is readable (the calc proceeds).
+    logging.disable(logging.WARNING)
     name = args.dsn.rstrip("/").split("/")[-1].split("?")[0]
     print(f"=== MRP cross-engine parity -- DB={name} horizon={args.horizon_days}d ===\n")
 
@@ -180,7 +250,15 @@ def main() -> int:
           f"({scope}; engine items_processed={result.items_processed}, "
           f"records={result.total_records})\n")
 
-    diff(a, b, sampled=bool(sample))
+    metrics = diff(a, b, sampled=bool(sample))
+    if args.check:
+        failures = check_thresholds(metrics, args.max_median_drift, args.max_total_ratio)
+        if failures:
+            print("\n=== PARITY CHECK: FAIL ===", file=sys.stderr)
+            for f in failures:
+                print(f"  - {f}", file=sys.stderr)
+            return 1
+        print("\n=== PARITY CHECK: PASS (within anti-regression band) ===")
     return 0
 
 

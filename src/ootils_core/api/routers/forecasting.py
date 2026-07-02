@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.forecasting.algorithms import ForecastingError
 from ootils_core.forecasting.engine import ForecastingEngine
+from ootils_core.pyramide.repository import get_historical_demand
 
 logger = logging.getLogger(__name__)
 
@@ -198,34 +200,28 @@ def _get_historical_demand(
     item_id: UUID,
     location_id: UUID,
     periods: int = 90,
+    scenario_id: UUID = BASELINE_SCENARIO_ID,
 ) -> List[Decimal]:
     """
     Fetch historical demand data for an item/location.
-    Returns list of daily demand quantities (most recent last).
+    Returns list of daily demand quantities (most recent last), sparse
+    (days without demand are absent).
+
+    Delegates to the shared demand-history reader: primary source is the
+    demand_history booking facts (strict past, stream='regular',
+    inter-entity excluded); degraded fallback reads past
+    CustomerOrderDemand nodes for `scenario_id` — never ForecastDemand,
+    so forecasts cannot train on forecasts (#333). demand_history itself
+    is scenario-invariant (actuals); `scenario_id` only scopes the
+    fallback. See ootils_core.pyramide.repository.get_historical_demand.
     """
-    # Query: sum of demand events (forecasted or actual orders) per day
-    rows = db.execute(
-        """
-        SELECT 
-            time_span_start AS demand_date,
-            COALESCE(SUM(quantity), 0) AS total_qty
-        FROM nodes
-        WHERE node_type IN ('ForecastDemand', 'CustomerOrderDemand')
-          AND item_id = %s
-          AND location_id = %s
-          AND active = TRUE
-          AND time_span_start >= (CURRENT_DATE - INTERVAL '%s days')
-        GROUP BY time_span_start
-        ORDER BY time_span_start ASC
-        """,
-        (item_id, location_id, periods),
-    ).fetchall()
-
-    if not rows:
-        return []
-
-    # Convert to list of Decimal
-    return [Decimal(str(r["total_qty"])) for r in rows]
+    return get_historical_demand(
+        db=db,
+        item_id=item_id,
+        location_id=location_id,
+        lookback_days=periods,
+        scenario_id=scenario_id,
+    )
 
 
 def _compute_confidence_score(
@@ -330,14 +326,17 @@ def generate_forecast(
 
     # 3. Fetch historical demand
     historical_periods = max(body.horizon_days, 90)  # At least as many history as horizon
-    historical_demand = _get_historical_demand(db, item_uuid, location_uuid, historical_periods)
+    historical_demand = _get_historical_demand(
+        db, item_uuid, location_uuid, historical_periods, scenario_id=scenario_uuid
+    )
 
     if not historical_demand or len(historical_demand) < 3:
         logger.warning(
             "forecast.generate insufficient_history item=%s location=%s count=%d",
             body.item_id, body.location_id, len(historical_demand),
         )
-        # Still proceed with minimal data, but confidence will be low
+        # Proceed — the engine decides: methods that cannot fit the series
+        # raise ForecastingError, converted to an explicit 422 below.
 
     # 4. Generate forecast using ForecastingEngine
     engine = ForecastingEngine()
@@ -346,6 +345,22 @@ def generate_forecast(
             item_history=historical_demand,
             method=body.method,
             params=body.method_params or {},
+        )
+    except ForecastingError:
+        # Data condition, not a server bug: the series is too short (or
+        # otherwise unusable) for the requested method. Hand-authored
+        # message — counts only, no internals (CLAUDE.md exception policy).
+        logger.warning(
+            "forecast.generate rejected item=%s location=%s: history of %d "
+            "point(s) unusable for method %s",
+            body.item_id, body.location_id, len(historical_demand), body.method,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Insufficient historical demand: {len(historical_demand)} "
+                f"data point(s) available for method {body.method}"
+            ),
         )
     except Exception as e:
         logger.exception("forecast.generate failed item=%s location=%s: %s", body.item_id, body.location_id, e)

@@ -162,11 +162,15 @@ def create_pyramide_run(
             detail=f"Invalid scenario_id '{body.scenario_id}'",
         ) from exc
 
+    # The reader falls back to past CustomerOrderDemand nodes (scoped to
+    # scenario_uuid) when demand_history is empty — so this runs BEFORE the
+    # history-empty 422 below.
     history = get_historical_demand(
         db=db,
         item_id=item_uuid,
         location_id=location_uuid,
         lookback_days=max(body.horizon_days, 90),
+        scenario_id=scenario_uuid,
     )
     if not history:
         raise HTTPException(
