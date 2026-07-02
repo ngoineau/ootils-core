@@ -391,8 +391,12 @@ class TestCustomerOrderFallback:
         """API path: generate works off the fallback when demand_history is empty."""
         with _db_conn(seeded_db) as conn:
             item_id, loc_id = _create_pair(conn, "DH-F-ITEM", "DH-F-LOC")
+            # Three distinct past days: the MA forecaster needs window_size
+            # (3) data points — with only 2 the engine rejects the series.
             _insert_demand_node(conn, "CustomerOrderDemand", item_id, loc_id,
                                 TODAY - timedelta(days=8), 40)
+            _insert_demand_node(conn, "CustomerOrderDemand", item_id, loc_id,
+                                TODAY - timedelta(days=6), 40)
             _insert_demand_node(conn, "CustomerOrderDemand", item_id, loc_id,
                                 TODAY - timedelta(days=4), 40)
         try:

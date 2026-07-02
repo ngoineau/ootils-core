@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.forecasting.algorithms import ForecastingError
 from ootils_core.forecasting.engine import ForecastingEngine
 from ootils_core.pyramide.repository import get_historical_demand
 
@@ -334,7 +335,8 @@ def generate_forecast(
             "forecast.generate insufficient_history item=%s location=%s count=%d",
             body.item_id, body.location_id, len(historical_demand),
         )
-        # Still proceed with minimal data, but confidence will be low
+        # Proceed — the engine decides: methods that cannot fit the series
+        # raise ForecastingError, converted to an explicit 422 below.
 
     # 4. Generate forecast using ForecastingEngine
     engine = ForecastingEngine()
@@ -343,6 +345,22 @@ def generate_forecast(
             item_history=historical_demand,
             method=body.method,
             params=body.method_params or {},
+        )
+    except ForecastingError:
+        # Data condition, not a server bug: the series is too short (or
+        # otherwise unusable) for the requested method. Hand-authored
+        # message — counts only, no internals (CLAUDE.md exception policy).
+        logger.warning(
+            "forecast.generate rejected item=%s location=%s: history of %d "
+            "point(s) unusable for method %s",
+            body.item_id, body.location_id, len(historical_demand), body.method,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Insufficient historical demand: {len(historical_demand)} "
+                f"data point(s) available for method {body.method}"
+            ),
         )
     except Exception as e:
         logger.exception("forecast.generate failed item=%s location=%s: %s", body.item_id, body.location_id, e)
