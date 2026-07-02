@@ -285,6 +285,13 @@ class PropagationEngine:
         # touched by the dirty PI set — drops `_get_safety_stock` from "1 query
         # per PI" to "0 queries per PI" in the common case.
         safety_stock_cache: dict[tuple[UUID, Optional[UUID]], Decimal] = {}
+        # Unit costs for severity valuation (#342). Mirrors mrp_core.cost_of
+        # — the single valuation precedence used by the watcher fleet:
+        # negotiated supplier unit_cost first (preferred supplier, cheapest
+        # priced row), then items.standard_cost (migration 042, BOM roll-up).
+        # Unpriced items fall back to the detector's proxy of 1 so severity
+        # never silently collapses to zero.
+        unit_cost_cache: dict[UUID, Decimal] = {}
         if self._shortage_detector is not None:
             pi_pairs = {
                 (n.item_id, n.location_id)
@@ -307,6 +314,27 @@ class PropagationEngine:
                         continue
                     key = (UUID(str(r["item_id"])), UUID(str(r["location_id"])) if r["location_id"] else None)
                     safety_stock_cache[key] = Decimal(str(r["safety_stock_qty"]))
+
+                cost_rows = db.execute(
+                    """
+                    SELECT i.item_id,
+                           COALESCE(si.unit_cost, i.standard_cost) AS unit_cost
+                    FROM items i
+                    LEFT JOIN LATERAL (
+                        SELECT unit_cost FROM supplier_items
+                        WHERE item_id = i.item_id
+                          AND unit_cost IS NOT NULL AND unit_cost > 0
+                        ORDER BY is_preferred DESC, unit_cost ASC
+                        LIMIT 1
+                    ) si ON TRUE
+                    WHERE i.item_id = ANY(%s)
+                    """,
+                    (item_ids,),
+                ).fetchall()
+                for r in cost_rows:
+                    if r["unit_cost"] is None:
+                        continue
+                    unit_cost_cache[UUID(str(r["item_id"]))] = Decimal(str(r["unit_cost"]))
 
         # Remaining dirty set (may shrink as we process)
         remaining_dirty = set(dirty_nodes)
@@ -335,6 +363,7 @@ class PropagationEngine:
                     nodes_cache=nodes_cache,
                     edges_by_target=edges_by_target,
                     safety_stock_cache=safety_stock_cache,
+                    unit_cost_cache=unit_cost_cache,
                     pending_updates=pending_updates,
                 )
                 if changed:
@@ -366,6 +395,7 @@ class PropagationEngine:
         nodes_cache: Optional[dict[UUID, Optional[Node]]] = None,
         edges_by_target: Optional[dict[UUID, dict[str, list]]] = None,
         safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
+        unit_cost_cache: Optional[dict[UUID, Decimal]] = None,
         pending_updates: Optional[list[tuple]] = None,
     ) -> bool:
         """
@@ -588,12 +618,21 @@ class PropagationEngine:
                     )
                 else:
                     safety_stock = self._get_safety_stock(node, db)
+                # Severity valuation (#342): items.standard_cost when known,
+                # detector proxy (1) otherwise. Standalone calls (no cache)
+                # keep the proxy — cost lookup is a batch concern.
+                unit_cost = (
+                    unit_cost_cache.get(node.item_id)
+                    if unit_cost_cache is not None and node.item_id is not None
+                    else None
+                )
                 shortage = self._shortage_detector.detect_with_params(
                     pi_node=node,
                     calc_run_id=calc_run_id,
                     scenario_id=scenario_id,
                     db=db,
                     safety_stock_qty=safety_stock,
+                    unit_cost=unit_cost,
                 )
                 if shortage is not None:
                     self._shortage_detector.persist(shortage, db)

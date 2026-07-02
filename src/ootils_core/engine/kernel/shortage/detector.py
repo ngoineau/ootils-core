@@ -20,7 +20,11 @@ from ootils_core.models import Node, ShortageRecord
 
 logger = logging.getLogger(__name__)
 
-# Unit cost proxy for PoC — will be replaced with actual item cost in future milestones.
+# Fallback unit cost for UNPRICED items only (#342). The real valuation flows
+# in via detect_with_params(unit_cost=...): the propagator batch-loads it with
+# the same precedence as mrp_core.cost_of (negotiated supplier unit_cost, then
+# items.standard_cost) so kernel severity and watcher valuation agree. The SQL
+# engine mirrors this in propagator_sql.SHORTAGES_SQL — keep all three in sync.
 _UNIT_COST_PROXY = Decimal("1")
 
 # Shortage sign-test tolerance. A "stockout" is closing_stock < 0, but the
