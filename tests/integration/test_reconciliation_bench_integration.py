@@ -185,6 +185,55 @@ class TestReconciliationBench:
             assert row.mase is not None and row.mase >= 0, level
             assert row.bias is not None, level
 
+    def test_empty_history_node_does_not_abort_the_block(self, conn):
+        """A reconciliation node with no training-window demand must NOT
+        drop the whole family (regression: found on real pilot data — a
+        single dead group killed every sibling; the synthetic seed always
+        had data for every node so the unit path missed it). The empty
+        subtree forecasts zero + warns, siblings still score."""
+        from ootils_core.pyramide.hierarchy.bench import LEVEL_LEAF
+
+        # Normal block FAM-B4 -> PRD-B41 (2 items) + PRD-B42 (1 item),
+        # then add a THIRD product node whose item only sells INSIDE the
+        # holdout (nothing in the training window before the cutoff).
+        fam, _ = _seed_block(conn, "bench-h-empty", "B4")
+        h = "bench-h-empty"
+        dead_prd = "PRD-B4DEAD"
+        conn.execute(
+            "INSERT INTO hierarchy_node (hierarchy_id, code, level, parent_code) "
+            "VALUES (%s, %s, 'product', %s)",
+            (h, dead_prd, fam),
+        )
+        dead_item = uuid4()
+        conn.execute(
+            "INSERT INTO items (item_id, name, item_type, uom, status, external_id) "
+            "VALUES (%s, 'dead', 'finished_good', 'EA', 'active', 'BENCH-B4-DEAD')",
+            (dead_item,),
+        )
+        conn.execute(
+            "INSERT INTO item_hierarchy (item_id, hierarchy_id, leaf_code) "
+            "VALUES (%s, %s, %s)",
+            (dead_item, h, dead_prd),
+        )
+        # Demand only on a holdout day — nothing in [cutoff-lookback, cutoff).
+        _insert_demand(conn, dead_item, "BENCH-B4-DEAD", CUTOFF + timedelta(days=3), 50)
+
+        report = _run(conn)
+
+        # The block was NOT aborted: the live siblings still produced rows.
+        assert report.rows, "empty-history node aborted the whole block"
+        leaf_mo = next(
+            r for r in report.rows
+            if r.level == LEVEL_LEAF and r.method == "middleout"
+        )
+        assert leaf_mo.n_series == 4  # 3 live leaves + the dead one
+        assert leaf_mo.wape is not None
+        assert report.verdicts()[fam] == "middleout"
+        # ...and the dead subtree is reported, not silently swallowed.
+        assert any(
+            "forecasting zero for its subtree" in w for w in report.warnings
+        ), report.warnings
+
     def test_two_calls_same_report_and_verdict(self, conn):
         fam, _ = _seed_block(conn, "bench-h-det", "B2")
         first = _run(conn)
