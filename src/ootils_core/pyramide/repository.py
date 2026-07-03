@@ -12,6 +12,7 @@ import psycopg
 
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
 
+from .accuracy import AccuracyReport
 from .models import PyramideRunResult
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,31 @@ class PyramideSnapshotSummary:
 class PyramideCommitResult:
     summary: PyramideRunSummary
     demand_node_count: int
+
+
+@dataclass(frozen=True)
+class PyramideAccuracyMetric:
+    """One row of pyramide_accuracy_metrics (migration 055).
+
+    ``horizon is None`` = the all-horizons aggregate row; ``horizon >= 1``
+    = the per-horizon row. A ``None`` metric means "not computable on this
+    data" (None-honest contract of accuracy.py) — per-horizon rows only
+    carry the residual-derivable metrics (bias + counts): mase / wape /
+    smape / coverage need the per-horizon actuals, which the report does
+    not contain, so they stay None there.
+    """
+
+    metric_id: UUID
+    run_id: UUID
+    horizon: int | None
+    mase: Decimal | None
+    wape: Decimal | None
+    smape: Decimal | None
+    bias: Decimal | None
+    coverage: Decimal | None
+    n_cutoffs: int
+    n_observations: int
+    created_at: datetime
 
 
 def resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
@@ -378,6 +404,149 @@ def get_historical_demand_totals_by_items(
     return {str(row["item_id"]): Decimal(str(row["total_qty"])) for row in rows}
 
 
+_ONE = Decimal("1")
+
+
+def accuracy_metric_rows(
+    report: AccuracyReport,
+    bias_scale: Decimal = _ONE,
+) -> list[tuple[int | None, Decimal | None, Decimal | None, Decimal | None, Decimal | None, Decimal | None, int, int]]:
+    """
+    Pure mapping AccuracyReport -> pyramide_accuracy_metrics rows
+    (migration 055). Returns tuples
+    ``(horizon, mase, wape, smape, bias, coverage, n_cutoffs, n_observations)``:
+
+    - one AGGREGATE row (horizon None) with the report's pooled metrics,
+      as-is (None stays None — the None-honest contract of accuracy.py);
+    - one row PER HORIZON with only the residual-derivable metrics:
+      ``bias_h = -mean(residuals_h)`` (report residuals are
+      ``actual - forecast`` while the bias contract is
+      ``forecast - actual``, positive = over-forecast — hence the sign
+      flip), and ``n_cutoffs = n_observations = len(residuals_h)`` (one
+      residual per cutoff that reached horizon h). mase/wape/smape/
+      coverage need the per-horizon actuals, which the report does not
+      carry: they stay None. Nothing is invented.
+
+    ``bias_scale`` is the middle-out transport factor for LEAF runs of a
+    hierarchical block (leaf = share x node): the scale-free metrics
+    (mase/wape/smape/coverage) are invariant under proportional
+    disaggregation and pass through unchanged, while bias — the only
+    scale-DEPENDENT metric persisted — is multiplied by the share,
+    exactly like the conformal offsets in ``engines.conformal_bounds``
+    (same documented V1 approximation). Default 1 = the report describes
+    the run's own series.
+    """
+    rows: list[tuple[int | None, Decimal | None, Decimal | None, Decimal | None, Decimal | None, Decimal | None, int, int]] = [
+        (
+            None,
+            report.mase,
+            report.wape,
+            report.smape,
+            report.bias * bias_scale,
+            report.coverage,
+            report.n_cutoffs,
+            report.n_observations,
+        )
+    ]
+    for horizon, residuals in sorted(report.per_horizon_residuals.items()):
+        if not residuals:
+            continue
+        mean_residual = sum(residuals, Decimal(0)) / Decimal(len(residuals))
+        rows.append(
+            (
+                horizon,
+                None,  # mase: needs per-horizon actuals — not in the report
+                None,  # wape: idem
+                None,  # smape: idem
+                -mean_residual * bias_scale,
+                None,  # coverage: no intervals evaluated per horizon
+                len(residuals),
+                len(residuals),
+            )
+        )
+    return rows
+
+
+def persist_accuracy_metrics(
+    db: psycopg.Connection,
+    run_id: UUID,
+    report: AccuracyReport,
+    bias_scale: Decimal = _ONE,
+) -> int:
+    """
+    Persist a run's backtest report into pyramide_accuracy_metrics
+    (migration 055): the aggregate row + one row per horizon (see
+    ``accuracy_metric_rows`` for the exact mapping and the ``bias_scale``
+    transport semantics).
+
+    Idempotence: DELETE + INSERT of the run's full row set. The report is
+    an atomic artifact of ONE backtest — replacing the whole set keeps
+    the (run_id, horizon) UNIQUE NULLS NOT DISTINCT invariant trivially
+    and never leaves a stale mix of two backtests (an upsert would, if a
+    re-run produced fewer horizons). Returns the number of rows written.
+    """
+    db.execute(
+        "DELETE FROM pyramide_accuracy_metrics WHERE run_id = %s",
+        (run_id,),
+    )
+    rows = accuracy_metric_rows(report, bias_scale=bias_scale)
+    for horizon, mase, wape, smape, bias_value, coverage, n_cutoffs, n_observations in rows:
+        db.execute(
+            """
+            INSERT INTO pyramide_accuracy_metrics (
+                run_id, horizon, mase, wape, smape, bias, coverage,
+                n_cutoffs, n_observations
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                run_id, horizon, mase, wape, smape, bias_value, coverage,
+                n_cutoffs, n_observations,
+            ),
+        )
+    return len(rows)
+
+
+def fetch_accuracy_metrics(
+    db: psycopg.Connection, run_id: UUID
+) -> list[PyramideAccuracyMetric]:
+    """
+    Backtest metrics of a run, aggregate row FIRST (horizon NULL), then
+    per-horizon rows in ascending horizon order. Empty list = the run
+    was persisted without a backtest report (documented absence, e.g.
+    ENSEMBLE_STAT blend or external backend) — never invented rows.
+    """
+    rows = db.execute(
+        """
+        SELECT metric_id, run_id, horizon, mase, wape, smape, bias,
+               coverage, n_cutoffs, n_observations, created_at
+        FROM pyramide_accuracy_metrics
+        WHERE run_id = %s
+        ORDER BY horizon ASC NULLS FIRST
+        """,
+        (run_id,),
+    ).fetchall()
+    return [
+        PyramideAccuracyMetric(
+            metric_id=row["metric_id"],
+            run_id=row["run_id"],
+            horizon=row["horizon"],
+            mase=_optional_decimal(row["mase"]),
+            wape=_optional_decimal(row["wape"]),
+            smape=_optional_decimal(row["smape"]),
+            bias=_optional_decimal(row["bias"]),
+            coverage=_optional_decimal(row["coverage"]),
+            n_cutoffs=row["n_cutoffs"],
+            n_observations=row["n_observations"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+def _optional_decimal(value) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
+
+
 def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePersistedRun:
     run_id = uuid4()
     snapshot_id = uuid4()
@@ -474,6 +643,11 @@ def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePe
             result.total_quantity,
         ),
     )
+    # Métriques de backtest (migration 055) : uniquement quand un rapport
+    # honnête existe — run sans rapport (ENSEMBLE_STAT, backend externe,
+    # historique trop court) = zéro ligne, documenté.
+    if result.accuracy_report is not None:
+        persist_accuracy_metrics(db, run_id, result.accuracy_report)
     return PyramidePersistedRun(run_id=run_id, snapshot_id=snapshot_id, forecast_id=forecast_id)
 
 
@@ -502,12 +676,23 @@ def persist_series_run(
     node_code: str | None = None,
     lowers: Sequence[Decimal | None] | None = None,
     uppers: Sequence[Decimal | None] | None = None,
+    accuracy_report: AccuracyReport | None = None,
+    accuracy_bias_scale: Decimal = _ONE,
 ) -> PyramidePersistedRun:
     """
     Persist ONE series of a hierarchical run (migration 053): either a
     LEAF (item_id + location_id) or an AGGREGATE (hierarchy_id + level +
     node_code) — never both (mirrors the DB CHECK, validated here first
     so the error is readable).
+
+    ``accuracy_report`` is the rolling-origin backtest report of the
+    model that produced this series' values; when non-None it is
+    persisted into pyramide_accuracy_metrics (migration 055). None →
+    zero metric rows (documented absence, never invented metrics).
+    ``accuracy_bias_scale`` transports the scale-dependent bias for a
+    LEAF whose values are share x reconciliation-node curve — same V1
+    middle-out approximation as the conformal bounds (see
+    ``accuracy_metric_rows``).
 
     ``lowers`` / ``uppers`` are per-bucket conformal bounds
     (confidence_interval_lower/upper, migration 026), aligned with
@@ -619,6 +804,10 @@ def persist_series_run(
                 scenario_id, horizon_start, horizon_end, granularity, method,
                 len(quantities), total_quantity,
             ),
+        )
+    if accuracy_report is not None:
+        persist_accuracy_metrics(
+            db, run_id, accuracy_report, bias_scale=accuracy_bias_scale
         )
     return PyramidePersistedRun(
         run_id=run_id, snapshot_id=snapshot_id, forecast_id=forecast_id

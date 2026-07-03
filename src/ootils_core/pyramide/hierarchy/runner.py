@@ -436,6 +436,10 @@ class HierarchicalRunner:
                 # Bornes NULL pour TOUS les agrégats : la réconciliation
                 # d'intervalles hiérarchiques (bornes cohérentes entre
                 # niveaux) est frontier — non-objectif V1 (spec §2.D).
+                # Métriques de backtest (migration 055) : uniquement pour
+                # les nœuds du niveau de réconciliation, qui possèdent
+                # leur propre computation (les niveaux S-sommés n'ont pas
+                # été backtestés → zéro ligne, documenté).
                 record = persist_series_run(
                     db,
                     scenario_id=config.scenario_id,
@@ -456,6 +460,9 @@ class HierarchicalRunner:
                     hierarchy_id=config.hierarchy_id,
                     level=ref.level,
                     node_code=ref.key,
+                    accuracy_report=(
+                        computation.accuracy_report if computation else None
+                    ),
                 )
             else:
                 recon_node = parent_of.get(ref.key)
@@ -509,6 +516,20 @@ class HierarchicalRunner:
                     location_id=config.leaf_location_id,
                     lowers=lowers,
                     uppers=uppers,
+                    # Métriques de backtest de la FEUILLE (migration 055) :
+                    # mêmes provenance et garde-fou que les bornes — le
+                    # rapport du modèle du nœud de réconciliation, avec le
+                    # biais transporté par la part de désagrégation (les
+                    # métriques scale-free passent inchangées, approximation
+                    # V1 middle-out documentée dans accuracy_metric_rows).
+                    # Sans rapport ou sans part explicite (MinT) → None,
+                    # zéro ligne.
+                    accuracy_report=(
+                        report if (report is not None and share is not None) else None
+                    ),
+                    accuracy_bias_scale=(
+                        share if share is not None else Decimal("1")
+                    ),
                 )
             persisted.append(_persisted_series(ref, record))
         if leaves_without_bounds:

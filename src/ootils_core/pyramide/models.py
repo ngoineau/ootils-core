@@ -9,6 +9,8 @@ from uuid import UUID
 
 from ootils_core.forecasting import ForecastMethod
 
+from .accuracy import AccuracyReport
+
 METHOD_AUTO_SELECT = "AUTO_SELECT"
 METHOD_ENSEMBLE_STAT = "ENSEMBLE_STAT"
 METHOD_STAT_AUTOETS = "STAT_AUTOETS"
@@ -88,6 +90,13 @@ class PyramideRunResult:
     engine_backend: str
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     warnings: tuple[str, ...] = ()
+    # Rapport de backtest rolling-origin du modèle qui a PRODUIT les
+    # valeurs (ForecastComputation.accuracy_report, remonté par le
+    # runner). Persisté dans pyramide_accuracy_metrics (migration 055)
+    # par persist_run. None = pas de backtest déterministe disponible
+    # (ENSEMBLE_STAT, backend externe, historique trop court) → AUCUNE
+    # ligne de métriques, jamais des métriques inventées.
+    accuracy_report: AccuracyReport | None = None
 
     @property
     def total_quantity(self) -> Decimal:
