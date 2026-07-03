@@ -37,13 +37,14 @@ def _make_client_no_db() -> TestClient:
 
 
 def test_create_pyramide_run_rejects_unsupported_method_before_db():
+    # SEASONAL is a supported method now — use a genuinely unknown name.
     client = _make_client_no_db()
     response = client.post(
         "/v1/forecast/runs",
         json={
             "item_id": "ITEM-001",
             "location_id": "LOC-001",
-            "method": "SEASONAL",
+            "method": "NOT_A_METHOD",
         },
         headers=AUTH_HEADERS,
     )

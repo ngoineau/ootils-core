@@ -5,6 +5,8 @@ Tests cover:
 - Moving Average (MA) forecaster
 - Exponential Smoothing (ES) forecaster
 - Croston forecaster (intermittent demand)
+- Seasonal forecaster (seasonal index decomposition — golden battery in
+  tests/test_seasonal_forecaster_golden.py)
 - ForecastingEngine service
 - Accuracy metrics (MAPE, Bias, Tracking Signal)
 - Auto-calibration of parameters
@@ -21,6 +23,7 @@ from ootils_core.forecasting import (
     ForecastMethod,
     ForecastingError,
     MovingAverageForecaster,
+    SeasonalForecaster,
     create_forecaster,
 )
 
@@ -200,6 +203,66 @@ class TestCrostonForecaster:
 
 
 # ─────────────────────────────────────────────────────────────
+# Seasonal Tests (seasonal index decomposition)
+# ─────────────────────────────────────────────────────────────
+# The full hand-computed golden battery lives in
+# tests/test_seasonal_forecaster_golden.py — these are the API-shape basics.
+
+
+class TestSeasonalForecaster:
+    """Tests for Seasonal decomposition algorithm."""
+
+    def test_seasonal_recovers_known_indices(self):
+        """Seasonal indices on a 2-position cycle.
+
+        historical = [150, 50, 150, 50], season_length = 2
+        grand mean = 100 → indices = [1.5, 0.5]
+        level = mean([150/1.5, 50/0.5]) = 100 → next forecast = 100 * 1.5 = 150
+        """
+        forecaster = SeasonalForecaster(season_length=2)
+        historical = [150, 50, 150, 50]
+
+        assert forecaster.seasonal_indices(historical) == [Decimal("1.5"), Decimal("0.5")]
+        assert forecaster.forecast(historical) == Decimal("150")
+
+    def test_seasonal_curve_repeats_profile(self):
+        """forecast_curve projects level x index over the horizon."""
+        forecaster = SeasonalForecaster(season_length=2)
+        historical = [150, 50, 150, 50]
+
+        curve = forecaster.forecast_curve(historical, periods=4)
+
+        assert curve == [Decimal("150"), Decimal("50"), Decimal("150"), Decimal("50")]
+
+    def test_seasonal_insufficient_history(self):
+        """Fewer than 2 complete cycles → ForecastingError (no silent guess)."""
+        forecaster = SeasonalForecaster(season_length=4)
+
+        with pytest.raises(ForecastingError):
+            forecaster.forecast([100, 120, 110])
+
+    def test_seasonal_invalid_season_length(self):
+        """Seasonal should reject season_length < 2."""
+        with pytest.raises(ValueError):
+            SeasonalForecaster(season_length=1)
+
+        with pytest.raises(ValueError):
+            SeasonalForecaster(season_length=-3)
+
+    def test_seasonal_invalid_periods(self):
+        """forecast_curve should reject periods < 1."""
+        forecaster = SeasonalForecaster(season_length=2)
+
+        with pytest.raises(ValueError):
+            forecaster.forecast_curve([150, 50, 150, 50], periods=0)
+
+    def test_seasonal_repr(self):
+        """Seasonal string representation."""
+        forecaster = SeasonalForecaster(season_length=12)
+        assert "season_length=12" in repr(forecaster)
+
+
+# ─────────────────────────────────────────────────────────────
 # Factory Function Tests
 # ─────────────────────────────────────────────────────────────
 
@@ -226,6 +289,18 @@ class TestCreateForecaster:
         
         assert isinstance(forecaster, CrostonForecaster)
         assert forecaster.min_demand_threshold == 1.0
+
+    def test_create_seasonal_forecaster(self):
+        """Create Seasonal forecaster via factory."""
+        forecaster = create_forecaster('seasonal', season_length=52)
+
+        assert isinstance(forecaster, SeasonalForecaster)
+        assert forecaster.season_length == 52
+
+    def test_create_seasonal_requires_season_length(self):
+        """Seasonal factory has no default cycle length."""
+        with pytest.raises(ValueError):
+            create_forecaster('seasonal')
 
     def test_create_unknown_method(self):
         """Factory should reject unknown method."""
@@ -364,6 +439,62 @@ class TestForecastingEngine:
         assert len(series) == 5
         # All periods should have same forecast (flat forecast)
         assert all(v == series[0] for v in series)
+
+    def test_engine_generate_seasonal(self):
+        """Engine generate with SEASONAL method (>= 2 complete cycles)."""
+        engine = ForecastingEngine()
+        historical = [150, 50, 150, 50]
+
+        result = engine.generate(
+            item_history=historical,
+            method=ForecastMethod.SEASONAL,
+            params={"season_length": 2}
+        )
+
+        assert result.method == ForecastMethod.SEASONAL
+        assert result.forecast_value == Decimal("150")
+        assert result.parameters["season_length"] == 2
+        assert result.parameters["seasonal_applied"] is True
+
+    def test_engine_seasonal_requires_season_length(self):
+        """SEASONAL without season_length → ForecastingError (no default)."""
+        engine = ForecastingEngine()
+
+        with pytest.raises(ForecastingError):
+            engine.generate(
+                item_history=[150, 50, 150, 50],
+                method=ForecastMethod.SEASONAL
+            )
+
+    def test_engine_forecast_series_seasonal_curve(self):
+        """forecast_series with SEASONAL returns a curve, not a repeated value."""
+        engine = ForecastingEngine()
+        historical = [150, 50, 150, 50]
+
+        series = engine.forecast_series(
+            item_history=historical,
+            method=ForecastMethod.SEASONAL,
+            params={"season_length": 2},
+            periods=4
+        )
+
+        assert series == [Decimal("150"), Decimal("50"), Decimal("150"), Decimal("50")]
+
+    def test_engine_seasonal_fallback_below_two_cycles(self):
+        """SEASONAL on < 2 complete cycles falls back flat, with provenance."""
+        engine = ForecastingEngine()
+        historical = [150, 50, 150]  # 3 points < 2 * season_length
+
+        result = engine.generate(
+            item_history=historical,
+            method=ForecastMethod.SEASONAL,
+            params={"season_length": 2}
+        )
+
+        assert result.parameters["seasonal_applied"] is False
+        assert any("fallback" in w for w in result.warnings)
+        # Flat level = MA(window=min(3, 2)=2) on last 2 points = (50+150)/2
+        assert result.forecast_value == Decimal("100")
 
 
 # ─────────────────────────────────────────────────────────────

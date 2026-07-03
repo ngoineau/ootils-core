@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -18,7 +19,12 @@ from .models import (
 )
 
 
-BASE_METHODS = frozenset({ForecastMethod.MA, ForecastMethod.EXP_SMOOTHING, ForecastMethod.CROSTON})
+logger = logging.getLogger(__name__)
+
+
+BASE_METHODS = frozenset(
+    {ForecastMethod.MA, ForecastMethod.EXP_SMOOTHING, ForecastMethod.CROSTON, ForecastMethod.SEASONAL}
+)
 EXTERNAL_METHODS = frozenset(
     {METHOD_STAT_AUTOETS, METHOD_STAT_AUTOARIMA, METHOD_ML_LGBM, METHOD_FM_CHRONOS, METHOD_FM_MOIRAI}
 )
@@ -72,6 +78,11 @@ class PyramideForecastEngine:
 
         method = method.upper()
         params = dict(method_params)
+        # Longueur de cycle saisonnier : paramétrable, sinon dérivée de la
+        # granularité (7 quotidien, 52 hebdo, 12 mensuel). Résolue une fois ici
+        # pour que SEASONAL direct, les candidats AUTO_SELECT/ENSEMBLE et les
+        # backends externes partagent la même valeur.
+        params.setdefault("season_length", _default_season_length(granularity))
         if method in BASE_METHODS:
             return self._classical(history, periods, method, params)
         if method == METHOD_AUTO_SELECT:
@@ -115,9 +126,23 @@ class PyramideForecastEngine:
         except ForecastingError as exc:
             raise PyramideEngineError(str(exc)) from exc
 
-        value = max(result.forecast_value, Decimal("0"))
+        if method == ForecastMethod.SEASONAL and result.parameters.get("seasonal_applied"):
+            # Courbe saisonnière déterministe (niveau × indices). Si l'historique
+            # couvre < 2 cycles complets, generate() est déjà retombé sur un
+            # niveau plat et l'a documenté dans result.warnings.
+            series = self._forecasting_engine.forecast_series(
+                item_history=list(history),
+                method=method,
+                params=dict(params),
+                periods=periods,
+            )
+            values = tuple(max(value, Decimal("0")) for value in series)
+        else:
+            value = max(result.forecast_value, Decimal("0"))
+            values = tuple(value for _ in range(periods))
+
         return ForecastComputation(
-            values=tuple(value for _ in range(periods)),
+            values=values,
             selected_model=self._label(method, params),
             value_method=method,
             engine_backend="internal:classical",
@@ -133,7 +158,7 @@ class PyramideForecastEngine:
         candidates = self._candidate_specs(history, params)
         scored = []
         for candidate in candidates:
-            score = self._backtest_score(history, candidate)
+            score = self._backtest_score(history, candidate, horizon=periods)
             if score is not None:
                 scored.append((score, candidate))
 
@@ -162,25 +187,35 @@ class PyramideForecastEngine:
         params: Mapping[str, Any],
     ) -> ForecastComputation:
         candidates = self._candidate_specs(history, params)
-        forecasts: list[tuple[Decimal, float, _Candidate]] = []
+        forecasts: list[tuple[tuple[Decimal, ...], float, _Candidate]] = []
         for candidate in candidates:
             try:
-                computed = self._classical(history, 1, candidate.method, candidate.params)
+                computed = self._classical(history, periods, candidate.method, candidate.params)
             except PyramideEngineError:
                 continue
-            score = self._backtest_score(history, candidate)
-            weight = 1.0 / max(score or 1.0, 0.0001)
-            forecasts.append((computed.values[0], weight, candidate))
+            score = self._backtest_score(history, candidate, horizon=periods)
+            # score is None = pas de backtest possible → poids neutre 1.0.
+            # Un score PARFAIT de 0.0 est falsy mais doit recevoir le poids
+            # plafond (1/0.0001), pas le poids neutre : ne pas utiliser `or`.
+            weight = 1.0 if score is None else 1.0 / max(score, 0.0001)
+            forecasts.append((computed.values, weight, candidate))
 
         if not forecasts:
             return self._auto_select(history, periods, params)
 
+        # Mélange pondéré pas-à-pas : les candidats plats contribuent une
+        # constante, un candidat saisonnier contribue sa courbe.
         total_weight = sum(weight for _, weight, _ in forecasts)
-        blended = sum(float(value) * weight for value, weight, _ in forecasts) / total_weight
-        value = max(Decimal(str(blended)), Decimal("0"))
+        values = tuple(
+            max(
+                Decimal(str(sum(float(curve[step]) * weight for curve, weight, _ in forecasts) / total_weight)),
+                Decimal("0"),
+            )
+            for step in range(periods)
+        )
         model_names = ",".join(candidate.label for _, _, candidate in forecasts)
         return ForecastComputation(
-            values=tuple(value for _ in range(periods)),
+            values=values,
             selected_model=METHOD_ENSEMBLE_STAT,
             value_method=METHOD_ENSEMBLE_STAT,
             engine_backend="internal:ensemble_stat",
@@ -306,11 +341,23 @@ class PyramideForecastEngine:
         )
 
     def _candidate_specs(self, history: Sequence[Decimal], params: Mapping[str, Any]) -> list[_Candidate]:
+        # method_params est un dict libre côté router : toute valeur illisible
+        # écarte simplement le candidat concerné (ou retombe sur le défaut),
+        # tracée en debug — jamais d'exception depuis cette méthode.
         windows = params.get("ma_windows", [3, 6, 12])
+        if not isinstance(windows, (list, tuple)):
+            logger.debug("ma_windows illisible (%r); défaut [3, 6, 12]", windows)
+            windows = [3, 6, 12]
         alphas = params.get("exp_alphas", [0.2, 0.5, 0.8])
+        if not isinstance(alphas, (list, tuple)):
+            logger.debug("exp_alphas illisible (%r); défaut [0.2, 0.5, 0.8]", alphas)
+            alphas = [0.2, 0.5, 0.8]
         candidates: list[_Candidate] = []
         for window in windows:
-            window_int = int(window)
+            window_int = _as_int(window)
+            if window_int is None or window_int < 1:
+                logger.debug("ma_windows: fenêtre illisible (%r); candidat MA ignoré", window)
+                continue
             if len(history) >= window_int:
                 candidates.append(
                     _Candidate(
@@ -320,45 +367,98 @@ class PyramideForecastEngine:
                     )
                 )
         for alpha in alphas:
+            alpha_float = _as_float(alpha)
+            if alpha_float is None or not 0 < alpha_float <= 1:
+                logger.debug("exp_alphas: alpha illisible (%r); candidat EXP_SMOOTHING ignoré", alpha)
+                continue
             candidates.append(
                 _Candidate(
                     method=ForecastMethod.EXP_SMOOTHING,
-                    params={"alpha": float(alpha)},
-                    label=f"EXP_SMOOTHING(alpha={float(alpha):.2f})",
+                    params={"alpha": alpha_float},
+                    label=f"EXP_SMOOTHING(alpha={alpha_float:.2f})",
                 )
             )
-        if self._zero_ratio(history) >= float(params.get("croston_zero_ratio", 0.2)):
+        # Candidat saisonnier : uniquement si l'historique couvre >= 2 cycles
+        # complets ET que la série n'est pas intermittente — projeter des
+        # indices saisonniers sur une demande intermittente extrapole la
+        # position aléatoire des transactions, pas une saison (Croston reste
+        # le modèle plat adapté, par design).
+        season_length = _as_int(params.get("season_length", 0))
+        if season_length is None:
+            logger.debug(
+                "season_length illisible (%r); candidat SEASONAL non proposé",
+                params.get("season_length"),
+            )
+            season_length = 0
+        zero_ratio_threshold = _as_float(params.get("croston_zero_ratio", 0.2))
+        if zero_ratio_threshold is None:
+            logger.debug(
+                "croston_zero_ratio illisible (%r); défaut 0.2",
+                params.get("croston_zero_ratio"),
+            )
+            zero_ratio_threshold = 0.2
+        intermittent = self._zero_ratio(history) >= zero_ratio_threshold
+        if season_length >= 2 and len(history) >= 2 * season_length and not intermittent:
+            candidates.append(
+                _Candidate(
+                    method=ForecastMethod.SEASONAL,
+                    params={"season_length": season_length},
+                    label=f"SEASONAL(season_length={season_length})",
+                )
+            )
+        if intermittent:
+            threshold = _as_float(params.get("min_demand_threshold", 0.0))
+            if threshold is None:
+                logger.debug(
+                    "min_demand_threshold illisible (%r); défaut 0.0",
+                    params.get("min_demand_threshold"),
+                )
+                threshold = 0.0
             candidates.append(
                 _Candidate(
                     method=ForecastMethod.CROSTON,
-                    params={"min_demand_threshold": float(params.get("min_demand_threshold", 0.0))},
+                    params={"min_demand_threshold": threshold},
                     label="CROSTON",
                 )
             )
         return candidates
 
-    def _backtest_score(self, history: Sequence[Decimal], candidate: _Candidate) -> float | None:
+    def _backtest_score(self, history: Sequence[Decimal], candidate: _Candidate, horizon: int = 1) -> float | None:
+        """Rolling-origin backtest sur des COURBES : à chaque origine, le
+        candidat prévoit jusqu'à `horizon` pas comparés aux réels suivants —
+        l'erreur porte sur les h pas, pas sur une valeur unique (un modèle plat
+        contribue la même valeur à chaque pas, un saisonnier sa courbe)."""
         if len(history) < 3:
             return None
+
+        horizon = max(1, horizon)
+        seasonal_min_train = 0
+        if candidate.method == ForecastMethod.SEASONAL:
+            # Ne scorer le candidat saisonnier que sur les origines où il
+            # tourne vraiment (>= 2 cycles complets) : sinon son score
+            # mesurerait le fallback plat, pas le modèle saisonnier.
+            seasonal_min_train = 2 * int(candidate.params.get("season_length", 0))
 
         errors = []
         tail_start = max(1, len(history) - 52)
         for index in range(tail_start, len(history)):
             train = list(history[:index])
-            actual = history[index]
-            if not train:
+            if not train or len(train) < seasonal_min_train:
                 continue
+            actual_window = list(history[index:index + horizon])
             try:
-                result = self._forecasting_engine.generate(
+                series = self._forecasting_engine.forecast_series(
                     item_history=train,
                     method=candidate.method,
                     params=dict(candidate.params),
+                    periods=len(actual_window),
                 )
             except (ForecastingError, ValueError):
                 continue
-            forecast = max(result.forecast_value, Decimal("0"))
-            denom = max(abs(actual), Decimal("1"))
-            errors.append(float(abs(actual - forecast) / denom))
+            for actual, raw_forecast in zip(actual_window, series):
+                forecast = max(raw_forecast, Decimal("0"))
+                denom = max(abs(actual), Decimal("1"))
+                errors.append(float(abs(actual - forecast) / denom))
 
         if not errors:
             return None
@@ -379,7 +479,25 @@ class PyramideForecastEngine:
             return f"EXP_SMOOTHING(alpha={float(params.get('alpha', 0.3)):.2f})"
         if method == ForecastMethod.CROSTON:
             return "CROSTON"
+        if method == ForecastMethod.SEASONAL:
+            return f"SEASONAL(season_length={int(params.get('season_length', 0))})"
         return method
+
+
+def _as_int(value: Any) -> int | None:
+    """Coercition tolérante d'un paramètre libre : None si illisible."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    """Coercition tolérante d'un paramètre libre : None si illisible."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _freq_for_granularity(granularity: str) -> str:

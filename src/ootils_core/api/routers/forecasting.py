@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
@@ -58,6 +58,20 @@ class ForecastGenerateRequest(BaseModel):
         if v > 365:
             raise ValueError("horizon_days cannot exceed 365")
         return v
+
+    @model_validator(mode="after")
+    def validate_seasonal_params(self) -> "ForecastGenerateRequest":
+        # SEASONAL has no default cycle length: it depends on the data
+        # granularity (e.g. 7 daily, 12 monthly, 52 weekly) and must be chosen
+        # explicitly. Fail at validation time (422, before any DB access).
+        if self.method == "SEASONAL":
+            season_length = (self.method_params or {}).get("season_length")
+            if not isinstance(season_length, int) or isinstance(season_length, bool) or season_length < 2:
+                raise ValueError(
+                    "method SEASONAL requires method_params.season_length (integer >= 2, "
+                    "e.g. 7 daily, 12 monthly, 52 weekly)"
+                )
+        return self
 
 
 class ForecastAdjustRequest(BaseModel):
@@ -369,6 +383,20 @@ def generate_forecast(
             detail="Forecast generation failed",
         )
 
+    # 4b. SEASONAL opt-in: the persisted values follow the seasonal CURVE
+    # (level x indices) instead of repeating a single value. Default methods
+    # (MA, EXP_SMOOTHING, CROSTON) keep the historical flat behaviour. When
+    # the history covers < 2 full cycles, the engine falls back to a flat
+    # level and records it in forecast_result.parameters/warnings.
+    seasonal_series: Optional[List[Decimal]] = None
+    if forecast_result.parameters.get("seasonal_applied"):
+        seasonal_series = engine.forecast_series(
+            item_history=historical_demand,
+            method=body.method,
+            params=body.method_params or {},
+            periods=body.horizon_days,
+        )
+
     # 5. Create forecast header
     forecast_id = uuid4()
     horizon_start = date.today() + timedelta(days=1)
@@ -395,7 +423,7 @@ def generate_forecast(
         value_id = uuid4()
 
         # Use the forecast value (for non-daily granularity, this is a simplification)
-        quantity = forecast_result.forecast_value
+        quantity = seasonal_series[day_offset] if seasonal_series is not None else forecast_result.forecast_value
 
         db.execute(
             """
@@ -426,7 +454,10 @@ def generate_forecast(
 
     metadata = ForecastMetadata(
         method=body.method,
-        method_params=body.method_params,
+        # Effective engine parameters carry the provenance (e.g. season_length
+        # + seasonal_applied for SEASONAL, auto-calibrated alpha/window) in the
+        # existing method_params field — no new column, no JSONB.
+        method_params=forecast_result.parameters or body.method_params,
         generated_at=date.today(),
         horizon_days=body.horizon_days,
         granularity=body.granularity,
