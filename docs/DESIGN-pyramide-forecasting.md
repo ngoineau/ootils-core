@@ -33,7 +33,8 @@ conforme au métier (saison piscine, zones climatiques US, hiérarchie produit
 | `ENSEMBLE_STAT` (mélange pondéré par l'erreur) | ✅ réel |
 | `STAT_AUTOETS` / `STAT_AUTOARIMA` (Nixtla *statsforecast*) | ✅ réel (import paresseux + fallback) |
 | `ML_LGBM` (LightGBM via *mlforecast*) | ✅ réel (idem) |
-| `FM_CHRONOS` / `FM_MOIRAI` (modèles de fondation TS) | ⚠️ **STUB** — retombent sur AUTO_SELECT |
+| `FM_CHRONOS` (modèle de fondation TS) | ⚠️ **STUB** — retombe sur AUTO_SELECT |
+| `FM_MOIRAI` | ❌ **EXCLU** — Moirai (Salesforce) est cc-by-nc-4.0, incompatible usage commercial (décision 2026-05-31) ; rejeté en 422 par l'API, toléré en DB pour l'historique (migration 057) |
 
 **4 trous critiques pour le métier :**
 1. 🔴 **Saisonnalité absente du chemin par défaut** : classique/auto/ensemble
