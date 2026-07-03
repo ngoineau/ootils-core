@@ -127,19 +127,30 @@ def resolve_scenario_uuid(scenario_id: str | None) -> UUID:
     return UUID(scenario_id)
 
 
-# Shared business predicates of the demand-history training signal.
-# Single definition consumed by BOTH readers (leaf pair and hierarchy
-# node) so the business rules can never drift apart:
+# Shared business predicates of the demand-history training signal,
+# split in two layers so they can never drift apart across consumers:
+#
+# _DEMAND_HISTORY_STREAM_PREDICATES — the pure business rules:
 #   - stream='regular' only (warranty is a separate forecast),
 #   - inter-entity flows excluded (PPS→PCC double-count, migration 048),
-#   - strict past (today is a partial day),
-#   - bounded lookback window.
-# Uses the named placeholder %(lookback_days)s — callers pass params as a
-# dict.
-_DEMAND_HISTORY_BUSINESS_PREDICATES = """
+#   - booked_date present (forecast-on-booking signal).
+#   Consumed directly by the reconciliation bench (hierarchy/bench.py),
+#   which needs the SAME rules over an EXPLICIT historical window
+#   (train/holdout split at a past cutoff — CURRENT_DATE bounds would
+#   leak holdout data into training).
+#
+# _DEMAND_HISTORY_BUSINESS_PREDICATES — the rules PLUS the live window
+#   (strict past because today is a partial day, bounded lookback).
+#   Single definition consumed by every runtime reader (leaf pair,
+#   hierarchy node, per-item, totals). Uses the named placeholder
+#   %(lookback_days)s — callers pass params as a dict.
+_DEMAND_HISTORY_STREAM_PREDICATES = """
               dh.stream = 'regular'
               AND (dh.fulfillment IS NULL OR dh.fulfillment <> 'inter_entity')
               AND dh.booked_date IS NOT NULL
+"""
+
+_DEMAND_HISTORY_BUSINESS_PREDICATES = _DEMAND_HISTORY_STREAM_PREDICATES + """
               AND dh.booked_date < CURRENT_DATE
               AND dh.booked_date >= CURRENT_DATE - (%(lookback_days)s::int * INTERVAL '1 day')
 """
