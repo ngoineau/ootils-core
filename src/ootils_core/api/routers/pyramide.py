@@ -50,12 +50,19 @@ class PyramideRunRequest(BaseModel):
 
 
 class PyramideRunOut(BaseModel):
+    # Leaf runs carry (item_id, location_id); aggregate runs (migration
+    # 053) carry (hierarchy_id, level, node_code) — the unused side is
+    # None. Optional on both sides so an aggregate run never 500s on
+    # response validation.
     run_id: UUID
     snapshot_id: UUID
     forecast_id: UUID
     status: str
-    item_id: UUID
-    location_id: UUID
+    item_id: UUID | None = None
+    location_id: UUID | None = None
+    hierarchy_id: str | None = None
+    level: str | None = None
+    node_code: str | None = None
     scenario_id: UUID
     horizon_start: date
     horizon_end: date
@@ -333,6 +340,9 @@ def _run_out(summary) -> PyramideRunOut:
         status=summary.status,
         item_id=summary.item_id,
         location_id=summary.location_id,
+        hierarchy_id=summary.hierarchy_id,
+        level=summary.level,
+        node_code=summary.node_code,
         scenario_id=summary.scenario_id,
         horizon_start=summary.horizon_start,
         horizon_end=summary.horizon_end,
