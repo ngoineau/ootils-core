@@ -123,6 +123,35 @@ class TestGenerateForecastValidation:
         )
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
+    def test_generate_forecast_seasonal_missing_season_length(self):
+        """SEASONAL without method_params.season_length → 422 before any DB call."""
+        client = _make_client_no_db()
+        resp = client.post(
+            "/v1/demand/forecast/generate",
+            json={
+                "item_id": "ITEM-001",
+                "location_id": "LOC-001",
+                "method": "SEASONAL",
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+    def test_generate_forecast_seasonal_invalid_season_length(self):
+        """SEASONAL with season_length < 2 → 422 before any DB call."""
+        client = _make_client_no_db()
+        resp = client.post(
+            "/v1/demand/forecast/generate",
+            json={
+                "item_id": "ITEM-001",
+                "location_id": "LOC-001",
+                "method": "SEASONAL",
+                "method_params": {"season_length": 1},
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
 
 # ─────────────────────────────────────────────────────────────
 # GET /v1/demand/forecast/{forecast_id} — validation

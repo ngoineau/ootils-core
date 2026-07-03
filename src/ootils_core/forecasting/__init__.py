@@ -1,8 +1,8 @@
 """
 Forecasting module for Ootils Core.
 
-Provides statistical forecasting algorithms (MA, ES, Croston) via a unified
-ForecastingEngine service interface.
+Provides statistical forecasting algorithms (MA, ES, Croston, Seasonal) via a
+unified ForecastingEngine service interface.
 """
 
 from .engine import ForecastingEngine, ForecastMethod, ForecastResult, AccuracyMetrics
@@ -11,6 +11,7 @@ from .algorithms import (
     MovingAverageForecaster,
     ExponentialSmoothingForecaster,
     CrostonForecaster,
+    SeasonalForecaster,
     ForecastingError,
     create_forecaster,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "MovingAverageForecaster",
     "ExponentialSmoothingForecaster",
     "CrostonForecaster",
+    "SeasonalForecaster",
     "ForecastingError",
     "create_forecaster",
 ]

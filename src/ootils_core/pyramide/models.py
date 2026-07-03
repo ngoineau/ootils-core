@@ -22,6 +22,7 @@ SUPPORTED_METHODS = frozenset(
         ForecastMethod.MA,
         ForecastMethod.EXP_SMOOTHING,
         ForecastMethod.CROSTON,
+        ForecastMethod.SEASONAL,
         METHOD_AUTO_SELECT,
         METHOD_ENSEMBLE_STAT,
         METHOD_STAT_AUTOETS,
