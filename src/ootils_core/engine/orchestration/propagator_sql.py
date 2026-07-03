@@ -221,7 +221,12 @@ SHORTAGES_SQL = """
 --   -EPS <= closing < safety_stock_qty     -> 'below_safety_stock', qty = safety_stock - closing
 -- EPS = 1e-9, matching SHORTAGE_EPSILON in the Python kernel (deterministic
 -- sign test across engines at the ~0 boundary; see docs/PERF-BASELINE.md).
--- severity_score = shortage_qty * days_in_bucket * 1 (unit-cost proxy)
+-- severity_score = shortage_qty * days_in_bucket * unit_cost (#342).
+-- unit_cost mirrors mrp_core.cost_of — the single valuation precedence used
+-- by the watcher fleet: negotiated supplier unit_cost (preferred supplier,
+-- cheapest priced row) first, then items.standard_cost (migration 042 BOM
+-- roll-up), then 1 (the Python detector's _UNIT_COST_PROXY fallback for
+-- unpriced items).
 -- shortage_date  = COALESCE(time_span_start, time_ref)
 -- Restricted to the dirty subgraph for this calc_run; clean PIs' shortages
 -- are left to RESOLVE_STALE_SQL below.
@@ -234,11 +239,22 @@ WITH pi_with_ss AS (
         pi.closing_stock,
         COALESCE(pi.time_span_start, pi.time_ref) AS shortage_date,
         GREATEST((pi.time_span_end - pi.time_span_start), 1) AS days_in_bucket,
-        ipp.safety_stock_qty
+        ipp.safety_stock_qty,
+        COALESCE(sup.unit_cost, i.standard_cost, 1)::numeric AS unit_cost
     FROM nodes pi
     JOIN dirty_nodes dn
       ON dn.node_id = pi.node_id
      AND dn.scenario_id = pi.scenario_id
+    LEFT JOIN items i
+      ON i.item_id = pi.item_id
+    LEFT JOIN LATERAL (
+        SELECT unit_cost
+        FROM supplier_items
+        WHERE item_id = pi.item_id
+          AND unit_cost IS NOT NULL AND unit_cost > 0
+        ORDER BY is_preferred DESC, unit_cost ASC
+        LIMIT 1
+    ) sup ON TRUE
     LEFT JOIN LATERAL (
         SELECT safety_stock_qty
         FROM item_planning_params
@@ -270,7 +286,8 @@ shortage_rows AS (
             WHEN closing_stock < -1e-9 THEN 'stockout'
             ELSE 'below_safety_stock'
         END AS severity_class,
-        days_in_bucket
+        days_in_bucket,
+        unit_cost
     FROM pi_with_ss
     WHERE closing_stock < -1e-9
        OR (
@@ -287,7 +304,7 @@ INSERT INTO shortages (
 )
 SELECT
     shortage_id, scenario_id, pi_node_id, item_id, location_id,
-    shortage_date, shortage_qty, shortage_qty * days_in_bucket * 1::numeric,
+    shortage_date, shortage_qty, shortage_qty * days_in_bucket * unit_cost,
     NULL::uuid, %(calc_run_id)s, 'active', severity_class,
     now(), now()
 FROM shortage_rows
