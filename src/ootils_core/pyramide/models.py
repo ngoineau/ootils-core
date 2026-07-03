@@ -69,6 +69,14 @@ class PyramideValue:
     forecast_date: date
     quantity: Decimal
     method: str
+    # Bornes conformal du bucket, persistées dans
+    # forecast_values.confidence_interval_lower/upper (migration 026).
+    # None = pas de calibration honnête disponible (pas de backtest
+    # déterministe pour les valeurs servies, ou trop peu de résidus pour
+    # la garantie finite-sample) → colonnes NULL, jamais des bornes
+    # inventées. Voir engines.conformal_bounds.
+    confidence_lower: Decimal | None = None
+    confidence_upper: Decimal | None = None
 
 
 @dataclass(frozen=True)

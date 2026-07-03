@@ -404,13 +404,21 @@ def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePe
     )
 
     for value in result.values:
+        # confidence_interval_lower/upper (migration 026) : bornes conformal
+        # calibrées sur les résidus de backtest du modèle servi
+        # (engines.conformal_bounds). NULL quand aucune calibration honnête
+        # n'existe — la provenance vit dans result.warnings.
         db.execute(
             """
             INSERT INTO forecast_values (
-                value_id, forecast_id, forecast_date, quantity, method
-            ) VALUES (%s, %s, %s, %s, %s)
+                value_id, forecast_id, forecast_date, quantity, method,
+                confidence_interval_lower, confidence_interval_upper
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (uuid4(), forecast_id, value.forecast_date, value.quantity, value.method),
+            (
+                uuid4(), forecast_id, value.forecast_date, value.quantity,
+                value.method, value.confidence_lower, value.confidence_upper,
+            ),
         )
 
     db.execute(
@@ -492,12 +500,21 @@ def persist_series_run(
     hierarchy_id: str | None = None,
     level: str | None = None,
     node_code: str | None = None,
+    lowers: Sequence[Decimal | None] | None = None,
+    uppers: Sequence[Decimal | None] | None = None,
 ) -> PyramidePersistedRun:
     """
     Persist ONE series of a hierarchical run (migration 053): either a
     LEAF (item_id + location_id) or an AGGREGATE (hierarchy_id + level +
     node_code) — never both (mirrors the DB CHECK, validated here first
     so the error is readable).
+
+    ``lowers`` / ``uppers`` are per-bucket conformal bounds
+    (confidence_interval_lower/upper, migration 026), aligned with
+    ``quantities``; omitted or None → NULL columns. NON-OBJECTIF V1 pour
+    les AGRÉGATS réconciliés : la réconciliation d'intervalles
+    hiérarchiques est frontier (spec Pyramide §2.D) — les appelants
+    laissent NULL pour les nœuds et ne remplissent que les feuilles.
 
     Writes forecasts + forecast_values + pyramide_runs for every series;
     pyramide_snapshots ONLY for leaves. Rationale: snapshots exist to
@@ -525,6 +542,14 @@ def persist_series_run(
         raise ValueError(
             f"{len(bucket_dates)} bucket dates but {len(quantities)} quantities"
         )
+    if lowers is not None and len(lowers) != len(quantities):
+        raise ValueError(
+            f"{len(lowers)} lower bounds but {len(quantities)} quantities"
+        )
+    if uppers is not None and len(uppers) != len(quantities):
+        raise ValueError(
+            f"{len(uppers)} upper bounds but {len(quantities)} quantities"
+        )
 
     run_id = uuid4()
     forecast_id = uuid4()
@@ -541,15 +566,20 @@ def persist_series_run(
         ),
     )
     total_quantity = Decimal("0")
-    for bucket_date, quantity in zip(bucket_dates, quantities):
+    for index, (bucket_date, quantity) in enumerate(zip(bucket_dates, quantities)):
         total_quantity += quantity
         db.execute(
             """
             INSERT INTO forecast_values (
-                value_id, forecast_id, forecast_date, quantity, method
-            ) VALUES (%s, %s, %s, %s, %s)
+                value_id, forecast_id, forecast_date, quantity, method,
+                confidence_interval_lower, confidence_interval_upper
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (uuid4(), forecast_id, bucket_date, quantity, value_method),
+            (
+                uuid4(), forecast_id, bucket_date, quantity, value_method,
+                lowers[index] if lowers is not None else None,
+                uppers[index] if uppers is not None else None,
+            ),
         )
     db.execute(
         """
