@@ -452,25 +452,37 @@ def _bench_block(
     # Base forecasts at the reconciliation level, on TRAIN data only.
     base_curves: dict[str, tuple[Decimal, ...]] = {}
     node_insample: dict[str, list[Decimal]] = {}
+    zero_curve = tuple(_ZERO for _ in range(horizon))
     for i, ref in recon_refs:
         if not block.rows[i]:
             continue  # node without leaves: nothing to forecast or score
         series = _sparse_sum(train, [block.leaves[j] for j in block.rows[i]])
         if not series:
-            return [], [
+            # A reconciliation node with no demand in the training window is
+            # a legitimate quiet subtree, not a reason to drop the whole
+            # block (that would lose every sibling group). Forecast zero —
+            # reconcile() handles an all-zero node (PR3 "quiet branch") — and
+            # carry on. Only THIS node/subtree scores zero-vs-actuals.
+            warnings.append(
                 f"block '{block.block_code}': node '{ref.key}' has no "
-                f"training history before {cutoff.isoformat()} — skipped"
-            ]
+                f"training history before {cutoff.isoformat()} — "
+                "forecasting zero for its subtree"
+            )
+            node_insample[ref.key] = [_ZERO]
+            base_curves[ref.key] = zero_curve
+            continue
         node_insample[ref.key] = series
         try:
             base_curves[ref.key] = _clamped_forecast(
                 engine, series, horizon, cutoff
             )
         except PyramideEngineError as exc:
-            return [], [
+            warnings.append(
                 f"block '{block.block_code}': base forecast failed for node "
-                f"'{ref.key}': {exc} — skipped"
-            ]
+                f"'{ref.key}': {exc} — forecasting zero for its subtree"
+            )
+            node_insample[ref.key] = [_ZERO]
+            base_curves[ref.key] = zero_curve
 
     mint_inputs: MintInputs | None = None
     if RECON_MINT_SHRINK in methods:
