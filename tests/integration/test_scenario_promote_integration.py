@@ -218,6 +218,14 @@ class _Fixture:
                 "DELETE FROM events WHERE event_type = 'scenario_merge' AND old_text = ANY(%s)",
                 (scenario_ids,),
             )
+            # Real apply_override calls (test_re_override_...) emit
+            # policy_changed events whose trigger_node_id references our
+            # nodes — purge them before the nodes or the FK blocks teardown.
+            conn.execute(
+                "DELETE FROM events WHERE trigger_node_id IN "
+                "(SELECT node_id FROM nodes WHERE item_id = %s)",
+                (self.item_id,),
+            )
             conn.execute(
                 "DELETE FROM calc_runs WHERE scenario_id = ANY(%s::uuid[]) OR scenario_id = %s",
                 (scenario_ids, BASELINE),

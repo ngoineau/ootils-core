@@ -19,7 +19,9 @@
 
 CREATE TABLE IF NOT EXISTS scenario_promotions (
     promotion_id         UUID        NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    scenario_id          UUID        NOT NULL REFERENCES scenarios(scenario_id),
+    -- ON DELETE RESTRICT: ADR-011 — every FK onto scenarios must block
+    -- hard-deletes (guarded by test_scenario_fk_retention.py).
+    scenario_id          UUID        NOT NULL REFERENCES scenarios(scenario_id) ON DELETE RESTRICT,
     promoted_by          TEXT        NOT NULL,           -- human actor (L3+ gate)
     promoted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     reason               TEXT,                           -- optional justification
