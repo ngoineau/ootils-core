@@ -15,6 +15,7 @@ from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
 
 from .accuracy import AccuracyReport
 from .models import PyramideRunResult
+from .routing import RoutingDecision
 
 logger = logging.getLogger(__name__)
 
@@ -773,11 +774,18 @@ def persist_run(
     result: PyramideRunResult,
     *,
     stale_demand: bool = False,
+    routing: RoutingDecision | None = None,
 ) -> PyramidePersistedRun:
     """``stale_demand`` (ADR-023, migration 056): the caller measured the
     demand_history freshness at run time and it PROVABLY exceeded the SLA.
     Default False = not proven stale (also the value for write paths that
-    do not measure freshness yet — never a claim of freshness)."""
+    do not measure freshness yet — never a claim of freshness).
+
+    ``routing`` (migration 058, PR-B1, opt-in): the head/tail router's
+    decision for this series when the caller routed it — persisted as the
+    routed_method/routed_level/routing_reason provenance columns. None
+    (the default and the historical behaviour) = the method was requested
+    explicitly, columns stay NULL."""
     run_id = uuid4()
     snapshot_id = uuid4()
     forecast_id = uuid4()
@@ -827,8 +835,9 @@ def persist_run(
             horizon_start, horizon_end, granularity, method,
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count, status,
-            deterministic_artifact, stale_demand
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values', %s)
+            deterministic_artifact, stale_demand,
+            routed_method, routed_level, routing_reason
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values', %s, %s, %s, %s)
         """,
         (
             run_id,
@@ -848,6 +857,9 @@ def persist_run(
             result.engine_backend,
             result.source_history_count,
             stale_demand,
+            routing.method if routing is not None else None,
+            routing.level if routing is not None else None,
+            routing.reason if routing is not None else None,
         ),
     )
 
@@ -909,6 +921,7 @@ def persist_series_run(
     uppers: Sequence[Decimal | None] | None = None,
     accuracy_report: AccuracyReport | None = None,
     accuracy_bias_scale: Decimal = _ONE,
+    routing: RoutingDecision | None = None,
 ) -> PyramidePersistedRun:
     """
     Persist ONE series of a hierarchical run (migration 053): either a
@@ -942,6 +955,10 @@ def persist_series_run(
 
     ``recon_method`` must be the method EFFECTIVELY applied (the
     reconciler reports it) — this is what makes the column real.
+
+    ``routing`` (migration 058, PR-B1, opt-in): the head/tail router's
+    decision for THIS series — persisted as routed_method / routed_level /
+    routing_reason. None (default) = not routed, columns stay NULL.
     """
     is_leaf = item_id is not None and location_id is not None
     is_aggregate = (
@@ -1005,9 +1022,11 @@ def persist_series_run(
             horizon_start, horizon_end, granularity, method,
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count, status,
-            deterministic_artifact
+            deterministic_artifact,
+            routed_method, routed_level, routing_reason
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                  %s, %s, %s, %s, %s, 'generated', 'forecast_values')
+                  %s, %s, %s, %s, %s, 'generated', 'forecast_values',
+                  %s, %s, %s)
         """,
         (
             run_id, forecast_id, item_id, location_id,
@@ -1015,6 +1034,9 @@ def persist_series_run(
             horizon_start, horizon_end, granularity, method,
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count,
+            routing.method if routing is not None else None,
+            routing.level if routing is not None else None,
+            routing.reason if routing is not None else None,
         ),
     )
 

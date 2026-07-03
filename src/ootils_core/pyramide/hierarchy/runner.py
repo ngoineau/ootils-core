@@ -57,6 +57,7 @@ from ..repository import (
     get_historical_demand_totals_by_items,
     persist_series_run,
 )
+from ..routing import RoutingDecision
 from ..runner import PyramideError, bucket_dates
 from .reconcile import (
     MINT_MIN_INSAMPLE,
@@ -83,6 +84,14 @@ class HierarchicalRunConfig:
     ``recon_level`` defaults to the block level itself (one base forecast
     at the block root, disaggregated to the leaves); pass a deeper level
     for a classic middle-out at an intermediate level.
+
+    ``routing_decisions`` (PR-B1, opt-in provenance): the head/tail
+    router's decision per series, keyed by the series key (item UUID
+    string for leaves, hierarchy_node code for aggregates). Each matched
+    series persists its decision as routed_method / routed_level /
+    routing_reason (migration 058). In B1 this is PROVENANCE ONLY — it
+    does not change which engine runs (full routed execution is B2);
+    empty (default) = nothing persisted, historical behaviour unchanged.
     """
     hierarchy_id: str
     block_code: str
@@ -100,10 +109,16 @@ class HierarchicalRunConfig:
     lookback_days: int = 365
     random_seed: int = 0
     code_version: str = "local"
+    routing_decisions: Mapping[str, RoutingDecision] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "method_params", MappingProxyType(dict(self.method_params or {}))
+        )
+        object.__setattr__(
+            self,
+            "routing_decisions",
+            MappingProxyType(dict(self.routing_decisions or {})),
         )
 
     @property
@@ -463,6 +478,10 @@ class HierarchicalRunner:
                     accuracy_report=(
                         computation.accuracy_report if computation else None
                     ),
+                    # PR-B1 provenance only (migration 058): the caller's
+                    # routing decision for this node, if any — does not
+                    # change which engine ran (routed execution is B2).
+                    routing=config.routing_decisions.get(ref.key),
                 )
             else:
                 recon_node = parent_of.get(ref.key)
@@ -530,6 +549,9 @@ class HierarchicalRunner:
                     accuracy_bias_scale=(
                         share if share is not None else Decimal("1")
                     ),
+                    # PR-B1 provenance only (migration 058), keyed by the
+                    # leaf's item UUID string — see routing_decisions doc.
+                    routing=config.routing_decisions.get(ref.key),
                 )
             persisted.append(_persisted_series(ref, record))
         if leaves_without_bounds:
