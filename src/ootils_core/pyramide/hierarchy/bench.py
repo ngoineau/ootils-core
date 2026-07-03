@@ -8,14 +8,34 @@ reconciliation method against the demand that actually booked afterwards.
 
 Temporal split — EXPLICIT, never CURRENT_DATE
 ---------------------------------------------
-``cutoff = today - holdout_days``. TRAIN is ``demand_history`` STRICTLY
-before the cutoff (bounded by ``lookback_days``); EVAL is
-``[cutoff, cutoff + horizon)``. The SQL here composes the shared
+``cutoff = bucket_start(today) - holdout buckets``. TRAIN is
+``demand_history`` STRICTLY before the cutoff (bounded by ``lookback``
+buckets); EVAL is ``[cutoff, cutoff + horizon buckets)``. The SQL here
+composes the shared
 ``_DEMAND_HISTORY_STREAM_PREDICATES`` of ``pyramide/repository.py`` (the
 pure business rules: stream='regular', inter-entity excluded, booked_date
 present) with an explicit parameterized window — reusing the runtime
 readers' CURRENT_DATE-bounded predicates would leak holdout days into
 training, which is exactly the bug this split exists to prevent.
+
+Grain — the bucket the bench scores in
+--------------------------------------
+``grain`` picks the evaluation bucket: ``'day'`` (default, the historical
+behaviour, windows in days), ``'week'`` (ISO weeks, Monday start) or
+``'month'`` (calendar months). With a non-day grain, ``horizon`` /
+``holdout_days`` / ``lookback_days`` are interpreted IN BUCKETS of that
+grain. Only ONE daily SQL read happens per split regardless of grain —
+bucketing is a pure in-memory aggregation (bucket key = the bucket's
+start date), and the base forecasts run at the grain's granularity so
+the engine's default season length matches (day→7, week→52, month→12 —
+an annual season is 12 monthly buckets, not 7 daily ones).
+
+Calendar alignment — evaluation buckets are COMPLETE, always: ``today``
+is snapped to the START of its bucket (month → 1st of the month, week →
+ISO Monday), which EXCLUDES the partial bucket containing ``today``.
+Example: data up to 26 May, ``grain='month'``, ``holdout_days=1``,
+``horizon=1`` → today snaps to 1 May (May is partial, excluded), cutoff
+= 1 April, and the last (only) evaluated month is April — complete.
 
 What is compared
 ----------------
@@ -78,6 +98,9 @@ from .summing import AGGREGATE, LEAF, SummingBlock, load_summing_blocks
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "GRAIN_DAY",
+    "GRAIN_MONTH",
+    "GRAIN_WEEK",
     "LEVEL_LEAF",
     "LEVEL_ROOT",
     "METHOD_BASE",
@@ -93,6 +116,18 @@ __all__ = [
 _ZERO = Decimal("0")
 
 METHOD_BASE = "base"
+
+GRAIN_DAY = "day"
+GRAIN_WEEK = "week"
+GRAIN_MONTH = "month"
+# Bench grain -> forecast-engine granularity. The engine derives its
+# default season_length from the granularity (daily→7, weekly→52,
+# monthly→12) — single source of seasonal truth, nothing duplicated here.
+_ENGINE_GRANULARITY = {
+    GRAIN_DAY: "daily",
+    GRAIN_WEEK: "weekly",
+    GRAIN_MONTH: "monthly",
+}
 
 LEVEL_LEAF = "leaf"
 LEVEL_ROOT = "root"
@@ -139,6 +174,8 @@ class BenchReport:
     lookback_days: int
     rows: tuple[BenchRow, ...]
     warnings: tuple[str, ...] = ()
+    # Evaluation bucket; horizon/holdout_days/lookback_days count THESE.
+    grain: str = GRAIN_DAY
 
     def verdicts(self) -> dict[str, str | None]:
         """Per block: the method with the minimal leaf-level WAPE.
@@ -187,6 +224,7 @@ def build_bench_report(
     holdout_days: int,
     lookback_days: int,
     warnings: Sequence[str] = (),
+    grain: str = GRAIN_DAY,
 ) -> BenchReport:
     """Assemble a report with deterministic row order.
 
@@ -207,6 +245,7 @@ def build_bench_report(
         lookback_days=lookback_days,
         rows=ordered,
         warnings=tuple(warnings),
+        grain=grain,
     )
 
 
@@ -286,15 +325,26 @@ def run_reconciliation_bench(
     block_codes: Sequence[str] | None = None,
     forecast_engine: PyramideForecastEngine | None = None,
     today: date | None = None,
+    grain: str = GRAIN_DAY,
 ) -> BenchReport:
     """Run the reconciliation bench on the domain's default hierarchy.
 
     For every block (optionally restricted to ``block_codes``): train
-    strictly before ``cutoff = today - holdout_days`` (lookback-bounded),
-    forecast+reconcile over ``horizon`` days from the cutoff with each
-    requested method, score against the booked actuals of
-    ``[cutoff, cutoff + horizon)`` — plus the ``'base'`` comparator (see
-    module docstring for its naive-uniform leaf floor).
+    strictly before the cutoff (lookback-bounded), forecast+reconcile
+    over ``horizon`` buckets from the cutoff with each requested method,
+    score against the booked actuals of ``[cutoff, cutoff + horizon)`` —
+    plus the ``'base'`` comparator (see module docstring for its
+    naive-uniform leaf floor).
+
+    ``grain`` (``'day'`` | ``'week'`` | ``'month'``) is the evaluation
+    bucket; ``horizon`` / ``holdout_days`` / ``lookback_days`` count
+    BUCKETS of that grain (``'day'``, the default, is the historical
+    day-windowed behaviour, unchanged). Evaluation buckets are always
+    COMPLETE: ``today`` snaps to the start of its bucket (month → the
+    1st, week → ISO Monday), excluding the partial bucket in progress,
+    and ``cutoff = bucket_start(today) - holdout_days buckets``. E.g.
+    data up to 26 May at ``grain='month'``: today snaps to 1 May, so
+    with ``holdout_days=1`` the last complete evaluated month is April.
 
     ``today`` exists for deterministic replays (defaults to the wall
     clock — a bench is an operator tool, not a core calculation).
@@ -307,8 +357,8 @@ def run_reconciliation_bench(
     Raises:
         NotImplementedError: ``strategy='two_stage'`` (gated on the geo
             hierarchy leg — validated before any DB access).
-        ValueError: unknown strategy/method, non-positive windows, or
-            ``block_codes`` naming blocks the hierarchy does not have.
+        ValueError: unknown strategy/method/grain, non-positive windows,
+            or ``block_codes`` naming blocks the hierarchy does not have.
     """
     _validate_bench_params(
         strategy=strategy,
@@ -316,9 +366,10 @@ def run_reconciliation_bench(
         holdout_days=holdout_days,
         lookback_days=lookback_days,
         methods=methods,
+        grain=grain,
     )
     engine = forecast_engine or PyramideForecastEngine()
-    cutoff = (today or date.today()) - timedelta(days=holdout_days)
+    cutoff = _bench_cutoff(today or date.today(), grain, holdout_days)
 
     blocks = load_summing_blocks(db, domain=domain, block_level=block_level)
     if block_codes is not None:
@@ -348,6 +399,7 @@ def run_reconciliation_bench(
             horizon=horizon,
             lookback_days=lookback_days,
             methods=tuple(methods),
+            grain=grain,
         )
         rows.extend(block_rows)
         warnings.extend(block_warnings)
@@ -360,6 +412,7 @@ def run_reconciliation_bench(
         holdout_days=holdout_days,
         lookback_days=lookback_days,
         warnings=warnings,
+        grain=grain,
     )
 
 
@@ -370,8 +423,14 @@ def _validate_bench_params(
     holdout_days: int,
     lookback_days: int,
     methods: Sequence[str],
+    grain: str = GRAIN_DAY,
 ) -> None:
     """Parameter gate — runs BEFORE any DB access (testable without one)."""
+    if grain not in _ENGINE_GRANULARITY:
+        raise ValueError(
+            f"unknown grain '{grain}' "
+            f"(supported: {sorted(_ENGINE_GRANULARITY)})"
+        )
     if strategy == STRATEGY_TWO_STAGE:
         raise NotImplementedError("two_stage: gated on the geo hierarchy")
     if strategy != STRATEGY_EXACT:
@@ -415,9 +474,16 @@ def _bench_block(
     horizon: int,
     lookback_days: int,
     methods: tuple[str, ...],
+    grain: str = GRAIN_DAY,
 ) -> tuple[list[BenchRow], list[str]]:
-    """Score one block: train before cutoff, evaluate on the holdout."""
+    """Score one block: train before cutoff, evaluate on the holdout.
+
+    ``cutoff`` is a bucket start (snapped by the caller); windows count
+    ``grain`` buckets. History is read DAILY (one query per split, grain
+    or not) then bucketed in memory — see ``_bucket_daily``.
+    """
     warnings: list[str] = []
+    granularity = _ENGINE_GRANULARITY[grain]
     recon_refs = [
         (i, ref)
         for i, ref in enumerate(block.series)
@@ -429,20 +495,29 @@ def _bench_block(
             f"'{recon_level}' — skipped"
         ]
 
-    train = _load_daily_by_item(
-        db,
-        block.leaves,
-        start=cutoff - timedelta(days=lookback_days),
-        stop=cutoff,
+    train = _bucket_daily(
+        _load_daily_by_item(
+            db,
+            block.leaves,
+            start=_shift_buckets(cutoff, -lookback_days, grain),
+            stop=cutoff,
+        ),
+        grain,
     )
-    holdout = _load_daily_by_item(
-        db, block.leaves, start=cutoff, stop=cutoff + timedelta(days=horizon)
+    holdout = _bucket_daily(
+        _load_daily_by_item(
+            db,
+            block.leaves,
+            start=cutoff,
+            stop=_shift_buckets(cutoff, horizon, grain),
+        ),
+        grain,
     )
     leaf_totals = {
         key: sum(by_date.values(), _ZERO) for key, by_date in train.items()
     }
     leaf_actuals = [
-        _dense_curve(holdout.get(leaf, {}), cutoff, horizon)
+        _dense_curve(holdout.get(leaf, {}), cutoff, horizon, grain)
         for leaf in block.leaves
     ]
     leaf_insamples = [
@@ -474,20 +549,23 @@ def _bench_block(
         node_insample[ref.key] = series
         try:
             base_curves[ref.key] = _clamped_forecast(
-                engine, series, horizon, cutoff
+                engine, series, horizon, cutoff, granularity
             )
         except PyramideEngineError as exc:
             warnings.append(
                 f"block '{block.block_code}': base forecast failed for node "
                 f"'{ref.key}': {exc} — forecasting zero for its subtree"
             )
-            node_insample[ref.key] = [_ZERO]
+            # Keep the REAL insample (set above): the node HAS history, only
+            # its forecast failed — wiping it would corrupt MASE scaling and
+            # the MinT inputs for this node (review PR grain).
             base_curves[ref.key] = zero_curve
 
     mint_inputs: MintInputs | None = None
     if RECON_MINT_SHRINK in methods:
         mint_inputs, mint_warnings = _bench_mint_inputs(
-            block, base_curves, train, node_insample, engine, cutoff, horizon
+            block, base_curves, train, node_insample, engine, cutoff,
+            horizon, granularity,
         )
         warnings.extend(
             f"block '{block.block_code}': {w}" for w in mint_warnings
@@ -600,6 +678,7 @@ def _bench_mint_inputs(
     engine: PyramideForecastEngine,
     cutoff: date,
     horizon: int,
+    granularity: str = "daily",
 ) -> tuple[MintInputs | None, list[str]]:
     """In-memory MinT inputs from the TRAIN split (no extra DB reads).
 
@@ -641,7 +720,9 @@ def _bench_mint_inputs(
             curve: Sequence[Decimal] = base_curves[ref.key]
         else:
             try:
-                curve = _clamped_forecast(engine, series, horizon, cutoff)
+                curve = _clamped_forecast(
+                    engine, series, horizon, cutoff, granularity
+                )
             except PyramideEngineError as exc:
                 return None, [
                     f"{RECON_MINT_SHRINK} skipped: base forecast failed "
@@ -711,8 +792,57 @@ def _load_daily_by_item(
     return out
 
 
+def _bucket_start(day: date, grain: str) -> date:
+    """Start of the ``grain`` bucket containing ``day`` (day: identity;
+    week: ISO Monday; month: the 1st)."""
+    if grain == GRAIN_DAY:
+        return day
+    if grain == GRAIN_WEEK:
+        return day - timedelta(days=day.weekday())
+    if grain == GRAIN_MONTH:
+        return day.replace(day=1)
+    raise ValueError(f"unknown grain '{grain}'")
+
+
+def _shift_buckets(bucket: date, n: int, grain: str) -> date:
+    """``bucket`` (a bucket start) shifted by ``n`` buckets (n may be < 0)."""
+    if grain == GRAIN_DAY:
+        return bucket + timedelta(days=n)
+    if grain == GRAIN_WEEK:
+        return bucket + timedelta(weeks=n)
+    if grain == GRAIN_MONTH:
+        months = bucket.year * 12 + (bucket.month - 1) + n
+        return date(months // 12, months % 12 + 1, 1)
+    raise ValueError(f"unknown grain '{grain}'")
+
+
+def _bench_cutoff(today: date, grain: str, holdout: int) -> date:
+    """Snap ``today`` to its bucket start (the partial in-progress bucket
+    is thereby EXCLUDED from evaluation) and back off ``holdout`` buckets.
+    Pure — golden-testable without a database."""
+    return _shift_buckets(_bucket_start(today, grain), -holdout, grain)
+
+
+def _bucket_daily(
+    daily: dict[str, dict[date, Decimal]], grain: str
+) -> dict[str, dict[date, Decimal]]:
+    """Aggregate per-item DAILY sums into per-item GRAIN-bucket sums
+    (bucket key = the bucket's start date). Pure in-memory fold over the
+    single daily read — no second SQL query, whatever the grain.
+    ``'day'`` is the identity: byte-identical to the historical path."""
+    if grain == GRAIN_DAY:
+        return daily
+    out: dict[str, dict[date, Decimal]] = {}
+    for item, by_date in daily.items():
+        buckets = out.setdefault(item, {})
+        for day, qty in by_date.items():
+            key = _bucket_start(day, grain)
+            buckets[key] = buckets.get(key, _ZERO) + qty
+    return out
+
+
 def _sparse_series(by_date: Mapping[date, Decimal]) -> list[Decimal]:
-    """Sparse daily series, date ASC — the engines' history contract."""
+    """Sparse per-bucket series, date ASC — the engines' history contract."""
     return [by_date[d] for d in sorted(by_date)]
 
 
@@ -728,13 +858,18 @@ def _sparse_sum(
 
 
 def _dense_curve(
-    by_date: Mapping[date, Decimal], start: date, horizon: int
+    by_date: Mapping[date, Decimal],
+    start: date,
+    horizon: int,
+    grain: str = GRAIN_DAY,
 ) -> tuple[Decimal, ...]:
-    """DENSE daily actuals over the eval window: a day without booking IS
-    zero demand (unlike the sparse training contract — the forecast made
-    a claim for every day of the horizon, so every day is scored)."""
+    """DENSE actuals over the eval window, one value PER BUCKET: a bucket
+    without booking IS zero demand (unlike the sparse training contract —
+    the forecast made a claim for every bucket of the horizon, so every
+    bucket is scored). ``start`` and the mapping keys are bucket starts."""
     return tuple(
-        by_date.get(start + timedelta(days=t), _ZERO) for t in range(horizon)
+        by_date.get(_shift_buckets(start, t, grain), _ZERO)
+        for t in range(horizon)
     )
 
 
@@ -751,15 +886,20 @@ def _clamped_forecast(
     history: Sequence[Decimal],
     horizon: int,
     cutoff: date,
+    granularity: str = "daily",
 ) -> tuple[Decimal, ...]:
-    """Base forecast on the TRAIN slice, clamped at 0 (same as runners)."""
+    """Base forecast on the TRAIN slice, clamped at 0 (same as runners).
+
+    ``granularity`` is the engine granularity of the bench grain: the
+    engine derives its default season_length from it (daily→7, weekly→52,
+    monthly→12) — an annual season lands on 12 monthly buckets."""
     computation = engine.forecast(
         history=list(history),
         periods=horizon,
         method=METHOD_AUTO_SELECT,
         method_params={},
         model_strategy="stat",
-        granularity="daily",
+        granularity=granularity,
         horizon_start=cutoff,
         random_seed=0,
     )

@@ -5,21 +5,31 @@ Pure unit tests of the reconciliation-bench report layer
 Covers: BenchRow scoring via the accuracy module (hand-calculated golden,
 two methods, expected verdict), deterministic report ordering, None-safe
 verdicts (undefined WAPE never wins; all-None block -> None verdict),
-tie-breaking, and the strategy gate ('two_stage' raises
-NotImplementedError BEFORE any DB access — provable with db=None).
+tie-breaking, the strategy gate ('two_stage' raises
+NotImplementedError BEFORE any DB access — provable with db=None), and
+the grain layer (golden bucketing of a known daily series, today-snapping
+to complete buckets, unknown grain -> ValueError, day == historical
+behaviour).
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from ootils_core.pyramide.hierarchy.bench import (
+    GRAIN_DAY,
+    GRAIN_MONTH,
+    GRAIN_WEEK,
     LEVEL_LEAF,
     LEVEL_ROOT,
     METHOD_BASE,
     BenchRow,
+    _bench_cutoff,
+    _bucket_daily,
+    _dense_curve,
+    _shift_buckets,
     build_bench_report,
     compute_bench_row,
     run_reconciliation_bench,
@@ -258,8 +268,97 @@ def test_two_stage_raises_not_implemented_without_db():
         {"methods": ("middleout", "definitely-not-a-method")},
         # 'base' is the implicit comparator, not a requestable method.
         {"methods": (METHOD_BASE,)},
+        # unknown grain — rejected before any DB access.
+        {"grain": "quarter"},
+        {"grain": "daily"},  # engine vocabulary, not a bench grain
     ],
 )
 def test_invalid_params_raise_before_db_access(kwargs):
     with pytest.raises(ValueError):
         run_reconciliation_bench(None, domain="d", **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Grain: bucketing goldens, today-snapping, day == historical behaviour
+# ---------------------------------------------------------------------------
+
+# 2026 calendar facts used below: 2026-01-26, 2026-02-09, 2026-03-02 and
+# 2026-05-25 are Mondays; 2026-05-26 is a Tuesday.
+_DAILY = {
+    "A": {
+        date(2026, 1, 30): Decimal(3),   # Fri, week of Mon 2026-01-26
+        date(2026, 1, 31): Decimal(4),   # Sat, same week
+        date(2026, 2, 1): Decimal(5),    # Sun, SAME week — but February
+        date(2026, 2, 14): Decimal(2),   # Sat, week of Mon 2026-02-09
+        date(2026, 3, 2): Decimal(7),    # Mon, its own week start
+    }
+}
+
+
+def test_golden_monthly_bucketing_hand_calculated():
+    assert _bucket_daily(_DAILY, GRAIN_MONTH) == {
+        "A": {
+            date(2026, 1, 1): Decimal(7),   # 3 + 4
+            date(2026, 2, 1): Decimal(7),   # 5 + 2
+            date(2026, 3, 1): Decimal(7),
+        }
+    }
+
+
+def test_golden_weekly_bucketing_iso_monday_keys():
+    # Feb 1 (Sunday) belongs to the week STARTING Mon Jan 26 — the ISO
+    # week wins over the month boundary at grain='week'.
+    assert _bucket_daily(_DAILY, GRAIN_WEEK) == {
+        "A": {
+            date(2026, 1, 26): Decimal(12),  # 3 + 4 + 5
+            date(2026, 2, 9): Decimal(2),
+            date(2026, 3, 2): Decimal(7),
+        }
+    }
+
+
+def test_today_snapping_month_mid_month_excludes_partial_month():
+    # Data up to 26 May: May is partial -> excluded. holdout=1 -> the
+    # last complete evaluated month is April (docstring example).
+    assert _bench_cutoff(date(2026, 5, 26), GRAIN_MONTH, 1) == date(2026, 4, 1)
+    assert _bench_cutoff(date(2026, 5, 26), GRAIN_MONTH, 2) == date(2026, 3, 1)
+    # Year boundary in month arithmetic.
+    assert _bench_cutoff(date(2026, 1, 15), GRAIN_MONTH, 12) == date(2025, 1, 1)
+    assert _shift_buckets(date(2026, 1, 1), -1, GRAIN_MONTH) == date(2025, 12, 1)
+    assert _shift_buckets(date(2025, 12, 1), 1, GRAIN_MONTH) == date(2026, 1, 1)
+
+
+def test_today_snapping_week_mid_week_excludes_partial_week():
+    # Tue 2026-05-26 snaps to Mon 2026-05-25 (partial week excluded).
+    assert _bench_cutoff(date(2026, 5, 26), GRAIN_WEEK, 4) == date(2026, 4, 27)
+    # A Monday is already a bucket start — snapping is a no-op.
+    assert _bench_cutoff(date(2026, 5, 25), GRAIN_WEEK, 4) == date(2026, 4, 27)
+
+
+def test_dense_curve_fills_empty_buckets_with_zero():
+    monthly = {date(2026, 4, 1): Decimal(7)}
+    assert _dense_curve(monthly, date(2026, 2, 1), 3, GRAIN_MONTH) == (
+        Decimal(0), Decimal(0), Decimal(7),
+    )
+
+
+def test_grain_day_is_the_historical_behaviour():
+    # Bucketing is the identity (the very same object — zero rewrite).
+    assert _bucket_daily(_DAILY, GRAIN_DAY) is _DAILY
+    # cutoff = today - holdout days, exactly the historical formula.
+    today = date(2026, 5, 26)
+    assert _bench_cutoff(today, GRAIN_DAY, 28) == today - timedelta(days=28)
+    # Bucket stepping is day stepping.
+    assert _shift_buckets(today, -3, GRAIN_DAY) == today - timedelta(days=3)
+    # Dense eval curve: default grain == explicit day == daily stepping.
+    by_date = {today: Decimal(1), today + timedelta(days=2): Decimal(5)}
+    expected = (Decimal(1), Decimal(0), Decimal(5))
+    assert _dense_curve(by_date, today, 3) == expected
+    assert _dense_curve(by_date, today, 3, GRAIN_DAY) == expected
+    # Reports built without a grain carry the day default.
+    assert _report([_row()]).grain == GRAIN_DAY
+
+
+def test_report_carries_grain():
+    report = _report([_row()], grain=GRAIN_MONTH)
+    assert report.grain == GRAIN_MONTH
