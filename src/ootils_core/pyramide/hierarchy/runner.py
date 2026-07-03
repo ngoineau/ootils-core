@@ -33,7 +33,7 @@ scenario-invariant by design (actuals do not fork).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from types import MappingProxyType
@@ -42,7 +42,13 @@ from uuid import UUID
 
 import psycopg
 
-from ..engines import ForecastComputation, PyramideEngineError, PyramideForecastEngine
+from ..engines import (
+    ForecastComputation,
+    PyramideEngineError,
+    PyramideForecastEngine,
+    conformal_bounds,
+    resolve_conformal_alpha,
+)
 from ..models import METHOD_AUTO_SELECT, SUPPORTED_GRANULARITIES, SUPPORTED_METHODS
 from ..repository import (
     PyramidePersistedRun,
@@ -144,6 +150,12 @@ class HierarchicalRunner:
         self, db: psycopg.Connection, config: HierarchicalRunConfig
     ) -> HierarchicalRunResult:
         method = self._validate_config(config)
+        # Fail loudly BEFORE any forecast/persist work: an invalid
+        # conformal_alpha is a configuration error of the published bounds.
+        try:
+            resolve_conformal_alpha(config.method_params)
+        except PyramideEngineError as exc:
+            raise PyramideError(str(exc)) from exc
         block = self._load_block(db, config)
         recon_level = config.recon_level or block.block_level
         dates = bucket_dates(
@@ -210,10 +222,11 @@ class HierarchicalRunner:
             raise PyramideError(str(exc)) from exc
         warnings.extend(recon.warnings)
 
-        persisted = self._persist(
+        persisted, persist_warnings = self._persist(
             db, block, recon, recon_refs, base_computations,
             node_histories, config, method, dates,
         )
+        warnings.extend(persist_warnings)
         return HierarchicalRunResult(
             hierarchy_id=config.hierarchy_id,
             block_code=block.block_code,
@@ -290,12 +303,11 @@ class HierarchicalRunner:
         except PyramideEngineError as exc:
             raise PyramideError(str(exc)) from exc
         # Same clamp as the leaf runner: demand forecasts are >= 0.
-        return ForecastComputation(
+        # replace() keeps accuracy_report: the backtest residuals of the
+        # node's selected model feed the leaves' conformal bounds.
+        return replace(
+            computation,
             values=tuple(max(value, _ZERO) for value in computation.values),
-            selected_model=computation.selected_model,
-            value_method=computation.value_method,
-            engine_backend=computation.engine_backend,
-            warnings=computation.warnings,
         )
 
     def _build_mint_inputs(
@@ -389,14 +401,23 @@ class HierarchicalRunner:
         config: HierarchicalRunConfig,
         method: str,
         dates: Sequence[date],
-    ) -> list[HierarchicalPersistedSeries]:
+    ) -> tuple[list[HierarchicalPersistedSeries], list[str]]:
         parent_of: dict[str, str] = {}
         for i, ref in recon_refs:
             for j in block.rows[i]:
                 parent_of[block.leaves[j]] = ref.key
 
+        # Part de désagrégation par feuille (middle-out) : le facteur
+        # d'échelle des offsets conformal du nœud vers la feuille
+        # (feuille = part × nœud, donc résidu feuille implicite =
+        # part × résidu nœud). Vide sur le chemin MinT (pas de parts
+        # explicites) → bornes NULL pour les feuilles, documenté.
+        share_of = {ls.leaf: ls.share for ls in recon.shares}
+
         recon_backend = f"internal:reconciliation:{recon.recon_method}"
         persisted: list[HierarchicalPersistedSeries] = []
+        warnings: list[str] = []
+        leaves_without_bounds = 0
         for index, ref in enumerate(block.series):
             quantities = recon.values[index]
             if ref.kind == AGGREGATE:
@@ -412,6 +433,9 @@ class HierarchicalRunner:
                     engine_backend = recon_backend
                     value_method = method
                     history_count = 0
+                # Bornes NULL pour TOUS les agrégats : la réconciliation
+                # d'intervalles hiérarchiques (bornes cohérentes entre
+                # niveaux) est frontier — non-objectif V1 (spec §2.D).
                 record = persist_series_run(
                     db,
                     scenario_id=config.scenario_id,
@@ -444,6 +468,26 @@ class HierarchicalRunner:
                 value_method = (
                     computation.value_method if computation else method
                 )
+                # Bornes conformal de la FEUILLE : résidus de backtest du
+                # modèle du nœud de réconciliation, offsets transportés à
+                # l'échelle de la feuille par sa part de désagrégation
+                # (approximation V1 documentée dans conformal_bounds).
+                # Sans rapport de backtest (ex. base ENSEMBLE_STAT) ou sans
+                # part explicite (chemin MinT) → NULL + warning agrégé.
+                lowers: Sequence[Decimal | None] | None = None
+                uppers: Sequence[Decimal | None] | None = None
+                share = share_of.get(ref.key)
+                report = computation.accuracy_report if computation else None
+                if report is not None and share is not None:
+                    lowers, uppers, bound_warnings = conformal_bounds(
+                        report=report,
+                        values=quantities,
+                        method_params=config.method_params,
+                        scale=share,
+                    )
+                    warnings.extend(f"{ref.key}: {w}" for w in bound_warnings)
+                else:
+                    leaves_without_bounds += 1
                 record = persist_series_run(
                     db,
                     scenario_id=config.scenario_id,
@@ -463,9 +507,17 @@ class HierarchicalRunner:
                     value_method=value_method,
                     item_id=UUID(ref.key),
                     location_id=config.leaf_location_id,
+                    lowers=lowers,
+                    uppers=uppers,
                 )
             persisted.append(_persisted_series(ref, record))
-        return persisted
+        if leaves_without_bounds:
+            warnings.append(
+                f"conformal intervals: {leaves_without_bounds} leaf/leaves "
+                "persisted with NULL bounds (no base-model backtest report "
+                "or no explicit disaggregation share)"
+            )
+        return persisted, warnings
 
 
 def _series_key(ref: SeriesRef) -> str:

@@ -6,7 +6,7 @@ from decimal import Decimal
 from math import ceil
 from typing import Sequence
 
-from .engines import PyramideEngineError, PyramideForecastEngine
+from .engines import PyramideEngineError, PyramideForecastEngine, conformal_bounds
 from .models import (
     SUPPORTED_GRANULARITIES,
     SUPPORTED_METHODS,
@@ -79,6 +79,15 @@ class PyramideRunner:
                 horizon_start=config.horizon_start,
                 random_seed=config.random_seed,
             )
+            # Bornes conformal par bucket, dérivées des résidus du backtest
+            # du modèle qui a PRODUIT les valeurs (accuracy_report). Pas de
+            # rapport / trop peu de résidus → bornes None + provenance dans
+            # les warnings (jamais des bornes inventées).
+            lowers, uppers, conformal_warnings = conformal_bounds(
+                report=forecast.accuracy_report,
+                values=forecast.values[: len(bucket_dates)],
+                method_params=config.method_params,
+            )
         except PyramideEngineError as exc:
             raise PyramideError(str(exc)) from exc
 
@@ -88,6 +97,8 @@ class PyramideRunner:
                 forecast_date=bucket_date,
                 quantity=max(forecast.values[index], Decimal("0")),
                 method=forecast.value_method,
+                confidence_lower=lowers[index],
+                confidence_upper=uppers[index],
             )
             for index, bucket_date in enumerate(bucket_dates)
         )
@@ -97,7 +108,7 @@ class PyramideRunner:
             source_history_count=len(normalized_history),
             selected_model=forecast.selected_model,
             engine_backend=forecast.engine_backend,
-            warnings=forecast.warnings,
+            warnings=(*forecast.warnings, *conformal_warnings),
         )
 
     @staticmethod
