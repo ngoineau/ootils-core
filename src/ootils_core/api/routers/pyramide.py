@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
+from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS
 from ootils_core.pyramide.repository import (
     PyramideAggregateCommitError,
     commit_run,
@@ -20,9 +21,11 @@ from ootils_core.pyramide.repository import (
     fetch_run_summary,
     fetch_run_values,
     fetch_snapshot_values,
+    get_demand_freshness,
     get_historical_demand,
     list_snapshots,
     persist_run,
+    record_stale_demand_finding,
     resolve_item_uuid,
     resolve_location_uuid,
     resolve_scenario_uuid,
@@ -51,6 +54,12 @@ class PyramideRunRequest(BaseModel):
     recon_method: str = Field(default="none", pattern="^none$")
     random_seed: int = Field(default=0, ge=0)
     code_version: str = Field(default="local", min_length=1, max_length=64)
+    # Freshness SLA (ADR-023): demand_history ingested more than this many
+    # days ago is stale — the run is still produced (agents may simulate on
+    # stale data) but carries stale_demand=TRUE and a dq_findings
+    # STALE_DEMAND row. A PARAMETER (pilot default 7 days), never a
+    # hard-coded business constant.
+    freshness_sla_days: int = Field(default=DEFAULT_SLA_DAYS, ge=1, le=365)
 
     @staticmethod
     def _method_error() -> str:
@@ -111,6 +120,10 @@ class PyramideRunOut(BaseModel):
     # endpoints (not fetched); [] = run persisted without a backtest
     # report (e.g. ENSEMBLE_STAT blend, external backend).
     accuracy_metrics: list[PyramideAccuracyMetricOut] | None = None
+    # ADR-023 (migration 056): TRUE when the run was generated while the
+    # demand_history ingest age exceeded the freshness SLA. Additive,
+    # backward-compatible — agents must not auto-act (L0-L2) on TRUE.
+    stale_demand: bool = False
 
 
 class PyramideValueOut(BaseModel):
@@ -236,7 +249,39 @@ def create_pyramide_run(
     except PyramideError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    persisted = persist_run(db, result)
+    # Freshness gate (ADR-023) — measured at ITEM level: the ingest
+    # pipeline loads whole extracts, so a per-warehouse filter would
+    # misread a coverage gap as pipeline death. Only a PROVEN breach
+    # (ingest_age_days known AND > SLA) marks the run stale; an unknown
+    # freshness (e.g. degraded CustomerOrderDemand fallback with an empty
+    # demand_history) degrades the confidence score instead — a stale flag
+    # is never invented.
+    freshness = get_demand_freshness(db, item_id=item_uuid)
+    stale = (
+        freshness.ingest_age_days is not None
+        and freshness.ingest_age_days > body.freshness_sla_days
+    )
+
+    persisted = persist_run(db, result, stale_demand=stale)
+    if stale:
+        # Exactly once per run (this endpoint is the only writer and the
+        # run is created exactly once) — no spam, evidence carries run_id.
+        dq_finding_id = record_stale_demand_finding(
+            db,
+            run_id=persisted.run_id,
+            scenario_id=scenario_uuid,
+            item_id=item_uuid,
+            item_external_id=body.item_id,
+            warehouse_external_id=body.location_id,
+            freshness=freshness,
+            sla_days=body.freshness_sla_days,
+        )
+        logger.warning(
+            "pyramide.run stale demand run_id=%s item=%s ingest_age_days=%s "
+            "sla_days=%s dq_finding_id=%s",
+            persisted.run_id, body.item_id, freshness.ingest_age_days,
+            body.freshness_sla_days, dq_finding_id,
+        )
     summary = fetch_run_summary(db, persisted.run_id)
     if summary is None:
         logger.error("pyramide.run persisted but summary missing run_id=%s", persisted.run_id)
@@ -402,6 +447,7 @@ def _run_out(summary) -> PyramideRunOut:
         deterministic_artifact=summary.deterministic_artifact,
         created_at=summary.created_at,
         committed_at=summary.committed_at,
+        stale_demand=summary.stale_demand,
     )
 
 
