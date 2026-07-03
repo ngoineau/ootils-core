@@ -472,13 +472,18 @@ def get_forecast(
     """
     Retrieve a forecast by ID with all values and adjustments.
     """
-    # 1. Fetch forecast header
+    # 1. Fetch forecast header.
+    # item_id IS NOT NULL: this endpoint's contract is the LEAF
+    # (item, location) forecast — aggregate hierarchy-node rows
+    # (migration 053, nullable item/location) are out of scope here and
+    # must 404 rather than break the ForecastOut model.
     row = db.execute(
         """
         SELECT forecast_id, item_id, location_id, scenario_id,
                horizon_start, horizon_end, granularity, method, created_at
         FROM forecasts
         WHERE forecast_id = %s
+          AND item_id IS NOT NULL
         """,
         (forecast_id,),
     ).fetchone()
@@ -629,8 +634,11 @@ def list_forecasts(
             ) AS has_adjustments
         FROM forecasts f
         LEFT JOIN forecast_values fv ON fv.forecast_id = f.forecast_id
-        WHERE TRUE
+        WHERE f.item_id IS NOT NULL
     """
+    # f.item_id IS NOT NULL: leaf-forecast listing only — aggregate
+    # hierarchy-node forecasts (migration 053) have NULL item/location
+    # and would break the non-optional ForecastSummary fields.
 
     params: list = []
     conditions: list = []

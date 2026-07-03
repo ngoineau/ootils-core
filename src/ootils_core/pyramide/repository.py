@@ -25,11 +25,20 @@ class PyramidePersistedRun:
 
 @dataclass(frozen=True)
 class PyramideRunSummary:
+    """
+    Leaf runs carry (item_id, location_id); aggregate runs (migration 053)
+    carry (hierarchy_id, level, node_code) instead — the unused side is
+    None (DB CHECK: leaf XOR aggregate). Consumers must not assume
+    item_id/location_id are set.
+    """
     run_id: UUID
     snapshot_id: UUID
     forecast_id: UUID
-    item_id: UUID
-    location_id: UUID
+    item_id: UUID | None
+    location_id: UUID | None
+    hierarchy_id: str | None
+    level: str | None
+    node_code: str | None
     scenario_id: UUID
     horizon_start: date
     horizon_end: date
@@ -103,6 +112,24 @@ def resolve_scenario_uuid(scenario_id: str | None) -> UUID:
     return UUID(scenario_id)
 
 
+# Shared business predicates of the demand-history training signal.
+# Single definition consumed by BOTH readers (leaf pair and hierarchy
+# node) so the business rules can never drift apart:
+#   - stream='regular' only (warranty is a separate forecast),
+#   - inter-entity flows excluded (PPS→PCC double-count, migration 048),
+#   - strict past (today is a partial day),
+#   - bounded lookback window.
+# Uses the named placeholder %(lookback_days)s — callers pass params as a
+# dict.
+_DEMAND_HISTORY_BUSINESS_PREDICATES = """
+              dh.stream = 'regular'
+              AND (dh.fulfillment IS NULL OR dh.fulfillment <> 'inter_entity')
+              AND dh.booked_date IS NOT NULL
+              AND dh.booked_date < CURRENT_DATE
+              AND dh.booked_date >= CURRENT_DATE - (%(lookback_days)s::int * INTERVAL '1 day')
+"""
+
+
 def get_historical_demand(
     db: psycopg.Connection,
     item_id: UUID,
@@ -144,21 +171,21 @@ def get_historical_demand(
 
     if warehouse_external_id is not None:
         rows = db.execute(
-            """
+            f"""
             SELECT dh.booked_date AS demand_date,
                    COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
             FROM demand_history dh
-            WHERE dh.item_id = %s
-              AND dh.warehouse_id = %s
-              AND dh.stream = 'regular'
-              AND (dh.fulfillment IS NULL OR dh.fulfillment <> 'inter_entity')
-              AND dh.booked_date IS NOT NULL
-              AND dh.booked_date < CURRENT_DATE
-              AND dh.booked_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+            WHERE dh.item_id = %(item_id)s
+              AND dh.warehouse_id = %(warehouse_id)s
+              AND {_DEMAND_HISTORY_BUSINESS_PREDICATES}
             GROUP BY dh.booked_date
             ORDER BY dh.booked_date ASC
             """,
-            (item_id, warehouse_external_id, lookback_days),
+            {
+                "item_id": item_id,
+                "warehouse_id": warehouse_external_id,
+                "lookback_days": lookback_days,
+            },
         ).fetchall()
         if rows:
             return [Decimal(str(row["total_qty"])) for row in rows]
@@ -186,6 +213,80 @@ def get_historical_demand(
         ORDER BY 1 ASC
         """,
         (scenario_id, item_id, location_id, lookback_days),
+    ).fetchall()
+    return [Decimal(str(row["total_qty"])) for row in rows]
+
+
+def get_historical_demand_by_node(
+    db: psycopg.Connection,
+    hierarchy_id: str,
+    node_code: str,
+    lookback_days: int,
+) -> list[Decimal]:
+    """
+    Historical demand series AGGREGATED at a hierarchy node: daily booked
+    sums over every item attached (via item_hierarchy) to the node's
+    subtree, sorted date ASC. Same sparse contract as
+    ``get_historical_demand`` (days without demand are absent).
+
+    Business filters are the shared ``_DEMAND_HISTORY_BUSINESS_PREDICATES``
+    — identical to the leaf reader by construction: stream='regular' only,
+    inter-entity excluded, strict past, bounded lookback.
+
+    Scope differences vs the leaf reader, by design:
+      - ALL sites: an aggregate node's series sums demand across DCs
+        (site-level split is the reconciliation/DRP layer's job), so
+        there is no warehouse filter. Rows with NULL/unmatched
+        warehouse_id therefore DO count here.
+      - No degraded graph-node fallback: aggregate nodes have no
+        CustomerOrderDemand equivalent; an empty series is an empty
+        series.
+      - demand_history is scenario-invariant (actuals), so there is no
+        scenario parameter at all.
+
+    Fails loudly (ValueError) if the node does not exist in the
+    hierarchy — silence here would be indistinguishable from "no demand".
+    """
+    exists = db.execute(
+        "SELECT 1 AS ok FROM hierarchy_node WHERE hierarchy_id = %s AND code = %s",
+        (hierarchy_id, node_code),
+    ).fetchone()
+    if exists is None:
+        raise ValueError(
+            f"node '{node_code}' not found in hierarchy '{hierarchy_id}'"
+        )
+
+    rows = db.execute(
+        f"""
+        WITH RECURSIVE subtree AS (
+            SELECT code
+            FROM hierarchy_node
+            WHERE hierarchy_id = %(hierarchy_id)s AND code = %(node_code)s
+            UNION
+            -- UNION (not UNION ALL): hierarchy_node has no self-FK, so a
+            -- bad parent_code cycle must terminate instead of recursing
+            -- forever; dedup guarantees termination.
+            SELECT hn.code
+            FROM hierarchy_node hn
+            JOIN subtree st ON hn.parent_code = st.code
+            WHERE hn.hierarchy_id = %(hierarchy_id)s
+        )
+        SELECT dh.booked_date AS demand_date,
+               COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+        FROM demand_history dh
+        JOIN item_hierarchy ih
+          ON ih.item_id = dh.item_id
+         AND ih.hierarchy_id = %(hierarchy_id)s
+        JOIN subtree st ON st.code = ih.leaf_code
+        WHERE {_DEMAND_HISTORY_BUSINESS_PREDICATES}
+        GROUP BY dh.booked_date
+        ORDER BY dh.booked_date ASC
+        """,
+        {
+            "hierarchy_id": hierarchy_id,
+            "node_code": node_code,
+            "lookback_days": lookback_days,
+        },
     ).fetchall()
     return [Decimal(str(row["total_qty"])) for row in rows]
 
@@ -286,6 +387,7 @@ def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummar
         """
         SELECT
             pr.run_id, ps.snapshot_id, pr.forecast_id, pr.item_id, pr.location_id,
+            pr.hierarchy_id, pr.level, pr.node_code,
             pr.scenario_id, pr.horizon_start, pr.horizon_end, pr.granularity,
             pr.method, pr.model_strategy, pr.recon_method, pr.random_seed,
             pr.code_version, pr.selected_model, pr.engine_backend,
@@ -417,6 +519,9 @@ def _summary_from_row(row) -> PyramideRunSummary:
         forecast_id=row["forecast_id"],
         item_id=row["item_id"],
         location_id=row["location_id"],
+        hierarchy_id=row["hierarchy_id"],
+        level=row["level"],
+        node_code=row["node_code"],
         scenario_id=row["scenario_id"],
         horizon_start=row["horizon_start"],
         horizon_end=row["horizon_end"],
