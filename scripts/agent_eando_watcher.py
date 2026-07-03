@@ -35,7 +35,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
-from agent_governance import governed_run
+from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("eando_watcher")
@@ -103,7 +103,7 @@ def main(argv=None) -> int:
                 "partial": (AGENT_NAME, core.BASELINE, item, d.names.get(item, str(item)[:8]),
                             cls, round(e["on_hand"], 2), round(e["annual"], 2),
                             (round(cover, 4) if cover is not None else None), round(excess_units, 2), value, ccy,
-                            disposition, "L1", "DRAFT", conf, Jsonb(evidence)),
+                            disposition, decision_level(disposition), "DRAFT", conf, Jsonb(evidence)),
                 "disp": disposition, "cls": cls, "value": value, "units": excess_units,
                 "ext": d.names.get(item, str(item)[:8]), "cover": cover, "conf": conf,
                 "ccy_col": ccy})

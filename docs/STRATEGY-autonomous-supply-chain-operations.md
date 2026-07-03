@@ -168,6 +168,15 @@ The first sellable wedge should be:
 
 > Autonomous shortage control tower with scenario-backed recommendations.
 
+> **Status (2026-07, #340):** the shortage and material watchers are
+> scenario-backed: each run forks ONE `what-if-<agent>-<ts>` scenario,
+> simulates its overridable candidates there (EXPEDITE = advance an existing
+> firm receipt), stamps every recommendation's evidence with
+> `simulation_scenario_id` + the shortage delta, and archives the fork.
+> Non-overridable actions (new-order drafts) carry an explicit not-simulated
+> marker — never a fabricated delta. lot_policy / eando / dq remain
+> baseline-only until the scenario parameter overlay (#347).
+
 Why this wedge:
 
 - shortage pain is obvious to business buyers;

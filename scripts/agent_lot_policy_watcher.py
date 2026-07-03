@@ -37,7 +37,7 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
-from agent_governance import governed_run
+from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("lot_policy_watcher")
@@ -139,7 +139,7 @@ def main(argv=None) -> int:
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
                              param, cur_val, prop_val, change, rationale,
                              round(wos, 2), round(annual, 1), round(impact, 1),
-                             "L1", "DRAFT", conf, Jsonb(evidence)))
+                             decision_level(change), "DRAFT", conf, Jsonb(evidence)))
                 display.append({"ext": d.names.get(item, str(item)[:8]), "param": param, "change": change,
                                 "cur": cur_val, "prop": prop_val, "wos": wos, "annual": annual,
                                 "impact": impact, "conf": conf})
