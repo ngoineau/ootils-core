@@ -836,8 +836,8 @@ def persist_run(
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count, status,
             deterministic_artifact, stale_demand,
-            routed_method, routed_level, routing_reason
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values', %s, %s, %s, %s)
+            routed_method, routed_level, routing_reason, model_revision
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values', %s, %s, %s, %s, %s)
         """,
         (
             run_id,
@@ -860,6 +860,9 @@ def persist_run(
             routing.method if routing is not None else None,
             routing.level if routing is not None else None,
             routing.reason if routing is not None else None,
+            # Scellé des poids FM (migration 059) — NULL pour les
+            # méthodes non-FM.
+            result.model_revision,
         ),
     )
 
@@ -922,6 +925,7 @@ def persist_series_run(
     accuracy_report: AccuracyReport | None = None,
     accuracy_bias_scale: Decimal = _ONE,
     routing: RoutingDecision | None = None,
+    model_revision: str | None = None,
 ) -> PyramidePersistedRun:
     """
     Persist ONE series of a hierarchical run (migration 053): either a
@@ -959,6 +963,13 @@ def persist_series_run(
     ``routing`` (migration 058, PR-B1, opt-in): the head/tail router's
     decision for THIS series — persisted as routed_method / routed_level /
     routing_reason. None (default) = not routed, columns stay NULL.
+
+    ``model_revision`` (migration 059, PR-B2): seal of the foundation-model
+    weights that produced this series' values (HF commit SHA when the
+    backend exposes it — see foundation.LoadedPipeline). For a LEAF
+    disaggregated from an FM-forecast reconciliation node, the node's
+    revision applies (share x node curve: the same weights produced the
+    curve). None (default) = non-FM values, column stays NULL.
     """
     is_leaf = item_id is not None and location_id is not None
     is_aggregate = (
@@ -1023,10 +1034,10 @@ def persist_series_run(
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count, status,
             deterministic_artifact,
-            routed_method, routed_level, routing_reason
+            routed_method, routed_level, routing_reason, model_revision
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s, 'generated', 'forecast_values',
-                  %s, %s, %s)
+                  %s, %s, %s, %s)
         """,
         (
             run_id, forecast_id, item_id, location_id,
@@ -1037,6 +1048,7 @@ def persist_series_run(
             routing.method if routing is not None else None,
             routing.level if routing is not None else None,
             routing.reason if routing is not None else None,
+            model_revision,
         ),
     )
 
