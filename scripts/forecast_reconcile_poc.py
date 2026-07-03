@@ -1,6 +1,13 @@
 """
 forecast_reconcile_poc.py — does middle-out beat bottom-up? (Pyramide axis A).
 
+PREUVE HISTORIQUE — conservée telle quelle. La thèse validée ici a été
+promue en module produit ``src/ootils_core/pyramide/hierarchy/bench.py``
+(harnais de bench réconciliation, split train/holdout explicite anti-fuite,
+scoring wape/mase/bias via ``pyramide/accuracy.py``) + CLI
+``scripts/bench_reconciliation.py``. Utiliser ceux-là pour tout nouveau
+bench ; ce PoC reste comme trace de la décision (numpy/pandas, ad hoc).
+
 Tests the core thesis of the Pyramide forecasting design on real demand_history:
 forecasting at the clean AGGREGATE level (gen_group) and disaggregating to SKUs
 via historical share beats forecasting each noisy SKU series directly.
