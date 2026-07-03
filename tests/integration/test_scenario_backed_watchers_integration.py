@@ -107,7 +107,10 @@ def seeded_sim_db(migrated_db):
                 " lead_time_sourcing_days, lead_time_manufacturing_days, lead_time_transit_days, "
                 " safety_stock_qty, lot_size_rule, "
                 " frozen_time_fence_days, slashed_time_fence_days, forecast_consumption_strategy) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,0,%s)",
+                # frozen=0 (no frozen zone, CHECK >= 0) but slashed must be > 0
+                # (migration 021 CHECK): 1 day keeps the fences out of the
+                # way of the J+40/J+45 receipts these tests expedite.
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,1,%s)",
                 (item_id[ext], loc_id, is_make, sourcing, manufacturing, transit,
                  safety, "LOTFORLOT", "max_only"),
             )
