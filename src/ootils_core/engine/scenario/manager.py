@@ -12,6 +12,7 @@ Design principles (per EXPERT-dirty-flags-and-scenarios.md Q4.1–Q4.7):
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
@@ -38,6 +39,51 @@ _DIFF_FIELDS: tuple[str, ...] = (
 
 # Baseline sentinel UUID (matches seed in migration 002)
 _BASELINE_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+@dataclass(frozen=True)
+class PromoteConflict:
+    """One field where the baseline diverged since the override captured it.
+
+    `expected` is the baseline value at override time (scenario_overrides.
+    old_value — the scenario node was a verbatim deep-copy of the baseline
+    node, so the value read just before the first override IS the baseline
+    value at fork time). `actual` is the baseline value now. Both are the
+    TEXT serialization used by apply_override (str() of the column value).
+    """
+
+    node_id: UUID  # baseline node id
+    field_name: str
+    expected: Optional[str]
+    actual: Optional[str]
+
+
+class PromoteConflictError(Exception):
+    """
+    Raised by promote() when the baseline diverged from the value captured
+    at override time (ADR-018 P2.2.c: no more blind overlay apply).
+    Nothing has been written when this is raised.
+    """
+
+    def __init__(self, scenario_id: UUID, conflicts: list[PromoteConflict]) -> None:
+        self.scenario_id = scenario_id
+        self.conflicts = conflicts
+        super().__init__(
+            f"Promote of scenario {scenario_id} aborted: baseline diverged on "
+            f"{len(conflicts)} node field(s) since the overrides were captured"
+        )
+
+
+@dataclass(frozen=True)
+class PromoteResult:
+    """Outcome of a successful promote (consumed by the API audit row)."""
+
+    scenario_id: UUID
+    override_count: int
+    patched_nodes: int
+    siblings_invalidated: int
+    merge_event_id: UUID
+    conflict_checked: bool = True
 
 
 class ScenarioManager:
@@ -401,7 +447,12 @@ class ScenarioManager:
         override_id = uuid4()
 
         # 2. Upsert override (one per scenario/node/field)
-        # ON CONFLICT: if a prior override exists, update values.
+        # ON CONFLICT: if a prior override exists, update values — but KEEP
+        # the original old_value: it is the pre-first-override capture that
+        # promote's conflict detection compares against the current baseline
+        # (#341). Overwriting it with EXCLUDED.old_value would store the
+        # scenario's CURRENT value (= the previous override's new_value) and
+        # guarantee a false conflict at promote after any re-override.
         # The PK (override_id) is not changed on conflict — we use our generated UUID
         # for new inserts; existing rows retain their original override_id.
         db.execute(
@@ -412,7 +463,7 @@ class ScenarioManager:
                 applied_at, applied_by
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (scenario_id, node_id, field_name) DO UPDATE SET
-                old_value  = EXCLUDED.old_value,
+                old_value  = scenario_overrides.old_value,
                 new_value  = EXCLUDED.new_value,
                 applied_at = EXCLUDED.applied_at,
                 applied_by = EXCLUDED.applied_by
@@ -623,37 +674,53 @@ class ScenarioManager:
         self,
         scenario_id: UUID,
         db: psycopg.Connection,
-    ) -> None:
+        promoted_by: Optional[str] = None,
+    ) -> PromoteResult:
         """
         Promote a scenario to baseline.
 
         Per EXPERT Q4.5 — merge is a first-class event:
-          1. For each node override in the scenario, apply its new_value to
+          1. Conflict detection (ADR-018 P2.2.c): for each override, compare
+             the baseline value captured at override time (scenario_overrides.
+             old_value) with the CURRENT baseline value. Any divergence →
+             PromoteConflictError with the full conflict list, nothing written.
+             A missing baseline node (deleted since the fork) is logged and
+             skipped, matching the historical patch behaviour.
+          2. For each node override in the scenario, apply its new_value to
              the corresponding baseline node (matched by business key).
-          2. Mark the old baseline scenario as 'archived'.
-          3. Create a 'scenario_merge' event.
-          4. Mark all other active variant scenarios as 'stale' (not
-             implemented at schema level yet — logged only for now).
+          3. Mark the promoted scenario as 'archived'.
+          4. Create a 'scenario_merge' event (user_ref = promoted_by).
+          5. Log the logical invalidation of sibling scenarios (same parent,
+             still active): their computed state predates the new baseline.
+             Schema-level 'stale' status is still future work.
 
-        The scenario being promoted retains its own status and nodes.
-        The baseline scenario's nodes are patched with the promoted values.
+        The scenario being promoted retains its own nodes. The baseline
+        scenario's nodes are patched with the promoted values.
+
+        Raises PromoteConflictError before any write if the baseline diverged.
+        Returns a PromoteResult for the caller's audit trail.
         """
-        # 1. Load all overrides for this scenario
+        # 1. Load all overrides for this scenario (old_value = baseline value
+        #    captured at override time — the conflict-detection reference).
         override_rows = db.execute(
             """
-            SELECT node_id, field_name, new_value
+            SELECT node_id, field_name, old_value, new_value
             FROM scenario_overrides
             WHERE scenario_id = %s
             """,
             (scenario_id,),
         ).fetchall()
 
-        # 2. Load nodes from the promoted scenario → build match key → patch baseline
+        # 2. Load nodes from the promoted scenario → build match key
         scenario_nodes = _fetch_nodes_as_dict(scenario_id, db)
         scenario_index = {UUID(str(n["node_id"])): n for n in scenario_nodes}
 
         now = datetime.now(timezone.utc)
-        patched = 0
+
+        # PASS 1 — read-only: resolve baseline targets and detect divergence.
+        # No write happens until the whole overlay is known to be clean.
+        conflicts: list[PromoteConflict] = []
+        patch_plan: list[tuple[UUID, str, str]] = []  # (baseline_node_id, field, new_value)
 
         for ov in override_rows:
             ov_node_id = UUID(str(ov["node_id"]))
@@ -669,11 +736,13 @@ class ScenarioManager:
                 )
                 continue
 
-            # Find the matching baseline node by business key
+            # Find the matching baseline node(s) by business key, reading the
+            # current value of the overridden field for divergence detection.
+            # field_name is whitelisted above (never raw user input in SQL).
             b_key = _node_business_key(s_node)
             b_rows = db.execute(
-                """
-                SELECT node_id FROM nodes
+                f"""
+                SELECT node_id, {field_name} FROM nodes
                 WHERE scenario_id = %s
                   AND node_type = %s
                   AND item_id IS NOT DISTINCT FROM %s
@@ -692,18 +761,55 @@ class ScenarioManager:
                 ),
             ).fetchall()
 
-            for b_row in b_rows:
-                db.execute(
-                    f"""
-                    UPDATE nodes
-                    SET {field_name} = %s,
-                        is_dirty     = TRUE,
-                        updated_at   = %s
-                    WHERE node_id = %s AND scenario_id = %s
-                    """,
-                    (new_value, now, UUID(str(b_row["node_id"])), _BASELINE_ID),
+            if not b_rows:
+                logger.warning(
+                    "promote.skip no active baseline node matches business key "
+                    "for override node_id=%s field=%s",
+                    ov_node_id,
+                    field_name,
                 )
-                patched += 1
+                continue
+
+            expected: Optional[str] = ov["old_value"]
+            for b_row in b_rows:
+                b_node_id = UUID(str(b_row["node_id"]))
+                current = b_row[field_name]
+                actual: Optional[str] = str(current) if current is not None else None
+                if actual != expected:
+                    conflicts.append(
+                        PromoteConflict(
+                            node_id=b_node_id,
+                            field_name=field_name,
+                            expected=expected,
+                            actual=actual,
+                        )
+                    )
+                else:
+                    patch_plan.append((b_node_id, field_name, new_value))
+
+        if conflicts:
+            logger.warning(
+                "promote.conflict scenario=%s conflicts=%d — baseline diverged, "
+                "nothing written",
+                scenario_id,
+                len(conflicts),
+            )
+            raise PromoteConflictError(scenario_id, conflicts)
+
+        # PASS 2 — apply the (clean) overlay to the baseline.
+        patched = 0
+        for b_node_id, field_name, new_value in patch_plan:
+            db.execute(
+                f"""
+                UPDATE nodes
+                SET {field_name} = %s,
+                    is_dirty     = TRUE,
+                    updated_at   = %s
+                WHERE node_id = %s AND scenario_id = %s
+                """,
+                (new_value, now, b_node_id, _BASELINE_ID),
+            )
+            patched += 1
 
         # 3. Archive the promoted scenario
         db.execute(
@@ -723,23 +829,67 @@ class ScenarioManager:
             INSERT INTO events (
                 event_id, event_type, scenario_id,
                 old_text, new_text,
-                processed, source, created_at
-            ) VALUES (%s, 'scenario_merge', %s, %s, %s, FALSE, 'engine', %s)
+                processed, source, user_ref, created_at
+            ) VALUES (%s, 'scenario_merge', %s, %s, %s, FALSE, 'engine', %s, %s)
             """,
             (
                 event_id,
                 _BASELINE_ID,
                 str(scenario_id),   # old_text = source scenario_id
                 "promoted",
+                promoted_by,
                 now,
             ),
         )
 
+        # 5. Sibling invalidation — the baseline just moved under their feet,
+        #    so every still-active scenario forked from the same parent now
+        #    holds computed results that predate the new baseline. Logged as
+        #    a logical invalidation (schema-level 'stale' status: future work).
+        siblings_invalidated = 0
+        parent_row = db.execute(
+            "SELECT parent_scenario_id FROM scenarios WHERE scenario_id = %s",
+            (scenario_id,),
+        ).fetchone()
+        if parent_row is not None and parent_row["parent_scenario_id"] is not None:
+            sibling_rows = db.execute(
+                """
+                SELECT scenario_id, name FROM scenarios
+                WHERE parent_scenario_id = %s
+                  AND scenario_id <> %s
+                  AND status = 'active'
+                  AND is_baseline = FALSE
+                """,
+                (parent_row["parent_scenario_id"], scenario_id),
+            ).fetchall()
+            for sib in sibling_rows:
+                logger.warning(
+                    "promote.sibling_invalidated scenario_id=%s name=%r — computed "
+                    "state predates baseline changes from promoted scenario %s; "
+                    "re-run a calculation before trusting its results",
+                    sib["scenario_id"],
+                    sib["name"],
+                    scenario_id,
+                )
+            siblings_invalidated = len(sibling_rows)
+
         logger.info(
-            "promote.complete scenario=%s patched_nodes=%d merge_event=%s",
+            "promote.complete scenario=%s overrides=%d patched_nodes=%d "
+            "siblings_invalidated=%d merge_event=%s by=%s",
             scenario_id,
+            len(override_rows),
             patched,
+            siblings_invalidated,
             event_id,
+            promoted_by,
+        )
+        return PromoteResult(
+            scenario_id=scenario_id,
+            override_count=len(override_rows),
+            patched_nodes=patched,
+            siblings_invalidated=siblings_invalidated,
+            merge_event_id=event_id,
+            conflict_checked=True,
         )
 
 

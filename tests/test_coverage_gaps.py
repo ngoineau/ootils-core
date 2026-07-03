@@ -1507,17 +1507,20 @@ class TestScenarioManagerGaps:
         override_present = {
             "node_id": ov_node_id_present,
             "field_name": "quantity",
+            "old_value": None,  # captured baseline value (conflict check, #341b)
             "new_value": "100",
         }
         override_missing = {
             "node_id": ov_node_id_missing,
             "field_name": "quantity",
+            "old_value": None,
             "new_value": "200",
         }
 
         db = MagicMock()
         # fetchall sequence: overrides, scenario_nodes, baseline matches (1 per present override)
-        baseline_row = {"node_id": uuid4()}
+        # 'quantity' None matches the override's old_value → no conflict.
+        baseline_row = {"node_id": uuid4(), "quantity": None}
         fetchall_responses = [
             [override_present, override_missing],  # overrides
             [scenario_node],                        # scenario nodes
