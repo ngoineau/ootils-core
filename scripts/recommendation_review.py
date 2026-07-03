@@ -9,11 +9,17 @@ Non-negotiable (strategy doc §13): no external ERP mutation without explicit
 human approval. APPROVED/APPLIED transitions are human (L3/L4) decisions only —
 this tool records them; it does not itself push to any ERP.
 
-State machine:
+State machine (single source of truth:
+src/ootils_core/engine/recommendation/state_machine.py — shared with the
+/v1/recommendations API router):
     DRAFT     → REVIEWED | APPROVED | REJECTED
     REVIEWED  → APPROVED | REJECTED
     APPROVED  → APPLIED  | REJECTED
     EXPIRED / APPLIED / REJECTED = terminal
+
+Schema: tables come from migrations 039 (recommendations) + 040
+(recommendation_transitions) — applied automatically at API startup.
+This tool no longer creates any table itself.
 
 Commands:
     status                                  inbox summary by status × action
@@ -36,28 +42,10 @@ import sys
 
 import psycopg
 
+from ootils_core.engine.recommendation.state_machine import transition_many
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("reco_review")
-
-ALLOWED = {
-    "DRAFT": {"REVIEWED", "APPROVED", "REJECTED"},
-    "REVIEWED": {"APPROVED", "REJECTED"},
-    "APPROVED": {"APPLIED", "REJECTED"},
-}
-
-ENSURE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS recommendation_transitions (
-    transition_id     UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    recommendation_id UUID NOT NULL,
-    from_status       TEXT,
-    to_status         TEXT NOT NULL,
-    actor             TEXT NOT NULL,
-    actor_kind        TEXT NOT NULL DEFAULT 'human',
-    reason            TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS ix_reco_trans_reco ON recommendation_transitions (recommendation_id, created_at);
-"""
 
 
 def _guard(dsn: str, allow_dev: bool) -> str:
@@ -97,40 +85,21 @@ def cmd_list(conn, action, limit):
 
 
 def _transition(conn, to_status, actor, reason, action, reco_id, allow_dev):
-    """Apply a state transition to a set of recommendations, logging each."""
-    # Select targets + their current status, locking them
-    if reco_id:
-        targets = conn.execute(
-            "SELECT recommendation_id, status FROM recommendations WHERE recommendation_id=%s FOR UPDATE",
-            (reco_id,),
-        ).fetchall()
-    else:
-        # bulk by action; for APPLIED, source must be APPROVED, else DRAFT/REVIEWED
-        src_statuses = ("APPROVED",) if to_status == "APPLIED" else ("DRAFT", "REVIEWED")
-        q = "SELECT recommendation_id, status FROM recommendations WHERE status = ANY(%s)"
-        params = [list(src_statuses)]
-        if action:
-            q += " AND action=%s"
-            params.append(action)
-        q += " FOR UPDATE"
-        targets = conn.execute(q, params).fetchall()
+    """Apply a state transition to a set of recommendations, logging each.
 
-    moved, skipped = 0, 0
-    for rid, cur_status in targets:
-        if to_status not in ALLOWED.get(cur_status, set()):
-            skipped += 1
-            continue
-        conn.execute(
-            "UPDATE recommendations SET status=%s, updated_at=now() WHERE recommendation_id=%s",
-            (to_status, rid),
-        )
-        conn.execute(
-            "INSERT INTO recommendation_transitions (recommendation_id, from_status, to_status, actor, actor_kind, reason) "
-            "VALUES (%s,%s,%s,%s,'human',%s)",
-            (rid, cur_status, to_status, actor, reason),
-        )
-        moved += 1
-    return moved, skipped
+    Delegates to the shared engine state machine (FOR UPDATE locking,
+    validation, audit row) — this CLI is a human tool, so actor_kind is
+    always 'human'.
+    """
+    return transition_many(
+        conn,
+        to_status,
+        actor,
+        actor_kind="human",
+        reason=reason,
+        action=action,
+        recommendation_id=reco_id,
+    )
 
 
 def cmd_history(conn, reco_id):
@@ -169,7 +138,6 @@ def main(argv=None) -> int:
     _guard(args.dsn, args.allow_dev)
 
     with psycopg.connect(args.dsn) as conn:
-        conn.execute(ENSURE_SCHEMA)
         if args.command == "status":
             cmd_status(conn)
         elif args.command == "list":
