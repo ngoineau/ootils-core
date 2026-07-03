@@ -9,6 +9,7 @@ from typing import Sequence
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
 
@@ -73,6 +74,10 @@ class PyramideRunSummary:
     total_quantity: Decimal
     created_at: datetime
     committed_at: datetime | None
+    # ADR-023 (migration 056): TRUE when the run was generated while the
+    # demand_history ingest age exceeded the freshness SLA. FALSE means
+    # "not proven stale at run time", never "proven fresh".
+    stale_demand: bool
 
 
 @dataclass(frozen=True)
@@ -129,6 +134,184 @@ class PyramideAccuracyMetric:
     n_cutoffs: int
     n_observations: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class DemandFreshness:
+    """Freshness of the demand_history signal (migration 047) — the raw
+    material of the confidence score (pyramide/confidence.py, ADR-023).
+
+    All fields are None when no qualifying row exists: freshness is NEVER
+    invented — an unknown freshness degrades the confidence score through
+    its prudent default instead of pretending the pipeline is alive.
+
+    - ``ingest_age_days``   : full days since MAX(ingested_at) — is the
+      ingestion PIPELINE alive? This is what the freshness SLA gates.
+    - ``coverage_lag_days`` : days between CURRENT_DATE and
+      MAX(booked_date) — how far behind the booking SIGNAL itself is
+      (a healthy pipeline can still carry an old extract).
+    Both are computed on the DB server clock (no app/DB clock skew).
+    """
+
+    last_booked_date: date | None
+    max_ingested_at: datetime | None
+    ingest_age_days: int | None
+    coverage_lag_days: int | None
+
+
+def get_demand_freshness(
+    db: psycopg.Connection,
+    item_id: UUID | None = None,
+    warehouse_id: str | None = None,
+) -> DemandFreshness:
+    """Freshness of demand_history — global, per item, or per
+    item x warehouse (``warehouse_id`` is the ERP DC text code stored in
+    demand_history.warehouse_id, i.e. locations.external_id).
+
+    Deliberately NO stream/business predicates: freshness measures the
+    ingestion pipeline, not the training signal — a warranty-only or
+    inter-entity-only ingest still proves the pipeline ran. MAX() ignores
+    NULL booked_date rows, so last_booked_date stays honest.
+    """
+    filters = []
+    params: dict[str, object] = {}
+    if item_id is not None:
+        filters.append("dh.item_id = %(item_id)s")
+        params["item_id"] = item_id
+    if warehouse_id is not None:
+        filters.append("dh.warehouse_id = %(warehouse_id)s")
+        params["warehouse_id"] = warehouse_id
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    row = db.execute(
+        f"""
+        SELECT
+            MAX(dh.booked_date) AS last_booked_date,
+            MAX(dh.ingested_at) AS max_ingested_at,
+            (CURRENT_DATE - MAX(dh.booked_date)) AS coverage_lag_days,
+            FLOOR(
+                EXTRACT(EPOCH FROM (now() - MAX(dh.ingested_at))) / 86400
+            )::int AS ingest_age_days
+        FROM demand_history dh
+        {where_clause}
+        """,
+        params,
+    ).fetchone()
+
+    if row is None or row["max_ingested_at"] is None:
+        return DemandFreshness(
+            last_booked_date=None,
+            max_ingested_at=None,
+            ingest_age_days=None,
+            coverage_lag_days=None,
+        )
+    # Sub-day clock effects can floor to -1 on a row ingested "just now"
+    # with a server clock marginally behind: clamp to 0, never negative age.
+    ingest_age_days = max(0, row["ingest_age_days"])
+    return DemandFreshness(
+        last_booked_date=row["last_booked_date"],
+        max_ingested_at=row["max_ingested_at"],
+        ingest_age_days=ingest_age_days,
+        coverage_lag_days=row["coverage_lag_days"],
+    )
+
+
+# Ledger identity of the freshness gate on Pyramide runs (agent_runs /
+# dq_findings) — a NAME, not business logic.
+FRESHNESS_GATE_AGENT_NAME = "pyramide_freshness_gate"
+
+
+def record_stale_demand_finding(
+    db: psycopg.Connection,
+    *,
+    run_id: UUID,
+    scenario_id: UUID,
+    item_id: UUID,
+    item_external_id: str,
+    warehouse_external_id: str | None,
+    freshness: DemandFreshness,
+    sla_days: int,
+) -> UUID:
+    """Emit ONE dq_findings STALE_DEMAND row for a Pyramide run executed on
+    demand whose ingest age PROVABLY exceeds the freshness SLA (parameter,
+    default 7 days — ADR-023). Called at most once per run by the router,
+    so a run never spams findings; the finding's evidence carries the
+    run_id, so governance agents can trace forecast -> stale input.
+
+    dq_findings.agent_run_id is a NOT NULL FK to the agent_runs work
+    ledger (migration 039/044): the gate logs its own COMPLETED ledger row
+    — audit is a feature, every write is attributable.
+    """
+    if freshness.ingest_age_days is None or freshness.ingest_age_days <= sla_days:
+        raise ValueError(
+            "record_stale_demand_finding requires a PROVEN stale freshness "
+            f"(ingest_age_days={freshness.ingest_age_days}, sla_days={sla_days})"
+        )
+    agent_run_id = uuid4()
+    db.execute(
+        """
+        INSERT INTO agent_runs (
+            agent_run_id, agent_name, scenario_id, status, finished_at, notes
+        ) VALUES (%s, %s, %s, 'COMPLETED', now(), %s)
+        """,
+        (
+            agent_run_id,
+            FRESHNESS_GATE_AGENT_NAME,
+            scenario_id,
+            f"freshness gate on pyramide run {run_id}: stale demand "
+            f"(ingest age {freshness.ingest_age_days}d > SLA {sla_days}d)",
+        ),
+    )
+    dq_finding_id = uuid4()
+    db.execute(
+        """
+        INSERT INTO dq_findings (
+            dq_finding_id, agent_name, agent_run_id, scenario_id,
+            rule_code, entity_type, entity_id, entity_external_id,
+            severity, description, impact_metric, impact_value,
+            suggested_action, evidence
+        ) VALUES (%s, %s, %s, %s, 'STALE_DEMAND', 'item', %s, %s,
+                  'MEDIUM', %s, 'ingest_age_days', %s, %s, %s)
+        """,
+        (
+            dq_finding_id,
+            FRESHNESS_GATE_AGENT_NAME,
+            agent_run_id,
+            scenario_id,
+            item_id,
+            item_external_id,
+            (
+                f"Pyramide run executed on stale demand: last demand_history "
+                f"ingest is {freshness.ingest_age_days} day(s) old, over the "
+                f"freshness SLA of {sla_days} day(s)"
+            ),
+            freshness.ingest_age_days,
+            "Re-run the demand_history ingestion before trusting or "
+            "committing this forecast (agents must not act on stale=True)",
+            # JSONB carve-out of dq_findings (migration 044): forensic
+            # evidence behind the finding.
+            Jsonb(
+                {
+                    "pyramide_run_id": str(run_id),
+                    "warehouse_external_id": warehouse_external_id,
+                    "ingest_age_days": freshness.ingest_age_days,
+                    "coverage_lag_days": freshness.coverage_lag_days,
+                    "last_booked_date": (
+                        str(freshness.last_booked_date)
+                        if freshness.last_booked_date is not None
+                        else None
+                    ),
+                    "max_ingested_at": (
+                        freshness.max_ingested_at.isoformat()
+                        if freshness.max_ingested_at is not None
+                        else None
+                    ),
+                    "sla_days": sla_days,
+                }
+            ),
+        ),
+    )
+    return dq_finding_id
 
 
 def resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
@@ -543,11 +726,58 @@ def fetch_accuracy_metrics(
     ]
 
 
+def fetch_latest_aggregate_wape(
+    db: psycopg.Connection,
+    *,
+    item_id: UUID,
+    location_id: UUID,
+    scenario_id: UUID,
+) -> Decimal | None:
+    """Most recent aggregate backtest WAPE (horizon IS NULL row of
+    pyramide_accuracy_metrics) for a (item, location, scenario) series —
+    the ``accuracy`` input of the confidence score (ADR-023).
+
+    None = no run of this series ever persisted an aggregate WAPE
+    (no run, no backtest report, or WAPE not computable on that data):
+    the confidence score then falls back to its PRUDENT default component
+    — never an invented accuracy.
+    """
+    row = db.execute(
+        """
+        SELECT pam.wape
+        FROM pyramide_accuracy_metrics pam
+        JOIN pyramide_runs pr ON pr.run_id = pam.run_id
+        WHERE pam.horizon IS NULL
+          AND pam.wape IS NOT NULL
+          AND pr.item_id = %(item_id)s
+          AND pr.location_id = %(location_id)s
+          AND pr.scenario_id = %(scenario_id)s
+        ORDER BY pr.created_at DESC, pam.created_at DESC
+        LIMIT 1
+        """,
+        {
+            "item_id": item_id,
+            "location_id": location_id,
+            "scenario_id": scenario_id,
+        },
+    ).fetchone()
+    return _optional_decimal(row["wape"]) if row else None
+
+
 def _optional_decimal(value) -> Decimal | None:
     return None if value is None else Decimal(str(value))
 
 
-def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePersistedRun:
+def persist_run(
+    db: psycopg.Connection,
+    result: PyramideRunResult,
+    *,
+    stale_demand: bool = False,
+) -> PyramidePersistedRun:
+    """``stale_demand`` (ADR-023, migration 056): the caller measured the
+    demand_history freshness at run time and it PROVABLY exceeded the SLA.
+    Default False = not proven stale (also the value for write paths that
+    do not measure freshness yet — never a claim of freshness)."""
     run_id = uuid4()
     snapshot_id = uuid4()
     forecast_id = uuid4()
@@ -597,8 +827,8 @@ def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePe
             horizon_start, horizon_end, granularity, method,
             model_strategy, recon_method, random_seed, code_version,
             selected_model, engine_backend, source_history_count, status,
-            deterministic_artifact
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values')
+            deterministic_artifact, stale_demand
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'generated', 'forecast_values', %s)
         """,
         (
             run_id,
@@ -617,6 +847,7 @@ def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePe
             result.selected_model,
             result.engine_backend,
             result.source_history_count,
+            stale_demand,
         ),
     )
 
@@ -827,6 +1058,7 @@ def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummar
             pr.code_version, pr.selected_model, pr.engine_backend,
             pr.source_history_count, pr.status,
             pr.deterministic_artifact, pr.created_at, pr.committed_at,
+            pr.stale_demand,
             COALESCE(ps.value_count, vc.value_count) AS value_count,
             COALESCE(ps.total_quantity, vc.total_quantity) AS total_quantity
         FROM pyramide_runs pr
@@ -998,6 +1230,7 @@ def _summary_from_row(row) -> PyramideRunSummary:
         total_quantity=Decimal(str(row["total_quantity"])),
         created_at=row["created_at"],
         committed_at=row["committed_at"],
+        stale_demand=row["stale_demand"],
     )
 
 

@@ -30,7 +30,12 @@ from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.forecasting.algorithms import ForecastingError
 from ootils_core.forecasting.engine import ForecastingEngine
-from ootils_core.pyramide.repository import get_historical_demand
+from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS, compute_confidence
+from ootils_core.pyramide.repository import (
+    fetch_latest_aggregate_wape,
+    get_demand_freshness,
+    get_historical_demand,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,10 @@ class ForecastGenerateRequest(BaseModel):
     method_params: Optional[dict] = Field(default=None)
     scenario_id: Optional[str] = None  # defaults to baseline
     clear_existing: bool = False
+    # Freshness SLA of the confidence score (ADR-023): demand ingested more
+    # than this many days ago is stale. A PARAMETER (pilot default 7 days),
+    # never a hard-coded business constant.
+    freshness_sla_days: int = Field(default=DEFAULT_SLA_DAYS, ge=1, le=365)
 
     @field_validator("horizon_days")
     @classmethod
@@ -113,6 +122,10 @@ class ForecastMetadata(BaseModel):
     horizon_days: int
     granularity: str
     confidence_score: Optional[Decimal] = None  # Derived from accuracy metrics
+    # Traced components behind confidence_score (ADR-023) — accuracy /
+    # depth / freshness in [0,1], stale flag, short explanation. Optional
+    # and additive: pre-existing clients keep working unchanged.
+    confidence_components: Optional[dict] = None
 
 
 class ForecastOut(BaseModel):
@@ -236,36 +249,6 @@ def _get_historical_demand(
         lookback_days=periods,
         scenario_id=scenario_id,
     )
-
-
-def _compute_confidence_score(
-    historical_count: int,
-    method: str,
-    mape: Optional[Decimal] = None,
-) -> Optional[Decimal]:
-    """
-    Compute a simple confidence score (0-1) based on:
-    - Data sufficiency (historical_count)
-    - Method appropriateness
-    - MAPE if available
-    """
-    if historical_count < 7:
-        return Decimal("0.3")  # Low confidence: insufficient data
-    if historical_count < 30:
-        base_score = Decimal("0.5")
-    else:
-        base_score = Decimal("0.7")
-
-    # Adjust for MAPE if available
-    if mape is not None:
-        if mape < Decimal("10"):
-            base_score = min(base_score + Decimal("0.2"), Decimal("1.0"))
-        elif mape < Decimal("20"):
-            base_score = min(base_score + Decimal("0.1"), Decimal("1.0"))
-        elif mape > Decimal("50"):
-            base_score = max(base_score - Decimal("0.2"), Decimal("0.1"))
-
-    return base_score
 
 
 def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
@@ -444,12 +427,31 @@ def generate_forecast(
         )
         total_quantity += quantity
 
-    # 7. Compute confidence score
-    mape = forecast_result.metrics.get("mape")
-    confidence_score = _compute_confidence_score(
+    # 7. Confidence score (ADR-023) — deterministic composition of the
+    # three explicit signals via pyramide/confidence.py (replaces the
+    # legacy step heuristic):
+    #   accuracy  : latest AGGREGATE backtest WAPE of this series from
+    #               pyramide_accuracy_metrics (rolling-origin, honest) —
+    #               never the engine's in-sample MAPE, which overstates;
+    #   depth     : days of OBSERVED demand backing the model (the sparse
+    #               series counts one entry per demand day);
+    #   freshness : demand_history ingest age at ITEM level (the ingest
+    #               pipeline loads whole extracts — a per-warehouse filter
+    #               would misread coverage gaps as pipeline death).
+    # Missing signals degrade to the module's prudent default and are
+    # named in the trace — nothing is invented.
+    freshness = get_demand_freshness(db, item_id=item_uuid)
+    wape = fetch_latest_aggregate_wape(
+        db,
+        item_id=item_uuid,
+        location_id=location_uuid,
+        scenario_id=scenario_uuid,
+    )
+    confidence = compute_confidence(
+        wape,
         len(historical_demand),
-        body.method,
-        mape,
+        freshness.ingest_age_days,
+        sla_days=body.freshness_sla_days,
     )
 
     metadata = ForecastMetadata(
@@ -461,7 +463,21 @@ def generate_forecast(
         generated_at=date.today(),
         horizon_days=body.horizon_days,
         granularity=body.granularity,
-        confidence_score=confidence_score,
+        confidence_score=confidence.score,
+        # Additive trace (ADR-023): the score is reproducible by hand from
+        # components x documented weights; sources are named so a
+        # governance agent can audit where each signal came from.
+        confidence_components={
+            "components": dict(confidence.components),
+            "stale": confidence.stale,
+            "explanation": confidence.explanation,
+            "accuracy_source": (
+                "pyramide_accuracy_metrics" if wape is not None else None
+            ),
+            "history_depth_days": len(historical_demand),
+            "ingest_age_days": freshness.ingest_age_days,
+            "sla_days": body.freshness_sla_days,
+        },
     )
 
     logger.info(
