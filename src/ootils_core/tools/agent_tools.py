@@ -220,10 +220,14 @@ def simulate_overrides(
         }
 
         trigger_event_id = uuid4()
+        # source='engine': the events CHECK (migration 002) allows
+        # api/ingestion/engine/user/test — no 'agent' value. This in-process
+        # path is engine-side tooling; the calling agent is attributed via
+        # user_ref (scenario_name already carries what-if-<agent>-<ts>).
         db.execute(
-            "INSERT INTO events (event_id, event_type, scenario_id, processed, source, created_at) "
-            "VALUES (%s, 'calc_triggered', %s, FALSE, 'agent', %s)",
-            (trigger_event_id, scenario.scenario_id, datetime.now(timezone.utc)),
+            "INSERT INTO events (event_id, event_type, scenario_id, processed, source, user_ref, created_at) "
+            "VALUES (%s, 'calc_triggered', %s, FALSE, 'engine', %s, %s)",
+            (trigger_event_id, scenario.scenario_id, scenario_name, datetime.now(timezone.utc)),
         )
 
         engine = _build_propagation_engine(db)
