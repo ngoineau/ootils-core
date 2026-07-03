@@ -109,6 +109,9 @@ class PyramideRunner:
             selected_model=forecast.selected_model,
             engine_backend=forecast.engine_backend,
             warnings=(*forecast.warnings, *conformal_warnings),
+            # Remonté tel quel pour la persistance des métriques de
+            # backtest (pyramide_accuracy_metrics, migration 055).
+            accuracy_report=forecast.accuracy_report,
         )
 
     @staticmethod

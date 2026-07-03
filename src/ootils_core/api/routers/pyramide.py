@@ -16,6 +16,7 @@ from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunne
 from ootils_core.pyramide.repository import (
     PyramideAggregateCommitError,
     commit_run,
+    fetch_accuracy_metrics,
     fetch_run_summary,
     fetch_run_values,
     fetch_snapshot_values,
@@ -56,6 +57,22 @@ class PyramideRunRequest(BaseModel):
         return f"method must be one of: {sorted(SUPPORTED_METHODS)}"
 
 
+class PyramideAccuracyMetricOut(BaseModel):
+    # horizon None = all-horizons aggregate row; h >= 1 = per-horizon
+    # row (only bias + counts are derivable from the persisted backtest
+    # residuals — the other metrics need the actuals and stay None).
+    # A None metric = "not computable on this data" (None-honest
+    # contract of pyramide/accuracy.py), never a masked 0.
+    horizon: int | None = None
+    mase: Decimal | None = None
+    wape: Decimal | None = None
+    smape: Decimal | None = None
+    bias: Decimal | None = None
+    coverage: Decimal | None = None
+    n_cutoffs: int
+    n_observations: int
+
+
 class PyramideRunOut(BaseModel):
     # Leaf runs carry (item_id, location_id); aggregate runs (migration
     # 053) carry (hierarchy_id, level, node_code) — the unused side is
@@ -88,6 +105,12 @@ class PyramideRunOut(BaseModel):
     deterministic_artifact: str
     created_at: datetime
     committed_at: datetime | None = None
+    # Backtest accuracy metrics (migration 055) — populated by
+    # GET /runs/{run_id} only (backward-compatible optional field):
+    # aggregate row first, then per-horizon rows. None on the other
+    # endpoints (not fetched); [] = run persisted without a backtest
+    # report (e.g. ENSEMBLE_STAT blend, external backend).
+    accuracy_metrics: list[PyramideAccuracyMetricOut] | None = None
 
 
 class PyramideValueOut(BaseModel):
@@ -235,7 +258,12 @@ def get_pyramide_run(
     summary = fetch_run_summary(db, run_id)
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pyramide run '{run_id}' not found")
-    return _run_out(summary)
+    out = _run_out(summary)
+    out.accuracy_metrics = [
+        _accuracy_metric_out(metric)
+        for metric in fetch_accuracy_metrics(db, run_id)
+    ]
+    return out
 
 
 @router.get(
@@ -374,6 +402,19 @@ def _run_out(summary) -> PyramideRunOut:
         deterministic_artifact=summary.deterministic_artifact,
         created_at=summary.created_at,
         committed_at=summary.committed_at,
+    )
+
+
+def _accuracy_metric_out(metric) -> PyramideAccuracyMetricOut:
+    return PyramideAccuracyMetricOut(
+        horizon=metric.horizon,
+        mase=metric.mase,
+        wape=metric.wape,
+        smape=metric.smape,
+        bias=metric.bias,
+        coverage=metric.coverage,
+        n_cutoffs=metric.n_cutoffs,
+        n_observations=metric.n_observations,
     )
 
 
