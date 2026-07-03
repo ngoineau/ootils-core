@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Sequence
 from uuid import UUID, uuid4
 
 import psycopg
@@ -16,10 +17,23 @@ from .models import PyramideRunResult
 logger = logging.getLogger(__name__)
 
 
+class PyramideAggregateCommitError(ValueError):
+    """Commit requested on an AGGREGATE (hierarchy-node) run.
+
+    Aggregate forecasts are never materialized as graph demand: the graph
+    only carries leaf (item, location) ForecastDemand nodes; aggregates
+    stay queryable in forecasts / forecast_values (migration 053). The
+    router maps this to a 409.
+    """
+
+
 @dataclass(frozen=True)
 class PyramidePersistedRun:
+    # snapshot_id is None for AGGREGATE runs: pyramide_snapshots keeps its
+    # leaf NOT NULL contract (migration 038) — snapshots exist to feed the
+    # graph commit path, which is leaf-only by design.
     run_id: UUID
-    snapshot_id: UUID
+    snapshot_id: UUID | None
     forecast_id: UUID
 
 
@@ -29,10 +43,11 @@ class PyramideRunSummary:
     Leaf runs carry (item_id, location_id); aggregate runs (migration 053)
     carry (hierarchy_id, level, node_code) instead — the unused side is
     None (DB CHECK: leaf XOR aggregate). Consumers must not assume
-    item_id/location_id are set.
+    item_id/location_id are set. snapshot_id is None for aggregate runs
+    (no pyramide_snapshots row — leaf NOT NULL contract of migration 038).
     """
     run_id: UUID
-    snapshot_id: UUID
+    snapshot_id: UUID | None
     forecast_id: UUID
     item_id: UUID | None
     location_id: UUID | None
@@ -291,6 +306,67 @@ def get_historical_demand_by_node(
     return [Decimal(str(row["total_qty"])) for row in rows]
 
 
+def get_historical_demand_by_item(
+    db: psycopg.Connection,
+    item_id: UUID,
+    lookback_days: int,
+) -> list[Decimal]:
+    """
+    Historical demand series for one item across ALL sites: daily booked
+    sums, sorted date ASC, same sparse contract as the other readers
+    (days without demand are absent). Business filters are the shared
+    ``_DEMAND_HISTORY_BUSINESS_PREDICATES``.
+
+    This is the LEAF series of the hierarchy layer: summing-block columns
+    are items (item_hierarchy), site-agnostic — the site split belongs to
+    the reconciliation/DRP layer, exactly like the node reader. No
+    warehouse filter, no graph fallback, no scenario parameter (actuals
+    are scenario-invariant).
+    """
+    rows = db.execute(
+        f"""
+        SELECT dh.booked_date AS demand_date,
+               COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+        FROM demand_history dh
+        WHERE dh.item_id = %(item_id)s
+          AND {_DEMAND_HISTORY_BUSINESS_PREDICATES}
+        GROUP BY dh.booked_date
+        ORDER BY dh.booked_date ASC
+        """,
+        {"item_id": item_id, "lookback_days": lookback_days},
+    ).fetchall()
+    return [Decimal(str(row["total_qty"])) for row in rows]
+
+
+def get_historical_demand_totals_by_items(
+    db: psycopg.Connection,
+    item_ids: Sequence[UUID],
+    lookback_days: int,
+) -> dict[str, Decimal]:
+    """
+    Booked totals per item over the lookback window, across ALL sites —
+    the middle-out share numerators (reconcile.py). Keys are stringified
+    item UUIDs (the summing-block leaf column keys). Items with no
+    qualifying row are ABSENT from the dict (callers default them to 0 —
+    the cold-start / natural-zero rules of the reconciler apply).
+
+    Same shared business predicates as every demand-history reader.
+    """
+    if not item_ids:
+        return {}
+    rows = db.execute(
+        f"""
+        SELECT dh.item_id, COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+        FROM demand_history dh
+        WHERE dh.item_id = ANY(%(item_ids)s)
+          AND {_DEMAND_HISTORY_BUSINESS_PREDICATES}
+        GROUP BY dh.item_id
+        """,
+        {"item_ids": list(item_ids), "lookback_days": lookback_days},
+    ).fetchall()
+    return {str(row["item_id"]): Decimal(str(row["total_qty"])) for row in rows}
+
+
 def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePersistedRun:
     run_id = uuid4()
     snapshot_id = uuid4()
@@ -382,7 +458,135 @@ def persist_run(db: psycopg.Connection, result: PyramideRunResult) -> PyramidePe
     return PyramidePersistedRun(run_id=run_id, snapshot_id=snapshot_id, forecast_id=forecast_id)
 
 
+def persist_series_run(
+    db: psycopg.Connection,
+    *,
+    scenario_id: UUID,
+    horizon_start: date,
+    horizon_end: date,
+    granularity: str,
+    method: str,
+    model_strategy: str,
+    recon_method: str,
+    random_seed: int,
+    code_version: str,
+    selected_model: str,
+    engine_backend: str,
+    source_history_count: int,
+    bucket_dates: Sequence[date],
+    quantities: Sequence[Decimal],
+    value_method: str,
+    item_id: UUID | None = None,
+    location_id: UUID | None = None,
+    hierarchy_id: str | None = None,
+    level: str | None = None,
+    node_code: str | None = None,
+) -> PyramidePersistedRun:
+    """
+    Persist ONE series of a hierarchical run (migration 053): either a
+    LEAF (item_id + location_id) or an AGGREGATE (hierarchy_id + level +
+    node_code) — never both (mirrors the DB CHECK, validated here first
+    so the error is readable).
+
+    Writes forecasts + forecast_values + pyramide_runs for every series;
+    pyramide_snapshots ONLY for leaves. Rationale: snapshots exist to
+    feed the graph commit path (_commit_snapshot_to_demand_nodes), which
+    materializes LEAF ForecastDemand nodes only — aggregates stay
+    queryable in the forecast tables and never enter the graph, so a
+    snapshot row (whose leaf columns are NOT NULL by migration 038)
+    would be meaningless for them.
+
+    ``recon_method`` must be the method EFFECTIVELY applied (the
+    reconciler reports it) — this is what makes the column real.
+    """
+    is_leaf = item_id is not None and location_id is not None
+    is_aggregate = (
+        hierarchy_id is not None and level is not None and node_code is not None
+    )
+    if is_leaf == is_aggregate:
+        raise ValueError(
+            "persist_series_run targets a leaf (item_id + location_id) XOR "
+            "an aggregate (hierarchy_id + level + node_code); got "
+            f"item_id={item_id}, location_id={location_id}, "
+            f"hierarchy_id={hierarchy_id}, level={level}, node_code={node_code}"
+        )
+    if len(bucket_dates) != len(quantities):
+        raise ValueError(
+            f"{len(bucket_dates)} bucket dates but {len(quantities)} quantities"
+        )
+
+    run_id = uuid4()
+    forecast_id = uuid4()
+    db.execute(
+        """
+        INSERT INTO forecasts (
+            forecast_id, item_id, location_id, hierarchy_id, level, node_code,
+            scenario_id, horizon_start, horizon_end, granularity, method
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            forecast_id, item_id, location_id, hierarchy_id, level, node_code,
+            scenario_id, horizon_start, horizon_end, granularity, method,
+        ),
+    )
+    total_quantity = Decimal("0")
+    for bucket_date, quantity in zip(bucket_dates, quantities):
+        total_quantity += quantity
+        db.execute(
+            """
+            INSERT INTO forecast_values (
+                value_id, forecast_id, forecast_date, quantity, method
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (uuid4(), forecast_id, bucket_date, quantity, value_method),
+        )
+    db.execute(
+        """
+        INSERT INTO pyramide_runs (
+            run_id, forecast_id, item_id, location_id,
+            hierarchy_id, level, node_code, scenario_id,
+            horizon_start, horizon_end, granularity, method,
+            model_strategy, recon_method, random_seed, code_version,
+            selected_model, engine_backend, source_history_count, status,
+            deterministic_artifact
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, 'generated', 'forecast_values')
+        """,
+        (
+            run_id, forecast_id, item_id, location_id,
+            hierarchy_id, level, node_code, scenario_id,
+            horizon_start, horizon_end, granularity, method,
+            model_strategy, recon_method, random_seed, code_version,
+            selected_model, engine_backend, source_history_count,
+        ),
+    )
+
+    snapshot_id: UUID | None = None
+    if is_leaf:
+        snapshot_id = uuid4()
+        db.execute(
+            """
+            INSERT INTO pyramide_snapshots (
+                snapshot_id, run_id, forecast_id, item_id, location_id,
+                scenario_id, horizon_start, horizon_end, granularity, method,
+                value_count, total_quantity, immutable_artifact
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      'forecast_values')
+            """,
+            (
+                snapshot_id, run_id, forecast_id, item_id, location_id,
+                scenario_id, horizon_start, horizon_end, granularity, method,
+                len(quantities), total_quantity,
+            ),
+        )
+    return PyramidePersistedRun(
+        run_id=run_id, snapshot_id=snapshot_id, forecast_id=forecast_id
+    )
+
+
 def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummary | None:
+    # LEFT JOIN: aggregate runs (migration 053) have no snapshot — their
+    # value_count/total come straight from the frozen forecast_values.
     row = db.execute(
         """
         SELECT
@@ -393,9 +597,16 @@ def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummar
             pr.code_version, pr.selected_model, pr.engine_backend,
             pr.source_history_count, pr.status,
             pr.deterministic_artifact, pr.created_at, pr.committed_at,
-            ps.value_count, ps.total_quantity
+            COALESCE(ps.value_count, vc.value_count) AS value_count,
+            COALESCE(ps.total_quantity, vc.total_quantity) AS total_quantity
         FROM pyramide_runs pr
-        JOIN pyramide_snapshots ps ON ps.run_id = pr.run_id
+        LEFT JOIN pyramide_snapshots ps ON ps.run_id = pr.run_id
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::int AS value_count,
+                   COALESCE(SUM(fv.quantity), 0) AS total_quantity
+            FROM forecast_values fv
+            WHERE fv.forecast_id = pr.forecast_id
+        ) vc ON TRUE
         WHERE pr.run_id = %s
         """,
         (run_id,),
@@ -432,9 +643,26 @@ def fetch_run_values(db: psycopg.Connection, run_id: UUID) -> list[PyramideForec
 
 
 def commit_run(db: psycopg.Connection, run_id: UUID) -> PyramideCommitResult | None:
+    """
+    Materialize a LEAF run's frozen values as ForecastDemand graph nodes.
+
+    LEAVES ONLY: an aggregate (hierarchy-node) run raises
+    PyramideAggregateCommitError — aggregates stay queryable in
+    forecasts/forecast_values and never enter the graph (the graph's
+    demand contract is (item, location); a node-level demand quantity
+    would double-count its leaves in propagation).
+    """
     summary = fetch_run_summary(db, run_id)
     if summary is None:
         return None
+    if summary.node_code is not None:
+        raise PyramideAggregateCommitError(
+            f"Pyramide run '{run_id}' targets aggregate node "
+            f"'{summary.node_code}' (hierarchy '{summary.hierarchy_id}', "
+            f"level '{summary.level}') — aggregate forecasts are never "
+            "materialized as graph demand; commit the block's leaf "
+            "(item, location) runs instead"
+        )
 
     demand_node_count = _commit_snapshot_to_demand_nodes(db, summary)
     db.execute(
@@ -562,6 +790,24 @@ def _snapshot_from_row(row) -> PyramideSnapshotSummary:
 
 
 def _commit_snapshot_to_demand_nodes(db: psycopg.Connection, summary: PyramideRunSummary) -> int:
+    """
+    LEAF-ONLY materialization contract: only leaf (item, location) series
+    ever become ForecastDemand nodes. Aggregate series live exclusively
+    in the forecast tables (migration 053) — pyramide_snapshots keeps its
+    leaf NOT NULL contract (migration 038) precisely because a snapshot's
+    sole purpose is this graph-commit path. commit_run() guards the
+    aggregate case with a typed error before reaching here; this check is
+    the defensive backstop.
+    """
+    if (
+        summary.item_id is None
+        or summary.location_id is None
+        or summary.snapshot_id is None
+    ):
+        raise PyramideAggregateCommitError(
+            f"run '{summary.run_id}' has no leaf (item, location) snapshot — "
+            "only leaf runs are materialized to the graph"
+        )
     _ensure_projection_series_window(
         db=db,
         item_id=summary.item_id,
