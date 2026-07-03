@@ -11,9 +11,18 @@ Previously this agent ran its own SQL window function that SUMMED customer order
 mrp_core.first_shortage so the control-tower front and the MRP back agree on
 demand.
 
-North Star: deterministic core, L1 DRAFT only (never applies), auditable
-(agent_runs), explainable (evidence trail), confidence-aware, idempotent
-(supersede prior DRAFTs).
+Scenario-backed (#340): each run forks ONE what-if scenario
+(what-if-shortage_watcher-<ts>), simulates its simulable candidates there
+(EXPEDITE = advance an existing firm receipt; ORDER_NOW/ORDER_RUSH draft a NEW
+order and are marked not-simulated), stamps every reco's evidence with
+simulation_scenario_id + its per-item shortage delta, then archives the fork.
+If the fork's propagation fails, simulated recos are demoted to
+NEEDS_DATA_REVIEW without delta (fail-loudly). See scripts/agent_simulation.py.
+
+North Star: deterministic core, DRAFT only (never applies; decision level from
+agent_governance.decision_level — new-order drafts L1, EXPEDITE of an existing
+receipt L2), auditable (agent_runs), explainable (evidence trail),
+confidence-aware, idempotent (supersede prior DRAFTs).
 
 Scope: independent-demand items that are PURCHASED (have a supplier). Make items
 with independent demand cascade into component needs handled by the material
@@ -35,7 +44,8 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
-from agent_governance import governed_run
+import agent_simulation
+from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("shortage_watcher")
@@ -104,6 +114,7 @@ def main(argv=None) -> int:
         skipped_no_supplier = 0
 
         with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            candidates = []
             for item, o in fg_first.items():
                 sup = d.best_sup.get(item)
                 if not sup:
@@ -127,15 +138,38 @@ def main(argv=None) -> int:
                             "unit_cost": float(uc) if uc is not None else None,
                             "rule": "earliest time-phased planned PURCHASE order from run_timephased "
                                     "(nets to safety, lot-sized, lead-time offset); consumed demand = max_only/DTF/prorated"}
+                candidates.append({"item": item, "action": action, "need_date": need_date,
+                                   "conf": conf, "evidence": evidence, "deficit": deficit,
+                                   "qty": qty, "cost": cost, "ccy": ccy, "sid": sid, "sext": sext,
+                                   "lt": lt, "runway": runway, "margin": margin})
+
+            # Scenario-backed counter-factual (#340): ONE fork for the whole run,
+            # applied to the simulable candidates, delta attributed per item,
+            # fork archived by simulate_run.
+            receipts = agent_simulation.load_future_receipts(conn)
+            sim_summary, sim_results = agent_simulation.simulate_run(
+                args.dsn, AGENT_NAME,
+                [{"item": c["item"], "action": c["action"], "need_date": c["need_date"]} for c in candidates],
+                receipts)
+
+            for c, res in zip(candidates, sim_results):
+                item, action = c["item"], c["action"]
+                conf = agent_simulation.effective_confidence(
+                    c["conf"], res["simulated"], sim_summary["propagation_status"])
+                evidence = dict(c["evidence"])
+                evidence["simulation_scenario_id"] = sim_summary["scenario_id"]
+                evidence["simulation"] = agent_simulation.simulation_evidence(sim_summary, res)
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                             need_date, deficit, qty, cost, ccy, sid, sext, lt, runway, margin,
-                             action, "L1", "DRAFT", conf, Jsonb(evidence)))
-                display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": need_date, "qty": qty,
-                                "cost": cost, "ccy": ccy, "action": action, "conf": conf, "margin": margin})
+                             c["need_date"], c["deficit"], c["qty"], c["cost"], c["ccy"], c["sid"], c["sext"],
+                             c["lt"], c["runway"], c["margin"],
+                             action, decision_level(action), "DRAFT", conf, Jsonb(evidence)))
+                display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": c["need_date"], "qty": c["qty"],
+                                "cost": c["cost"], "ccy": c["ccy"], "action": action, "conf": conf,
+                                "margin": c["margin"]})
                 by_action[action] += 1
                 by_conf[conf] += 1
-                if cost is not None:
-                    spend[ccy] += cost
+                if c["cost"] is not None:
+                    spend[c["ccy"]] += c["cost"]
 
             superseded = run.supersede("recommendations", "DRAFT", "EXPIRED")
             run.insert(
@@ -151,14 +185,19 @@ def main(argv=None) -> int:
                        "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
                        "skipped_no_supplier": skipped_no_supplier,
                        "fg_items_to_order": len(fg_first), "demand_nodes": dn, "past_due_demand_nodes": pdn,
-                       "past_due_ratio": round(past_due_ratio, 4)}
+                       "past_due_ratio": round(past_due_ratio, 4),
+                       "simulation": sim_summary}
             run.set_metrics(metrics)
 
     m = metrics
     elapsed = round(time.perf_counter() - t0, 2)
     logger.info("=" * 92)
     logger.info("SHORTAGE WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
-    logger.info("  Recommendations written (DRAFT, L1) : %d", m["recommendations"])
+    logger.info("  Recommendations written (DRAFT)     : %d", m["recommendations"])
+    sim = m["simulation"]
+    logger.info("  Scenario-backed (#340)              : fork=%s status=%s simulated=%d not-simulated=%d archived=%s",
+                sim["scenario_name"] or "—", sim["propagation_status"] or "not-run",
+                sim["simulated_candidates"], sim["non_simulated_candidates"], sim["archived"])
     logger.info("  FG items needing a purchase order   : %d  (skipped, no supplier: %d)",
                 m["fg_items_to_order"], m["skipped_no_supplier"])
     logger.info("  Prior drafts superseded (EXPIRED)   : %d", m["superseded_prior_drafts"])
