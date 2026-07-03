@@ -3,10 +3,13 @@ bench_reconciliation.py — reconciliation bench CLI (Pyramide axis A, design §
 
 Thin CLI over ``ootils_core.pyramide.hierarchy.bench.run_reconciliation_bench``:
 for each summing block of the domain's default hierarchy, replays a forecast
-as of ``cutoff = today - holdout_days`` (train strictly before the cutoff,
-never CURRENT_DATE-bounded — the anti-leak split lives in the module) and
-scores every requested reconciliation method plus the uniform 'base'
-comparator against the demand that actually booked in the holdout window.
+as of ``cutoff = bucket_start(today) - holdout buckets`` (train strictly
+before the cutoff, never CURRENT_DATE-bounded — the anti-leak split lives in
+the module) and scores every requested reconciliation method plus the uniform
+'base' comparator against the demand that actually booked in the holdout
+window. ``--grain`` picks the evaluation bucket (day / ISO week / calendar
+month — window flags then count buckets, eval buckets always complete);
+``--today`` fixes the as-of date for deterministic replays.
 
 **Read-only**: the bench only SELECTs (windowed demand_history reads +
 hierarchy registry); reconciliation and scoring are in-memory Python. Like
@@ -28,11 +31,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import date
 
 import psycopg
 from psycopg.rows import dict_row
 
 from ootils_core.pyramide.hierarchy.bench import (
+    GRAIN_DAY,
+    GRAIN_MONTH,
+    GRAIN_WEEK,
     BenchReport,
     run_reconciliation_bench,
 )
@@ -46,10 +53,13 @@ def _fmt(value, width: int = 9, digits: int = 4) -> str:
 
 
 def print_report(report: BenchReport) -> None:
+    unit = report.grain  # horizon/holdout/lookback count grain buckets
     print(
         f"=== Reconciliation bench -- domain={report.domain} "
-        f"cutoff={report.cutoff.isoformat()} horizon={report.horizon}d "
-        f"holdout={report.holdout_days}d lookback={report.lookback_days}d ===\n"
+        f"grain={report.grain} cutoff={report.cutoff.isoformat()} "
+        f"horizon={report.horizon}{unit[0]} "
+        f"holdout={report.holdout_days}{unit[0]} "
+        f"lookback={report.lookback_days}{unit[0]} ===\n"
     )
     if not report.rows:
         print("(no rows -- every block was skipped, see warnings)")
@@ -92,9 +102,23 @@ def main(argv=None) -> int:
                    help="level defining the blocks (default: hierarchy root)")
     p.add_argument("--recon-level", default=None,
                    help="reconciliation level (default: the block level)")
-    p.add_argument("--lookback-days", type=int, default=365)
-    p.add_argument("--horizon", type=int, default=28)
-    p.add_argument("--holdout-days", type=int, default=28)
+    p.add_argument("--grain", default=GRAIN_DAY,
+                   choices=[GRAIN_DAY, GRAIN_WEEK, GRAIN_MONTH],
+                   help="evaluation bucket (default: day). horizon / "
+                        "holdout-days / lookback-days count BUCKETS of "
+                        "this grain; eval buckets are always complete "
+                        "(today snaps to its bucket start: ISO Monday / "
+                        "1st of month — the partial bucket is excluded)")
+    p.add_argument("--today", type=date.fromisoformat, default=None,
+                   help="ISO date the bench runs 'as of' (default: wall "
+                        "clock) — for deterministic replays")
+    p.add_argument("--lookback-days", type=int, default=365,
+                   help="training window, in grain buckets (default 365)")
+    p.add_argument("--horizon", type=int, default=28,
+                   help="forecast/eval length, in grain buckets (default 28)")
+    p.add_argument("--holdout-days", type=int, default=28,
+                   help="held-out span before today's bucket, in grain "
+                        "buckets (default 28)")
     p.add_argument("--methods", default="middleout",
                    help="comma-separated reconciliation methods "
                         "('base' is always benched implicitly)")
@@ -131,6 +155,8 @@ def main(argv=None) -> int:
             holdout_days=args.holdout_days,
             methods=methods,
             block_codes=blocks,
+            grain=args.grain,
+            today=args.today,
         )
 
     print_report(report)

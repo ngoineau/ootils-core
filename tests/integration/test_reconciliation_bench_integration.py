@@ -8,6 +8,9 @@ Covered:
     test_pyramide_reconcile_integration.py, but with a history long enough
     to carve out a holdout window) and produces FINITE wape/mase/bias for
     'middleout' at all three levels (leaf, recon level, block root);
+  - grain='week' on the same seed: cutoff snaps to an ISO Monday, the 4
+    holdout weeks are complete (n_obs = n_series x 4), wape/bias finite
+    (mase None: the weekly sums of the seed are constant);
   - determinism: two identical calls (fixed ``today``) return equal
     BenchReports and the same non-None verdict;
   - anti-leak: a demand line inserted INSIDE the holdout window (on the
@@ -234,7 +237,63 @@ class TestReconciliationBench:
             "forecasting zero for its subtree" in w for w in report.warnings
         ), report.warnings
 
+    def test_grain_week_scores_four_complete_weeks(self, conn):
+        """grain='week' on the SAME seed: FIXED_TODAY (2026-03-02) is a
+        Monday, so it snaps to itself and cutoff = today - 4 weeks — the
+        very same date as the daily CUTOFF. The 28 seeded holdout days
+        are exactly 4 COMPLETE ISO weeks; the 84 train days are 12
+        Monday-aligned weekly buckets, each summing the weekly pattern
+        (amplitude x 14 — constant). Metrics must be finite where the
+        accuracy contract defines them: wape/bias always (non-zero
+        weekly actuals), mase None (weekly aggregation flattens the
+        intra-week signal into a CONSTANT insample -> excluded, per the
+        accuracy contract — not a bug, the contract working)."""
+        from ootils_core.pyramide.hierarchy.bench import (
+            GRAIN_WEEK,
+            LEVEL_LEAF,
+            LEVEL_ROOT,
+            METHOD_BASE,
+            run_reconciliation_bench,
+        )
+
+        fam, _ = _seed_block(conn, "bench-h-week", "B5")
+        weeks = 4
+        report = run_reconciliation_bench(
+            conn,
+            domain="product",
+            recon_level="product",
+            lookback_days=17,       # 17 WEEKS — covers the 12 seeded ones
+            horizon=weeks,          # 4 WEEKLY buckets
+            holdout_days=weeks,
+            methods=("middleout",),
+            today=FIXED_TODAY,
+            grain=GRAIN_WEEK,
+        )
+
+        assert report.grain == GRAIN_WEEK
+        assert report.cutoff == CUTOFF          # Monday-aligned snap
+        assert report.cutoff.weekday() == 0     # ISO week start
+
+        by_cell = {(r.level, r.method): r for r in report.rows}
+        assert set(by_cell) == {
+            (level, method)
+            for level in (LEVEL_LEAF, "product", LEVEL_ROOT)
+            for method in ("middleout", METHOD_BASE)
+        }
+        for level, n_series in [(LEVEL_LEAF, 3), ("product", 2), (LEVEL_ROOT, 1)]:
+            row = by_cell[(level, "middleout")]
+            assert row.block == fam
+            assert row.n_series == n_series
+            # 4 complete weekly buckets per series — nothing partial.
+            assert row.n_obs == n_series * weeks
+            assert row.wape is not None and row.wape >= 0, level
+            assert row.bias is not None, level
+            assert row.mase is None, level  # constant weekly insample
+        assert report.verdicts()[fam] is not None
+
     def test_two_calls_same_report_and_verdict(self, conn):
+        """Determinism: two identical calls (fixed ``today``) return equal
+        BenchReports and the same non-None verdict."""
         fam, _ = _seed_block(conn, "bench-h-det", "B2")
         first = _run(conn)
         second = _run(conn)
