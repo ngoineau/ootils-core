@@ -46,7 +46,12 @@ class PyramideRunConfig:
     method: str = METHOD_AUTO_SELECT
     method_params: Mapping[str, Any] = field(default_factory=dict)
     model_strategy: str = "stat"
-    recon_method: str = "bottomup"
+    # recon_method carries the reconciliation EFFECTIVELY applied
+    # (migration 054). A standalone single-series leaf run reconciles
+    # nothing — 'none' is the honest default. Hierarchical runs are
+    # persisted by pyramide/hierarchy/runner.py with the method the
+    # reconciler actually used ('middleout' / 'mintrace_wls_shrink').
+    recon_method: str = "none"
     random_seed: int = 0
     code_version: str = "local"
 

@@ -14,6 +14,7 @@ from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
 from ootils_core.pyramide.repository import (
+    PyramideAggregateCommitError,
     commit_run,
     fetch_run_summary,
     fetch_run_values,
@@ -40,7 +41,13 @@ class PyramideRunRequest(BaseModel):
     method_params: dict[str, Any] = Field(default_factory=dict)
     scenario_id: str | None = None
     model_strategy: str = Field(default="stat", pattern="^(auto|stat|ml|fm|hybrid)$")
-    recon_method: str = Field(default="bottomup", pattern="^(mintrace_wls|bottomup|topdown|middleout|none)$")
+    # Single-series leaf endpoint: nothing is reconciled here, so the
+    # ONLY honest value is 'none' (recon_method = method EFFECTIVELY
+    # applied, migration 054 — provenance never lies). Hierarchical block
+    # runs go through HierarchicalRunner, not this endpoint; a client
+    # requesting a reconciliation method here gets a clear 422 instead of
+    # a silently-false provenance row (review PR3).
+    recon_method: str = Field(default="none", pattern="^none$")
     random_seed: int = Field(default=0, ge=0)
     code_version: str = Field(default="local", min_length=1, max_length=64)
 
@@ -53,9 +60,10 @@ class PyramideRunOut(BaseModel):
     # Leaf runs carry (item_id, location_id); aggregate runs (migration
     # 053) carry (hierarchy_id, level, node_code) — the unused side is
     # None. Optional on both sides so an aggregate run never 500s on
-    # response validation.
+    # response validation. snapshot_id is None for aggregate runs
+    # (snapshots are leaf-only — they exist to feed the graph commit).
     run_id: UUID
-    snapshot_id: UUID
+    snapshot_id: UUID | None = None
     forecast_id: UUID
     status: str
     item_id: UUID | None = None
@@ -260,7 +268,13 @@ def commit_pyramide_run(
     db: psycopg.Connection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideCommitOut:
-    summary = commit_run(db, run_id)
+    try:
+        summary = commit_run(db, run_id)
+    except PyramideAggregateCommitError as exc:
+        # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
+        # message containing only UUIDs / hierarchy codes — the client
+        # needs it to understand why an aggregate run is not committable.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pyramide run '{run_id}' not found")
     return PyramideCommitOut(
