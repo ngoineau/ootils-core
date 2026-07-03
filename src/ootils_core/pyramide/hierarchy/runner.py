@@ -49,7 +49,12 @@ from ..engines import (
     conformal_bounds,
     resolve_conformal_alpha,
 )
-from ..models import METHOD_AUTO_SELECT, SUPPORTED_GRANULARITIES, SUPPORTED_METHODS
+from ..models import (
+    METHOD_AUTO_SELECT,
+    METHOD_FM_CHRONOS,
+    SUPPORTED_GRANULARITIES,
+    SUPPORTED_METHODS,
+)
 from ..repository import (
     PyramidePersistedRun,
     get_historical_demand_by_item,
@@ -57,7 +62,7 @@ from ..repository import (
     get_historical_demand_totals_by_items,
     persist_series_run,
 )
-from ..routing import RoutingDecision
+from ..routing import METHOD_TWIN, RoutingDecision
 from ..runner import PyramideError, bucket_dates
 from .reconcile import (
     MINT_MIN_INSAMPLE,
@@ -85,13 +90,33 @@ class HierarchicalRunConfig:
     at the block root, disaggregated to the leaves); pass a deeper level
     for a classic middle-out at an intermediate level.
 
-    ``routing_decisions`` (PR-B1, opt-in provenance): the head/tail
-    router's decision per series, keyed by the series key (item UUID
-    string for leaves, hierarchy_node code for aggregates). Each matched
-    series persists its decision as routed_method / routed_level /
-    routing_reason (migration 058). In B1 this is PROVENANCE ONLY — it
-    does not change which engine runs (full routed execution is B2);
-    empty (default) = nothing persisted, historical behaviour unchanged.
+    ``routing_decisions`` (PR-B1 provenance, PR-B2 execution — opt-in):
+    the head/tail router's decision per series, keyed by the series key
+    (item UUID string for leaves, hierarchy_node code for aggregates).
+    Each matched series persists its decision as routed_method /
+    routed_level / routing_reason (migration 058). Since B2 the
+    decisions also EXECUTE — but only where the runner forecasts, i.e.
+    at the RECONCILIATION-LEVEL nodes:
+
+    * node decision, executable method -> that node's base forecast
+      runs the routed method instead of ``method``;
+    * node decision FM_CHRONOS -> all FM-routed nodes of the run are
+      batched in ONE foundation inference call (never one-by-one);
+    * node decision TWIN -> rejected loudly (TWIN is leaf vocabulary);
+    * leaf decision TWIN -> executed BY the existing reconciliation:
+      middle-out's twin rule (reconcile._node_weights) already serves a
+      zero-history leaf the mean share of its positive-history siblings
+      — TWIN at routing = delegate to that disaggregation, no separate
+      engine. A warning documents the cases where the mapping does not
+      hold (leaf has its own history, or MinT path without shares);
+    * leaf decision with any OTHER method -> provenance only + warning
+      (block leaves are disaggregated, never forecast directly in V1);
+    * decision on a non-reconciliation-level aggregate -> provenance
+      only + warning (those levels are S-sums of leaves).
+
+    Empty (default) = nothing routed, nothing persisted, historical
+    behaviour unchanged. There is NO automatic routing: the caller
+    computes and passes the decisions (default-on is a post-bench call).
     """
     hierarchy_id: str
     block_code: str
@@ -193,6 +218,10 @@ class HierarchicalRunner:
         base_curves: dict[str, tuple[Decimal, ...]] = {}
         base_computations: dict[str, ForecastComputation] = {}
         node_histories: dict[str, list[Decimal]] = {}
+        # FM-routed reconciliation nodes are NOT forecast in the loop:
+        # they are collected and served by ONE batched inference call
+        # (spec §2.B "inférence par batch", jamais série par série).
+        fm_series: list[tuple[str, Sequence[Decimal]]] = []
         for i, ref in recon_refs:
             if not block.rows[i]:
                 continue  # node without leaves: nothing to forecast/split
@@ -205,11 +234,39 @@ class HierarchicalRunner:
                     f"(hierarchy '{config.hierarchy_id}') in the "
                     f"{config.lookback_days}-day lookback window"
                 )
-            computation = self._base_forecast(history, periods, method, config)
             node_histories[ref.key] = history
+            node_method = _routed_node_method(
+                config.routing_decisions.get(ref.key), ref.key, method
+            )
+            if node_method == METHOD_FM_CHRONOS:
+                fm_series.append((ref.key, history))
+                continue
+            computation = self._base_forecast(history, periods, node_method, config)
             base_computations[ref.key] = computation
             base_curves[ref.key] = computation.values
             warnings.extend(f"{ref.key}: {w}" for w in computation.warnings)
+
+        if fm_series:
+            try:
+                fm_computations = self._engine.forecast_foundation_batch(
+                    series=fm_series,
+                    periods=periods,
+                    method_params=config.method_params,
+                    model_strategy=config.model_strategy,
+                    granularity=config.granularity,
+                    random_seed=config.random_seed,
+                )
+            except PyramideEngineError as exc:
+                raise PyramideError(str(exc)) from exc
+            for key, computation in fm_computations.items():
+                # Same clamp as _base_forecast: demand forecasts are >= 0.
+                computation = replace(
+                    computation,
+                    values=tuple(max(v, _ZERO) for v in computation.values),
+                )
+                base_computations[key] = computation
+                base_curves[key] = computation.values
+                warnings.extend(f"{key}: {w}" for w in computation.warnings)
 
         leaf_totals = get_historical_demand_totals_by_items(
             db, [UUID(key) for key in block.leaves], config.lookback_days
@@ -217,10 +274,28 @@ class HierarchicalRunner:
 
         mint_inputs: MintInputs | None = None
         if config.recon_method == RECON_MINT_SHRINK:
-            mint_inputs, mint_warnings = self._build_mint_inputs(
-                db, block, config, method, periods, base_curves, node_histories
+            # Batch-only contract guard (spec §2.B / ADR-024, review PR-B2):
+            # _build_mint_inputs base-forecasts EVERY series of the block one
+            # by one — with an FM method (global or routed) that would mean
+            # one foundation-model inference per leaf. Refuse and fall back
+            # to middle-out (reconcile() handles mint_inputs=None) instead
+            # of silently violating the batch-only rule.
+            fm_involved = method == METHOD_FM_CHRONOS or any(
+                decision.method == METHOD_FM_CHRONOS
+                for decision in (config.routing_decisions or {}).values()
             )
-            warnings.extend(mint_warnings)
+            if fm_involved:
+                warnings.append(
+                    "mint_shrink refused with FM_CHRONOS in the run: MinT "
+                    "insample construction would run one FM inference per "
+                    "series (batch-only contract, ADR-024) — falling back "
+                    "to middleout"
+                )
+            else:
+                mint_inputs, mint_warnings = self._build_mint_inputs(
+                    db, block, config, method, periods, base_curves, node_histories
+                )
+                warnings.extend(mint_warnings)
 
         strict = bool(config.method_params.get("strict_recon"))
         try:
@@ -236,6 +311,15 @@ class HierarchicalRunner:
         except ReconciliationError as exc:
             raise PyramideError(str(exc)) from exc
         warnings.extend(recon.warnings)
+        warnings.extend(
+            _leaf_routing_warnings(
+                config.routing_decisions,
+                leaf_keys=frozenset(block.leaves),
+                recon_node_keys=frozenset(ref.key for _, ref in recon_refs),
+                shares=recon.shares,
+                block_code=block.block_code,
+            )
+        )
 
         persisted, persist_warnings = self._persist(
             db, block, recon, recon_refs, base_computations,
@@ -478,10 +562,15 @@ class HierarchicalRunner:
                     accuracy_report=(
                         computation.accuracy_report if computation else None
                     ),
-                    # PR-B1 provenance only (migration 058): the caller's
-                    # routing decision for this node, if any — does not
-                    # change which engine ran (routed execution is B2).
+                    # Routing provenance (migration 058): the caller's
+                    # decision for this node — since B2 it also drove
+                    # which engine ran at the reconciliation level.
                     routing=config.routing_decisions.get(ref.key),
+                    # Scellé des poids FM (migration 059) — non-None
+                    # uniquement quand ce nœud a été servi par le FM.
+                    model_revision=(
+                        computation.model_revision if computation else None
+                    ),
                 )
             else:
                 recon_node = parent_of.get(ref.key)
@@ -549,9 +638,15 @@ class HierarchicalRunner:
                     accuracy_bias_scale=(
                         share if share is not None else Decimal("1")
                     ),
-                    # PR-B1 provenance only (migration 058), keyed by the
+                    # Routing provenance (migration 058), keyed by the
                     # leaf's item UUID string — see routing_decisions doc.
                     routing=config.routing_decisions.get(ref.key),
+                    # Scellé des poids FM (migration 059) : la feuille est
+                    # part x courbe du nœud — les MÊMES poids ont produit
+                    # ses valeurs quand le nœud était servi par le FM.
+                    model_revision=(
+                        computation.model_revision if computation else None
+                    ),
                 )
             persisted.append(_persisted_series(ref, record))
         if leaves_without_bounds:
@@ -561,6 +656,105 @@ class HierarchicalRunner:
                 "or no explicit disaggregation share)"
             )
         return persisted, warnings
+
+
+def _routed_node_method(
+    decision: RoutingDecision | None, node_code: str, default_method: str
+) -> str:
+    """Executable method for one reconciliation-level node (PR-B2).
+
+    Pure function (unit-testable without a DB). No decision = the run's
+    requested method (historical behaviour). A routed method must be
+    executable: TWIN is leaf-delegation vocabulary (routing.py) and any
+    method outside the catalogue fails loudly — an executor must never
+    silently run something else than what the router recommended
+    (routing.py: "fails loudly, never silently").
+    """
+    if decision is None:
+        return default_method
+    routed = decision.method.upper()
+    if routed == METHOD_TWIN:
+        raise PyramideError(
+            f"routing decision for reconciliation node '{node_code}' says "
+            f"{METHOD_TWIN}, which is leaf-level delegation vocabulary — "
+            "it cannot forecast an aggregate node"
+        )
+    if routed not in SUPPORTED_METHODS:
+        raise PyramideError(
+            f"routed method '{decision.method}' for node '{node_code}' is "
+            "not an executable forecast method "
+            f"(supported: {sorted(SUPPORTED_METHODS)})"
+        )
+    return routed
+
+
+def _leaf_routing_warnings(
+    routing_decisions: Mapping[str, RoutingDecision],
+    *,
+    leaf_keys: frozenset[str],
+    recon_node_keys: frozenset[str],
+    shares: Sequence[LeafShare],
+    block_code: str,
+) -> list[str]:
+    """Explainability of the non-node routing decisions (PR-B2). Pure.
+
+    TWIN at a leaf is EXECUTED by the reconciliation itself: middle-out's
+    twin rule (reconcile._node_weights) serves a zero-history leaf the
+    mean share of its positive-history siblings — exactly the routed
+    twin-transfer, reusing the existing shares (mapping documented in
+    reconcile.py §"Proportions"). Silence when the mapping held
+    (LeafShare.cold_start True documents it); a warning states every
+    case where it did not:
+
+    * leaf with its own positive history — its real share was used, the
+      twin rule never triggers;
+    * no explicit share for the leaf (MinT path, or leaf outside the
+      block) — the delegation is unverifiable here, provenance only.
+
+    Non-TWIN leaf decisions and decisions on non-reconciliation-level
+    aggregates are provenance-only in V1 (block leaves are disaggregated,
+    other levels are S-sums) — each gets one explicit warning.
+    """
+    share_by_leaf = {ls.leaf: ls for ls in shares}
+    warnings: list[str] = []
+    for key in sorted(routing_decisions):
+        if key in recon_node_keys:
+            continue  # executed in the base-forecast loop
+        decision = routing_decisions[key]
+        routed = decision.method.upper()
+        if key in leaf_keys:
+            if routed == METHOD_TWIN:
+                leaf_share = share_by_leaf.get(key)
+                if leaf_share is None:
+                    warnings.append(
+                        f"routing: {METHOD_TWIN} for leaf '{key}' has no "
+                        "explicit disaggregation share (MinT path) — twin "
+                        "delegation not verifiable, provenance only"
+                    )
+                elif not leaf_share.cold_start:
+                    warnings.append(
+                        f"routing: {METHOD_TWIN} for leaf '{key}' not "
+                        "applied — the leaf has its own positive history "
+                        f"(weight {leaf_share.weight}), its real share "
+                        f"{leaf_share.share} was used instead of a twin's"
+                    )
+                # cold_start True: the twin rule executed the decision —
+                # the LeafShare record is the audit trail, no warning.
+            else:
+                warnings.append(
+                    f"routing: decision '{decision.method}' for leaf "
+                    f"'{key}' is provenance-only inside a summing block "
+                    "(V1: leaves are disaggregated from the "
+                    "reconciliation level, never forecast directly)"
+                )
+        else:
+            warnings.append(
+                f"routing: decision for '{key}' matches no "
+                f"reconciliation-level node and no leaf of block "
+                f"'{block_code}' — provenance only (that level is an "
+                "S-sum of leaves)"
+            )
+    return warnings
 
 
 def _series_key(ref: SeriesRef) -> str:

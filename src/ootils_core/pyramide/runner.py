@@ -112,6 +112,9 @@ class PyramideRunner:
             # Remonté tel quel pour la persistance des métriques de
             # backtest (pyramide_accuracy_metrics, migration 055).
             accuracy_report=forecast.accuracy_report,
+            # Scellé des poids FM (migration 059) — None pour les
+            # méthodes non-FM et pour le fallback déterministe.
+            model_revision=forecast.model_revision,
         )
 
     @staticmethod

@@ -4,11 +4,12 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ootils_core.forecasting import ForecastMethod, ForecastingEngine, ForecastingError
 
 from .accuracy import AccuracyReport, conformal_intervals, evaluate_rolling_origin
+from .foundation import DEFAULT_MODEL_ID, LoadedPipeline, forecast_batch, load_pipeline
 from .models import (
     METHOD_AUTO_SELECT,
     METHOD_ENSEMBLE_STAT,
@@ -53,6 +54,12 @@ class ForecastComputation:
     # origine. L'appelant ne doit JAMAIS inventer d'intervalles quand ce
     # champ est None (colonnes NULL + provenance).
     accuracy_report: AccuracyReport | None = None
+    # Scellé des poids du modèle de fondation qui a produit `values`
+    # (foundation.LoadedPipeline.revision : SHA de commit HF quand le
+    # backend l'expose, sinon révision demandée ou version du package —
+    # jamais un SHA fabriqué). Persisté dans pyramide_runs.model_revision
+    # (migration 059). None = valeurs non produites par un FM.
+    model_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,8 +77,18 @@ class PyramideForecastEngine:
     requested in method_params.
     """
 
-    def __init__(self, forecasting_engine: ForecastingEngine | None = None) -> None:
+    def __init__(
+        self,
+        forecasting_engine: ForecastingEngine | None = None,
+        foundation_loader: Callable[[Mapping[str, Any]], LoadedPipeline] | None = None,
+    ) -> None:
+        """``foundation_loader`` (dependency injection, PR-B2): callable
+        receiving the resolved method_params and returning a
+        ``foundation.LoadedPipeline``. None (default) = the real
+        ``foundation.load_pipeline`` (lazy chronos import, per-process
+        cache). Injecting a fake keeps FM tests pure — no library mock."""
         self._forecasting_engine = forecasting_engine or ForecastingEngine()
+        self._foundation_loader = foundation_loader
 
     def forecast(
         self,
@@ -127,9 +144,115 @@ class PyramideForecastEngine:
                 params,
             )
         if method == METHOD_FM_CHRONOS:
-            return self._foundation_model_fallback(method, history, periods, params, model_strategy)
+            # Chemin réel (PR-B2) : wrapper Chronos batché — une série ici,
+            # mais MÊME code que le batch du runner hiérarchique. Backend
+            # absent/échec → _foundation_model_fallback inchangé (golden
+            # déterministe préservé) ; strict_backend → PyramideEngineError.
+            return self.forecast_foundation_batch(
+                series=(("series", tuple(history)),),
+                periods=periods,
+                method_params=params,
+                model_strategy=model_strategy,
+                granularity=granularity,
+                random_seed=random_seed,
+            )["series"]
 
         raise PyramideEngineError(f"Unsupported forecast method: {method}")
+
+    def forecast_foundation_batch(
+        self,
+        *,
+        series: Sequence[tuple[str, Sequence[Decimal]]],
+        periods: int,
+        method_params: Mapping[str, Any],
+        model_strategy: str,
+        granularity: str,
+        random_seed: int,
+    ) -> dict[str, ForecastComputation]:
+        """FM_CHRONOS pour TOUTES les séries d'un run — UN SEUL appel
+        d'inférence (spec §2.B : jamais série par série). C'est le point
+        d'entrée du runner hiérarchique pour les séries routées FM ; le
+        chemin mono-série de :meth:`forecast` délègue ici aussi.
+
+        Provenance : ``selected_model`` = ``FM_CHRONOS(model_id@revision)``
+        et ``model_revision`` porte le scellé des poids (migration 059).
+        ``accuracy_report`` reste None — pas de backtest déterministe pour
+        un FM zero-shot, donc bornes conformal NULL (les quantiles natifs
+        du modèle ne remplacent JAMAIS les bornes conformal D2 — refus
+        architecte documenté dans foundation.py). Paramètres reconnus dans
+        ``method_params`` : ``fm_model_id`` (défaut amazon/chronos-2),
+        ``fm_revision`` (pin HF optionnel), ``strict_backend``.
+
+        Backend absent / échec : fallback PAR SÉRIE via
+        ``_foundation_model_fallback`` (AUTO_SELECT déterministe,
+        inchangé), sauf ``strict_backend`` → PyramideEngineError.
+        """
+        if periods < 1:
+            raise PyramideEngineError("periods must be >= 1")
+        params = dict(method_params)
+        params.setdefault("season_length", _default_season_length(granularity))
+        keys = [key for key, _ in series]
+        if len(set(keys)) != len(keys):
+            raise PyramideEngineError(
+                f"duplicate series keys in foundation batch: {keys}"
+            )
+
+        try:
+            if self._foundation_loader is not None:
+                loaded = self._foundation_loader(params)
+            else:
+                revision = params.get("fm_revision")
+                loaded = load_pipeline(
+                    model_id=str(params.get("fm_model_id", DEFAULT_MODEL_ID)),
+                    revision=str(revision) if revision is not None else None,
+                )
+            curves = forecast_batch(
+                loaded.pipeline,
+                [[float(value) for value in history] for _, history in series],
+                periods,
+                seed=random_seed,
+            )
+        except Exception as exc:
+            if params.get("strict_backend"):
+                raise PyramideEngineError(
+                    f"{METHOD_FM_CHRONOS} failed: {exc}"
+                ) from exc
+            logger.info(
+                "%s unavailable (%s); falling back to AUTO_SELECT for "
+                "%d series", METHOD_FM_CHRONOS, exc, len(series),
+            )
+            fallbacks: dict[str, ForecastComputation] = {}
+            for key, history in series:
+                fallback = self._foundation_model_fallback(
+                    METHOD_FM_CHRONOS, history, periods, params, model_strategy
+                )
+                fallbacks[key] = replace(
+                    fallback,
+                    warnings=(
+                        f"{METHOD_FM_CHRONOS} backend unavailable: {exc}",
+                        *fallback.warnings,
+                    ),
+                )
+            return fallbacks
+
+        label = f"{METHOD_FM_CHRONOS}({loaded.model_id}@{loaded.revision})"
+        results: dict[str, ForecastComputation] = {}
+        for (key, _history), curve in zip(series, curves):
+            # Même clamp >= 0 que tous les autres backends : une demande
+            # négative n'existe pas.
+            values = tuple(
+                max(Decimal(str(value)), Decimal("0")) for value in curve
+            )
+            results[key] = ForecastComputation(
+                values=values,
+                selected_model=label,
+                value_method=METHOD_FM_CHRONOS,
+                engine_backend=f"chronos:{loaded.revision_source}",
+                warnings=(),
+                accuracy_report=None,
+                model_revision=loaded.revision,
+            )
+        return results
 
     def _classical(
         self,

@@ -14,6 +14,7 @@ from .models import (
     SUPPORTED_METHODS,
 )
 from .engines import PyramideForecastEngine
+from .foundation import FoundationUnavailable
 from .routing import (
     RoutingDecision,
     RoutingError,
@@ -25,6 +26,7 @@ from .routing import (
 from .runner import PyramideError, PyramideRunner
 
 __all__ = [
+    "FoundationUnavailable",
     "PyramideError",
     "PyramideRunConfig",
     "PyramideRunResult",

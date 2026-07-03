@@ -100,6 +100,12 @@ class PyramideRunResult:
     # (ENSEMBLE_STAT, backend externe, historique trop court) → AUCUNE
     # ligne de métriques, jamais des métriques inventées.
     accuracy_report: AccuracyReport | None = None
+    # Scellé des poids du modèle de fondation qui a produit les valeurs
+    # (ForecastComputation.model_revision, remonté par le runner).
+    # Persisté dans pyramide_runs.model_revision (migration 059).
+    # None = méthode non-FM (ou fallback déterministe servi à la place
+    # du FM) → colonne NULL.
+    model_revision: str | None = None
 
     @property
     def total_quantity(self) -> Decimal:

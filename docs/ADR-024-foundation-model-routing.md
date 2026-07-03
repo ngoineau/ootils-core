@@ -1,0 +1,48 @@
+# ADR-024 — Modèle de fondation & routage tête/traîne : Chronos-2 réel, provenance scellée, quantiles natifs refusés
+
+**Statut :** Accepté — Pyramide V1 axe B, PR-B2 (branche `feat/pyramide-b2-chronos`) ; s'appuie sur PR-B1 (`routing.py`, provenance migration 058), ADR-022 (réconciliation MinT/middle-out) et ADR-023 (confiance D3/D4).
+**Date :** 2026-07-03
+**Contexte mesuré :** `docs/DESIGN-pyramide-forecasting.md` §2.B et §5, décision de licence verrouillée 2026-05-31 (Moirai exclu), stub `FM_CHRONOS` pré-B2 (fallback AUTO_SELECT sans backend réel), North Star « deterministic core, stochastic edge » (CLAUDE.md).
+
+---
+
+## Contexte
+
+Jusqu'à PR-B2, `FM_CHRONOS` était un stub : la méthode existait dans l'enum, mais tout appel retombait sur AUTO_SELECT. L'axe B du design Pyramide (longue traîne, cold-start, covariables causales) n'était donc que du vocabulaire. Par ailleurs le routage tête/traîne de PR-B1 (`routing.py`) ne produisait que de la provenance (`routed_method` / `routed_level` / `routing_reason`, migration 058) sans jamais être exécuté. Deux exigences non négociables encadraient le branchement du vrai modèle : le FM vit sur la **bordure stochastique** (jamais dans le cœur de propagation déterministe), et toute sortie qu'un agent consomme doit être **scellée et rejouable** (provenance honnête, pas de promesse bit-à-bit intenable).
+
+## Décision
+
+1. **Chronos-2 (`amazon/chronos-2`) est le modèle de fondation par défaut d'Ootils.** Apache-2.0 (compatible usage commercial), zero-shot **covariable-informed** : il accepte nativement des covariables futures, ce qui **absorbe l'axe C** (lift causal) du design — pas besoin d'un second modèle causal pour la traîne. Wrapper : `pyramide/foundation.py`, import paresseux (`chronos`/`torch` uniquement dans les fonctions), pipeline chargé **une fois par processus** (cache keyed `(model_id, revision)`), **inférence par batch uniquement** (`forecast_batch` prend toutes les séries FM d'un run en un appel), point forecast = quantile 0.5, seedé (`torch.manual_seed`) avant chaque batch.
+2. **Moirai reste EXCLU.** Salesforce Moirai est cc-by-nc-4.0 — inutilisable commercialement. Décision verrouillée 2026-05-31, déjà appliquée (enums applicatifs purgés, migration 057 tolère les lignes historiques). Cet ADR la confirme : aucun chemin de code ne doit réintroduire `FM_MOIRAI`.
+3. **Alternatives gardées au chaud, pas branchées** : **IBM Granite TTM** (TinyTimeMixer, Apache-2.0, minuscule et rapide) = option **volume** si le mur d'échelle rend Chronos-2 trop coûteux sur un grand parc ; **TimesFM-2.5** (Google, Apache-2.0) = **réserve**. Le wrapper est déjà paramétré par `model_id` : en changer est une décision de configuration, pas de code.
+4. **Routage tête/traîne (design §5) : une méthode ET un niveau, jamais tout en FM.** Le mur d'échelle est structurel (des millions de séries ne passent pas toutes par un transformer) : la tête (historique riche, A-class) va au stat saisonnier/LGBM niveau feuille, la traîne se prévoit **en agrégé** puis se désagrège (MinT/middle-out, ADR-022), le FM est **réservé** au cold-start et à la traîne à valeur sans jumeau ni agrégat porteur. Le routeur s'**auto-améliore par les données** : les backtests rolling-origin de D3 (`pyramide_accuracy_metrics`, migration 055) départagent les familles de méthodes par classe de série — aucun seuil métier codé en dur ne décide qui gagne.
+5. **Exécution du routage dans le `HierarchicalRunner` (PR-B2)** : les décisions sont passées explicitement (`routing_decisions`, mapping vide par défaut = comportement historique inchangé — il n'y a **aucun routage automatique**). Nœud routé vers une méthode supportée → exécutée ; nœuds `FM_CHRONOS` → **batchés en un seul appel** backend ; `TWIN` sur un nœud → rejet bruyant (vocabulaire feuille) ; **`TWIN` sur une feuille → délégué aux parts jumelles existantes de `reconcile.py`** (le middle-out donne déjà à une feuille sans historique la part moyenne de ses sœurs à historique positif — TWIN au routage = pointer cette désagrégation, pas un moteur séparé) ; toute autre décision de feuille → provenance + warning, jamais une exécution silencieuse d'autre chose que la recommandation.
+6. **Provenance scellée honnêtement (`pyramide_runs.model_revision`, migration 059).** Ce qui est réellement scellé, par force décroissante et sans jamais fabriquer un SHA : (a) `hf_commit_sha` — le commit HuggingFace du snapshot effectivement chargé quand le backend l'expose (`config._commit_hash`) ; (b) `requested_revision` — la révision épinglée par l'appelant, renvoyée telle quelle quand le SHA chargé n'est pas exposé ; (c) `package_version` — `chronos-forecasting==X.Y.Z` en dernier recours. `LoadedPipeline.revision_source` dit laquelle on a. La reproductibilité est **best-effort documentée** : le triple persisté (seed, model_id@revision, version de code) garantit le rejeu à environnement fixé (CPU, même build torch), PAS le bit-à-bit inter-machines (mêmes réserves GPU/BLAS que MinT, ADR-022).
+7. **Les quantiles natifs du FM sont REFUSÉS dans `confidence_interval_lower/upper`.** Ces colonnes portent les bornes **conformal** calibrées sur résidus de backtest déterministe (PR-D2, `engines.conformal_bounds`) — une sémantique de couverture mesurée. Un FM zero-shot n'a pas ce backtest ; mélanger dans les mêmes colonnes des bornes calibrées et des quantiles bruts de modèle rendrait leur sémantique illisible pour un agent. Les runs FM persistent donc des bornes NULL (refus documenté, cohérence ADR-023 : l'absence d'information n'est pas une information).
+8. **Covariables météo / programmes Buy : GATED sur le calendrier S&OP.** Chronos-2 les accepte nativement, mais la brique B d'ADR-019 (calendrier S&OP éditable — fenêtres de programmes d'achat, événements par année) **n'existe pas encore**. On refuse de créer une table morte ou des covariables inventées : le câblage exogène attend la brique B ; d'ici là le FM tourne en zero-shot pur. Générique tout business : ce sont des covariables calendaires paramétrées, jamais une constante métier.
+9. **Statut V1 : routage opt-in.** `FM_CHRONOS` tente le vrai backend avec fallback AUTO_SELECT déterministe inchangé (extra absent, poids indisponibles), `strict_backend` → échec bruyant (`PyramideEngineError`). L'extra `[foundation]` (torch CPU + chronos-forecasting) est volontairement séparé — lourd, jamais requis pour le cœur. L'**activation par défaut** du routage est une décision **post-bench pilote** (accuracy D3 sur données réelles), pas un a priori d'architecture.
+
+## Alternatives rejetées
+
+- **Moirai (Salesforce).** Rejeté : cc-by-nc-4.0, verrouillé 2026-05-31. Aucune qualité de modèle ne compense une licence qui interdit l'usage commercial.
+- **Mapper les quantiles natifs de Chronos-2 sur `confidence_interval_*`.** Rejeté (décision d'architecte, documentée dans le wrapper) : casserait la sémantique conformal de D2 ; deux notions de couverture dans une même colonne = colonne inauditable.
+- **Créer la table calendrier S&OP maintenant pour brancher les covariables.** Rejeté : brique B d'ADR-019 non cadrée, personne pour l'alimenter — une table morte est pire que pas de table (anti-pattern DQ).
+- **Promettre la reproductibilité bit-à-bit du FM.** Rejeté : intenable inter-environnements (kernels GPU, BLAS, versions torch). Le scellé honnête est le triple persisté + `revision_source`, pas une promesse fausse.
+- **Routage automatique activé par défaut dès B2.** Rejeté : le routeur doit gagner son activation par le bench pilote (D3), pas par décret ; l'opt-in préserve le comportement historique et rend le diff mesurable.
+- **Inférence série-par-série.** Rejeté : le coût de latence par appel domine ; le contrat est batch-only (spec §2.B), imposé par la signature même de `forecast_batch`.
+
+## Conséquences
+
+- **Positif :** l'axe B est réel — un run hiérarchique peut router ses nœuds vers un vrai FM, la traîne/cold-start a un moteur, chaque run FM est scellé (`model_revision` + `revision_source` + seed) et rejouable à environnement fixé ; TWIN a une exécution concrète sans nouveau moteur ; le cœur reste 100 % déterministe (le FM ne touche jamais la propagation).
+- **Contrainte assumée :** les forecasts FM n'ont pas de bornes de confiance tant que le conformal n'est pas étendu aux sorties FM (backtest FM requis d'abord) ; les tests à vrais poids ne tournent que dans le job CI opt-in `test-foundation` (label PR `foundation` / dispatch manuel) — le job unitaire les skippe via `importorskip`.
+- **À surveiller :** le bench pilote qui décidera de l'activation par défaut du routage ; le mur d'échelle réel (si le parc grossit, évaluer Granite TTM en option volume) ; le câblage covariables dès que la brique B d'ADR-019 existe ; l'extension conformal aux runs FM (rolling-origin sur sorties FM) pour lever le NULL des bornes.
+
+## Références
+
+- `src/ootils_core/pyramide/foundation.py` — wrapper (lazy import, cache processus, scellé de révision, batch seedé).
+- `src/ootils_core/pyramide/engines.py` — chemin FM_CHRONOS, fallback AUTO_SELECT, `strict_backend`.
+- `src/ootils_core/pyramide/routing.py`, `pyramide/hierarchy/runner.py` — décision et exécution du routage (B1→B2).
+- `src/ootils_core/pyramide/hierarchy/reconcile.py` — parts jumelles (exécution TWIN).
+- `src/ootils_core/db/migrations/058_pyramide_routing_provenance.sql`, `059_pyramide_model_revision.sql`.
+- `docs/DESIGN-pyramide-forecasting.md` §2.B, §5, §6 ; `docs/ADR-019-demand-model-pyramide.md` (brique B) ; `docs/ADR-022-pyramide-reconciliation.md` ; `docs/ADR-023-forecast-confidence.md`.
+- `.github/workflows/ci.yml` job `test-foundation` — CI opt-in à vrais poids (cache HF, torch CPU).
