@@ -17,7 +17,11 @@ METHOD_STAT_AUTOETS = "STAT_AUTOETS"
 METHOD_STAT_AUTOARIMA = "STAT_AUTOARIMA"
 METHOD_ML_LGBM = "ML_LGBM"
 METHOD_FM_CHRONOS = "FM_CHRONOS"
-METHOD_FM_MOIRAI = "FM_MOIRAI"
+# FM_MOIRAI (Salesforce Moirai) est EXCLU de l'application : licence
+# cc-by-nc-4.0, incompatible avec un usage commercial (décision verrouillée
+# 2026-05-31). La valeur reste tolérée dans les CHECK DB pour l'historique
+# (migration 057) mais toute requête API la reçoit en 422 comme n'importe
+# quelle méthode inconnue.
 
 SUPPORTED_METHODS = frozenset(
     {
@@ -31,7 +35,6 @@ SUPPORTED_METHODS = frozenset(
         METHOD_STAT_AUTOARIMA,
         METHOD_ML_LGBM,
         METHOD_FM_CHRONOS,
-        METHOD_FM_MOIRAI,
     }
 )
 SUPPORTED_GRANULARITIES = frozenset({"daily", "weekly", "monthly"})

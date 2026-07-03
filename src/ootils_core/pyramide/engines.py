@@ -13,7 +13,6 @@ from .models import (
     METHOD_AUTO_SELECT,
     METHOD_ENSEMBLE_STAT,
     METHOD_FM_CHRONOS,
-    METHOD_FM_MOIRAI,
     METHOD_ML_LGBM,
     METHOD_STAT_AUTOARIMA,
     METHOD_STAT_AUTOETS,
@@ -26,8 +25,10 @@ logger = logging.getLogger(__name__)
 BASE_METHODS = frozenset(
     {ForecastMethod.MA, ForecastMethod.EXP_SMOOTHING, ForecastMethod.CROSTON, ForecastMethod.SEASONAL}
 )
+# FM_MOIRAI n'apparaît plus ici : Moirai (Salesforce) est sous licence
+# cc-by-nc-4.0, exclu commercialement (décision 2026-05-31, migration 057).
 EXTERNAL_METHODS = frozenset(
-    {METHOD_STAT_AUTOETS, METHOD_STAT_AUTOARIMA, METHOD_ML_LGBM, METHOD_FM_CHRONOS, METHOD_FM_MOIRAI}
+    {METHOD_STAT_AUTOETS, METHOD_STAT_AUTOARIMA, METHOD_ML_LGBM, METHOD_FM_CHRONOS}
 )
 
 
@@ -125,7 +126,7 @@ class PyramideForecastEngine:
                 periods,
                 params,
             )
-        if method in {METHOD_FM_CHRONOS, METHOD_FM_MOIRAI}:
+        if method == METHOD_FM_CHRONOS:
             return self._foundation_model_fallback(method, history, periods, params, model_strategy)
 
         raise PyramideEngineError(f"Unsupported forecast method: {method}")
