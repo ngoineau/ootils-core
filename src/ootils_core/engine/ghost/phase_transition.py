@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ INCONSISTENCY_THRESHOLD = 0.10  # 10% deviation triggers alert
 
 
 def run_phase_transition(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     ghost_id: str,
     scenario_id: str,
     from_date: date,
@@ -196,7 +196,7 @@ def run_phase_transition(
 
 
 def _get_projected_inventory(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: str,
     scenario_id: str,
     ref_date: date,

@@ -7,12 +7,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.demo.phase1 import run_phase1_demo_from_env
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
 )
 def list_phase1_demo_runs(
     limit: int = Query(default=5, ge=1, le=50),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> DemoRunListResponse:
     rows = db.execute(

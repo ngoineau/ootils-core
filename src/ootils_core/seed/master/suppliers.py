@@ -16,8 +16,7 @@ import random
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 
 
@@ -126,7 +125,7 @@ def generate_suppliers(profile: Profile) -> SupplierSet:
     return SupplierSet(records=records)
 
 
-def insert_suppliers(conn: psycopg.Connection, sup_set: SupplierSet) -> int:
+def insert_suppliers(conn: DictRowConnection, sup_set: SupplierSet) -> int:
     """Bulk-insert suppliers via UNNEST. Returns rowcount."""
     ids = [r.supplier_id for r in sup_set.records]
     ext_ids = [r.external_id for r in sup_set.records]

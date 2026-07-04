@@ -77,8 +77,6 @@ from decimal import Decimal
 from typing import Mapping, Sequence
 from uuid import UUID
 
-import psycopg
-
 from ..accuracy import bias as accuracy_bias
 from ..accuracy import mase as accuracy_mase
 from ..accuracy import wape as accuracy_wape
@@ -94,6 +92,7 @@ from .reconcile import (
     reconcile,
 )
 from .summing import AGGREGATE, LEAF, SummingBlock, load_summing_blocks
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +311,7 @@ def compute_bench_row(
 
 
 def run_reconciliation_bench(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     *,
     domain: str,
     block_level: str | None = None,
@@ -465,7 +464,7 @@ def _validate_bench_params(
 
 
 def _bench_block(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     block: SummingBlock,
     recon_level: str,
     engine: PyramideForecastEngine,
@@ -754,7 +753,7 @@ def _bench_mint_inputs(
 
 
 def _load_daily_by_item(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     leaves: Sequence[str],
     *,
     start: date,

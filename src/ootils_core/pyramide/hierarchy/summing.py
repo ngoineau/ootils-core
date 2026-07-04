@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Sequence
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +307,7 @@ def _build_block(
 # ---------------------------------------------------------------------------
 
 
-def resolve_default_hierarchy_id(db: psycopg.Connection, domain: str) -> str:
+def resolve_default_hierarchy_id(db: DictRowConnection, domain: str) -> str:
     """
     The is_default hierarchy of a domain (migration 047 registry).
     Fails loudly if the domain has zero or several defaults — the
@@ -334,7 +334,7 @@ def resolve_default_hierarchy_id(db: psycopg.Connection, domain: str) -> str:
 
 
 def load_summing_blocks(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     hierarchy_id: str | None = None,
     domain: str | None = None,
     block_level: str | None = None,

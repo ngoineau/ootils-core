@@ -23,8 +23,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemRecord, ItemSet
 from ootils_core.seed.master.suppliers import SupplierRecord, SupplierSet
@@ -164,7 +163,7 @@ def generate_supplier_items(
 
 
 def insert_supplier_items(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     si_set: SupplierItemSet,
 ) -> int:
     """Bulk-insert supplier_items via UNNEST. Returns rowcount."""

@@ -26,8 +26,7 @@ from collections import Counter
 from collections.abc import Callable
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.dq.engine import DQIssue
 
 
@@ -65,7 +64,7 @@ def _issue(
 def _l4_duplicate_external_id(
     rows: list[tuple[UUID, int, dict]],
     batch_id: UUID,  # noqa: ARG001 (signature uniform across rules)
-    db: psycopg.Connection,  # noqa: ARG001
+    db: DictRowConnection,  # noqa: ARG001
     *,
     field: str = "external_id",
 ) -> list[DQIssue]:
@@ -106,7 +105,7 @@ def _l4_duplicate_external_id(
 def _l4_inter_batch_collision(
     rows: list[tuple[UUID, int, dict]],
     batch_id: UUID,
-    db: psycopg.Connection,
+    db: DictRowConnection,
     *,
     field: str = "external_id",
 ) -> list[DQIssue]:
@@ -164,7 +163,7 @@ def _l4_inter_batch_collision(
 def _l4_supplier_inactive(
     rows: list[tuple[UUID, int, dict]],
     batch_id: UUID,  # noqa: ARG001
-    db: psycopg.Connection,
+    db: DictRowConnection,
 ) -> list[DQIssue]:
     """A supplier_items row references a supplier whose status is not
     'active' (i.e. inactive or blocked). Approving would create a link
@@ -213,7 +212,7 @@ def _l4_supplier_inactive(
 def _l4_orphan_item_no_planning(
     rows: list[tuple[UUID, int, dict]],
     batch_id: UUID,  # noqa: ARG001
-    db: psycopg.Connection,
+    db: DictRowConnection,
 ) -> list[DQIssue]:
     """An item in this batch has zero item_planning_params rows in the DB.
 
@@ -267,7 +266,7 @@ def _l4_orphan_item_no_planning(
 # ---------------------------------------------------------------------------
 
 
-L4RuleFn = Callable[[list[tuple[UUID, int, dict]], UUID, psycopg.Connection], list[DQIssue]]
+L4RuleFn = Callable[[list[tuple[UUID, int, dict]], UUID, DictRowConnection], list[DQIssue]]
 
 
 # Rules that apply to every entity_type carrying an external_id
@@ -295,7 +294,7 @@ def check_l4(
     rows: list[tuple[UUID, int, dict]],
     entity_type: str,
     batch_id: UUID,
-    db: psycopg.Connection,
+    db: DictRowConnection,
 ) -> list[DQIssue]:
     """Run all L4 rules for `entity_type` over the given rows.
 

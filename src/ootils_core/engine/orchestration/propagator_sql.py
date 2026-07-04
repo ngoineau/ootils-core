@@ -30,8 +30,7 @@ import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.orchestration.propagator import PropagationEngine
 from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
@@ -374,7 +373,7 @@ class SqlPropagationEngine(PropagationEngine):
         self,
         calc_run: "CalcRun",
         dirty_nodes: set[UUID],
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         if not dirty_nodes:
             return

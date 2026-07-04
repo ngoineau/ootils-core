@@ -31,9 +31,9 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
-import psycopg
 import json
 
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.llc_calculator import LLCCalculator
 from ootils_core.engine.mrp.gross_to_net import (
     BucketRecord,
@@ -89,7 +89,7 @@ class MrpApicsEngine:
     offsetting by lead time, and exploding dependent demand to child items.
     """
 
-    def __init__(self, db: psycopg.Connection):
+    def __init__(self, db: DictRowConnection):
         self.db = db
         self.llc_calculator = LLCCalculator(db)
         self.gross_to_net = GrossToNetCalculator(db, BASELINE_SCENARIO_ID)

@@ -30,8 +30,7 @@ import json
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.staging.parser import ParseResult
 
 
@@ -59,7 +58,7 @@ class LoadResult:
 
 
 def load_to_staging(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     parse_result: ParseResult,
     entity_type: str,
     source_system: str,
@@ -162,7 +161,7 @@ def load_to_staging(
 
 
 def _bulk_insert_rows(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     batch_id: UUID,
     parse_result: ParseResult,
 ) -> int:

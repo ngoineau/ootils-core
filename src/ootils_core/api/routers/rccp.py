@@ -34,12 +34,12 @@ from datetime import date, timedelta
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/rccp", tags=["rccp"])
@@ -131,7 +131,7 @@ def _generate_buckets(from_date: date, to_date: date, grain: str) -> list[tuple[
 
 
 def _count_working_days(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     location_id: Optional[str],
     start: date,
     end: date,
@@ -185,7 +185,7 @@ def get_rccp(
     to_date: date = Query(default=None, description="Fin de l'horizon (YYYY-MM-DD). Défaut : from_date + 84 jours."),
     grain: str = Query(default="week", description="Granularité : day | week | month."),
     scenario_id: UUID = Depends(resolve_scenario_id),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> RCCPResponse:
     """RCCP endpoint — charge vs capacité par bucket."""

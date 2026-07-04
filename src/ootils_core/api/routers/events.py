@@ -10,12 +10,12 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/events", tags=["events"])
@@ -161,7 +161,7 @@ class EventListResponse(BaseModel):
 @router.post("", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 def create_event(
     body: EventRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> EventResponse:
@@ -264,7 +264,7 @@ def create_event(
 
 @router.get("", response_model=EventListResponse)
 def list_events(
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     limit: int = Query(default=50, ge=1, le=500, description="Max events to return"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),

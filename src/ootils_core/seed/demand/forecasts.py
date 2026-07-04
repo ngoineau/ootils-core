@@ -30,8 +30,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
@@ -134,7 +133,7 @@ def generate_forecasts(
     return nodes
 
 
-def insert_forecasts(conn: psycopg.Connection, nodes: list[ForecastNode]) -> int:
+def insert_forecasts(conn: DictRowConnection, nodes: list[ForecastNode]) -> int:
     """Bulk-insert forecasts as ForecastDemand nodes."""
     if not nodes:
         return 0

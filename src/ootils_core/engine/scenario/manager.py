@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from ootils_core.db.types import DictRowConnection
 from ootils_core.models import (
     Scenario,
     ScenarioDiff,
@@ -109,7 +110,7 @@ class ScenarioManager:
         self,
         name: str,
         parent_scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> Scenario:
         """
         Create a new (non-baseline) scenario branched from parent_scenario_id.
@@ -161,7 +162,7 @@ class ScenarioManager:
         self,
         source_scenario_id: UUID,
         target_scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> dict:
         """
         Copy projection_series from source to target scenario.
@@ -209,7 +210,7 @@ class ScenarioManager:
         self,
         source_scenario_id: UUID,
         target_scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         series_mapping: dict | None = None,
     ) -> int:
         """
@@ -378,7 +379,7 @@ class ScenarioManager:
         field_name: str,
         new_value: str,
         applied_by: Optional[str],
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> ScenarioOverride:
         """
         Apply a field-level override to a node within a scenario.
@@ -549,7 +550,7 @@ class ScenarioManager:
         self,
         scenario_id: UUID,
         baseline_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         baseline_calc_run_id: Optional[UUID] = None,
         scenario_calc_run_id: Optional[UUID] = None,
     ) -> list[ScenarioDiff]:
@@ -648,7 +649,7 @@ class ScenarioManager:
         )
         return diffs
 
-    def _latest_calc_run(self, scenario_id: UUID, db: psycopg.Connection) -> UUID:
+    def _latest_calc_run(self, scenario_id: UUID, db: DictRowConnection) -> UUID:
         """Return the calc_run_id of the latest completed calc_run for a scenario."""
         row = db.execute(
             """
@@ -673,7 +674,7 @@ class ScenarioManager:
     def promote(
         self,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         promoted_by: Optional[str] = None,
     ) -> PromoteResult:
         """
@@ -927,7 +928,7 @@ def _validate_field_name(field_name: str) -> None:
         )
 
 
-def _fetch_nodes_as_dict(scenario_id: UUID, db: psycopg.Connection) -> list[dict]:
+def _fetch_nodes_as_dict(scenario_id: UUID, db: DictRowConnection) -> list[dict]:
     """Fetch all active nodes for a scenario as raw dicts."""
     return db.execute(
         "SELECT * FROM nodes WHERE scenario_id = %s AND active = TRUE",

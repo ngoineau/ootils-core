@@ -22,12 +22,12 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.forecasting.algorithms import ForecastingError
 from ootils_core.forecasting.engine import ForecastingEngine
 from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS, compute_confidence
@@ -191,7 +191,7 @@ class ForecastAdjustResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_item_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve item external_id → item_id UUID."""
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
@@ -200,7 +200,7 @@ def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_location_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve location external_id → location_id UUID."""
     row = db.execute(
         "SELECT location_id FROM locations WHERE external_id = %s",
@@ -209,7 +209,7 @@ def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | N
     return row["location_id"] if row else None
 
 
-def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) -> UUID:
+def _resolve_scenario_uuid(db: DictRowConnection, scenario_id_str: str | None) -> UUID:
     """Resolve scenario_id string → UUID, defaulting to baseline."""
     if scenario_id_str is None or scenario_id_str.lower() == "baseline":
         return BASELINE_SCENARIO_ID
@@ -223,7 +223,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
 
 
 def _get_historical_demand(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     periods: int = 90,
@@ -251,7 +251,7 @@ def _get_historical_demand(
     )
 
 
-def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
+def _soft_delete_forecast(db: DictRowConnection, forecast_id: UUID) -> None:
     """
     Soft delete a forecast by deactivating its values.
     The forecast header remains for audit purposes.
@@ -294,7 +294,7 @@ def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
 )
 def generate_forecast(
     body: ForecastGenerateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastOut:
     """
@@ -513,7 +513,7 @@ def generate_forecast(
 )
 def get_forecast(
     forecast_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastOut:
     """
@@ -662,7 +662,7 @@ def list_forecasts(
     granularity: Optional[str] = Query(default=None, pattern="^(daily|weekly|monthly)$"),
     method: Optional[str] = Query(default=None, pattern="^(MA|EXP_SMOOTHING|CROSTON|SEASONAL)$"),
     limit: int = Query(default=50, ge=1, le=500),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastListResponse:
     """
@@ -796,7 +796,7 @@ def list_forecasts(
 def adjust_forecast(
     forecast_id: UUID,
     body: ForecastAdjustRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastAdjustResponse:
     """
@@ -908,7 +908,7 @@ def adjust_forecast(
 )
 def delete_forecast(
     forecast_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict:
     """

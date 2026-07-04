@@ -21,8 +21,7 @@ from enum import Enum
 from decimal import Decimal
 from typing import List, Optional, Tuple
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.param_overlay import resolved_params_sql
 
 logger = logging.getLogger(__name__)
@@ -68,7 +67,7 @@ class LotSizingEngine:
     - (planned_order_qty, lot_size_rule_applied)
     """
 
-    def __init__(self, db: psycopg.Connection):
+    def __init__(self, db: DictRowConnection):
         self.db = db
 
     def calculate_lot_size(

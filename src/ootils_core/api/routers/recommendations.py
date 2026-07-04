@@ -25,12 +25,12 @@ from decimal import Decimal
 from typing import Any, List, Literal, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.recommendation.state_machine import (
     ALLOWED_TRANSITIONS,
     HumanGateError,
@@ -170,7 +170,7 @@ def _to_out(row: dict) -> RecommendationOut:
 
 @router.get("", response_model=RecommendationsListResponse)
 def list_recommendations(
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
     status_filter: Optional[str] = Query(default=None, alias="status"),
@@ -231,7 +231,7 @@ def list_recommendations(
 @router.get("/{recommendation_id}", response_model=RecommendationDetailOut)
 def get_recommendation(
     recommendation_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> RecommendationDetailOut:
     """Recommendation detail: evidence trail (explainability) + full transition history."""
@@ -277,7 +277,7 @@ def get_recommendation(
 def transition_recommendation(
     recommendation_id: UUID,
     body: TransitionRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> TransitionResponse:
     """Apply a governed state-machine transition to one recommendation."""

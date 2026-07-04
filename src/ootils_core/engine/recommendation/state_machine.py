@@ -31,8 +31,9 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from psycopg.rows import dict_row
+
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ class TransitionResult:
 
 
 def transition_one(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     recommendation_id: UUID,
     to_status: str,
     actor: str,
@@ -197,7 +198,7 @@ def transition_one(
 
 
 def transition_many(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     to_status: str,
     actor: str,
     *,

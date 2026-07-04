@@ -27,8 +27,7 @@ import random
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile, UomMix
 
 
@@ -131,7 +130,7 @@ def generate_items(profile: Profile) -> ItemSet:
     return ItemSet(by_level=by_level)
 
 
-def insert_items(conn: psycopg.Connection, item_set: ItemSet) -> int:
+def insert_items(conn: DictRowConnection, item_set: ItemSet) -> int:
     """Bulk-insert all items via UNNEST. Returns rowcount."""
     ids = [it.item_id for it in item_set.all]
     names = [it.name for it in item_set.all]

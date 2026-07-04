@@ -32,13 +32,13 @@ import logging
 from typing import Literal, Optional
 from uuid import UUID
 
-import psycopg
 from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.recommendation.state_machine import (
     HumanGateError,
     enforce_human_gate,
@@ -69,7 +69,7 @@ class ScenariosListResponse(BaseModel):
 
 @router.get("", response_model=ScenariosListResponse)
 def list_scenarios(
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     status_filter: Optional[str] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
@@ -114,7 +114,7 @@ def list_scenarios(
 @router.get("/{scenario_id}", response_model=ScenarioOut)
 def get_scenario(
     scenario_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ScenarioOut:
     row = db.execute("SELECT * FROM scenarios WHERE scenario_id = %s", (scenario_id,)).fetchone()
@@ -134,7 +134,7 @@ def get_scenario(
 @router.delete("/{scenario_id}", status_code=204)
 def delete_scenario(
     scenario_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> None:
     if scenario_id == BASELINE_SCENARIO_ID:
@@ -221,7 +221,7 @@ class PromoteResponse(BaseModel):
     event_id: UUID
 
 
-def _load_scenario_or_404(scenario_id: UUID, db: psycopg.Connection) -> dict:
+def _load_scenario_or_404(scenario_id: UUID, db: DictRowConnection) -> dict:
     row = db.execute(
         "SELECT * FROM scenarios WHERE scenario_id = %s", (scenario_id,)
     ).fetchone()
@@ -233,7 +233,7 @@ def _load_scenario_or_404(scenario_id: UUID, db: psycopg.Connection) -> dict:
 @router.get("/{scenario_id}/diff", response_model=ScenarioDiffResponse)
 def diff_scenario(
     scenario_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     baseline_id: UUID = Query(default=BASELINE_SCENARIO_ID),
 ) -> ScenarioDiffResponse:
@@ -292,7 +292,7 @@ def diff_scenario(
 def promote_scenario(
     scenario_id: UUID,
     body: PromoteRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PromoteResponse:
     """Promote a scenario's overrides onto the baseline (L3+ decision).

@@ -30,7 +30,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class GrossToNetCalculator:
         # Then apply lot-sizing and lead-time offset externally.
     """
 
-    def __init__(self, db: psycopg.Connection, scenario_id: UUID):
+    def __init__(self, db: DictRowConnection, scenario_id: UUID):
         self.db = db
         self.scenario_id = scenario_id
 

@@ -9,8 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 
 
@@ -56,7 +55,7 @@ def generate_locations(profile: Profile) -> LocationSet:
     return LocationSet(records=records)
 
 
-def insert_locations(conn: psycopg.Connection, loc_set: LocationSet) -> int:
+def insert_locations(conn: DictRowConnection, loc_set: LocationSet) -> int:
     """Bulk-insert all locations via UNNEST. Returns rowcount."""
     ids = [r.location_id for r in loc_set.records]
     names = [r.name for r in loc_set.records]

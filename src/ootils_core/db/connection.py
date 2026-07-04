@@ -26,6 +26,8 @@ from typing import Generator
 import psycopg
 from psycopg.rows import dict_row
 
+from ootils_core.db.types import DictRowConnection
+
 logger = logging.getLogger(__name__)
 
 # Migrations are applied in filename order.
@@ -113,7 +115,7 @@ class OotilsDB:
             pool.close()
 
     @contextmanager
-    def conn(self) -> Generator[psycopg.Connection, None, None]:
+    def conn(self) -> Generator[DictRowConnection, None, None]:
         """
         Yield a configured psycopg3 Connection with dict_row factory.
         Commits on success, rolls back on exception, always closes.

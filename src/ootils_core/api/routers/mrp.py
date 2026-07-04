@@ -16,12 +16,12 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class MrpRunResponseApics(BaseModel):
 # Helpers — Simple MRP
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_item_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve item external_id → item_id UUID."""
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
@@ -103,7 +103,7 @@ def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_location_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve location external_id → location_id UUID."""
     row = db.execute(
         "SELECT location_id FROM locations WHERE external_id = %s",
@@ -112,7 +112,7 @@ def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | N
     return row["location_id"] if row else None
 
 
-def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) -> UUID:
+def _resolve_scenario_uuid(db: DictRowConnection, scenario_id_str: str | None) -> UUID:
     """Resolve scenario_id string → UUID, defaulting to baseline."""
     if scenario_id_str is None or scenario_id_str.lower() == "baseline":
         return BASELINE_SCENARIO_ID
@@ -126,7 +126,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
 
 
 def _get_planning_params(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     scenario_id: UUID,
@@ -189,7 +189,7 @@ def _get_planning_params(
 
 
 def _get_pi_nodes_in_horizon(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     scenario_id: UUID,
@@ -237,7 +237,7 @@ def _apply_lot_sizing(raw_qty: Decimal, min_order_qty: Decimal | None) -> tuple[
 
 
 def _clear_existing_planned_supply(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     scenario_id: UUID,
@@ -293,7 +293,7 @@ def _clear_existing_planned_supply(
 )
 def run_mrp(
     body: MrpRunRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> MrpRunResponse | MrpRunResponseApics:
     """
@@ -316,7 +316,7 @@ def run_mrp(
 
 def _run_simple_mrp(
     body: MrpRunRequest,
-    db: psycopg.Connection,
+    db: DictRowConnection,
     scenario_uuid: UUID,
 ) -> MrpRunResponse:
     """Execute simple single-level MRP (legacy behavior)."""
@@ -474,7 +474,7 @@ def _run_simple_mrp(
 
 def _run_apics_mrp(
     body: MrpRunRequest,
-    db: psycopg.Connection,
+    db: DictRowConnection,
     scenario_uuid: UUID,
 ) -> MrpRunResponseApics:
     """Execute full APICS multi-level MRP."""

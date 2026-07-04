@@ -14,12 +14,12 @@ from datetime import date
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.ghost.ghost_engine import run_ghost
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ def _validate_membership(ghost_type: str, members: list[GhostMemberInput]) -> li
 )
 def ingest_ghost(
     body: IngestGhostRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """
@@ -321,7 +321,7 @@ def list_ghosts(
     ghost_type: Optional[str] = None,
     scenario_id: Optional[UUID] = None,
     ghost_status: Optional[str] = None,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return all ghosts filtered by optional ghost_type, scenario_id, status."""
@@ -391,7 +391,7 @@ def list_ghosts(
 )
 def get_ghost(
     ghost_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return a single ghost with its members and graph node."""
@@ -480,7 +480,7 @@ def get_ghost(
 def run_ghost_endpoint(
     ghost_id: UUID,
     body: GhostRunRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """

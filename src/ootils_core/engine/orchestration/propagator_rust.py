@@ -27,7 +27,6 @@ import os
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-import psycopg
 
 try:
     import ootils_kernel  # type: ignore[import-not-found]
@@ -37,6 +36,7 @@ except ImportError as _exc:  # pragma: no cover — guarded at construction
 else:
     _IMPORT_ERROR = None
 
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.orchestration.propagator import PropagationEngine
 from ootils_core.engine.orchestration.propagator_sql import (
     CLEAR_DIRTY_SQL,
@@ -85,7 +85,7 @@ class RustPropagationEngine(PropagationEngine):
         self,
         calc_run: "CalcRun",
         dirty_nodes: set[UUID],
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """
         Hybrid dispatch:
@@ -108,7 +108,7 @@ class RustPropagationEngine(PropagationEngine):
         # Large subgraph — Rust beats SQL by 3-5× thanks to bulk COPY.
         self._propagate_via_rust(calc_run, db)
 
-    def _propagate_via_sql(self, calc_run: "CalcRun", db: psycopg.Connection) -> None:
+    def _propagate_via_sql(self, calc_run: "CalcRun", db: DictRowConnection) -> None:
         """SQL-engine fallback for small dirty sets. Same SQL strings."""
         params = {
             "scenario_id": calc_run.scenario_id,
@@ -120,7 +120,7 @@ class RustPropagationEngine(PropagationEngine):
             db.execute(SHORTAGES_SQL, params)
         db.execute(CLEAR_DIRTY_SQL, params)
 
-    def _propagate_via_rust(self, calc_run: "CalcRun", db: psycopg.Connection) -> None:
+    def _propagate_via_rust(self, calc_run: "CalcRun", db: DictRowConnection) -> None:
         """Delegate the heavy lifting to ootils_kernel."""
         # Commit dirty_nodes inserts so Rust (separate session) can see them.
         db.commit()

@@ -20,8 +20,6 @@ from decimal import Decimal
 from typing import List, Optional, Tuple, Dict, Any
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.atp.models import (
     ATPResult,
     ATPBucket,
@@ -30,6 +28,7 @@ from ootils_core.atp.models import (
     ATPConfig,
 )
 from ootils_core.constants import BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +59,7 @@ class ATPEngine:
     Performance: <100ms for 1 year horizon with daily buckets
     """
     
-    def __init__(self, db_conn: Optional[psycopg.Connection] = None, config: Optional[ATPConfig] = None):
+    def __init__(self, db_conn: Optional[DictRowConnection] = None, config: Optional[ATPConfig] = None):
         """
         Initialize the ATP engine.
         
@@ -72,12 +71,12 @@ class ATPEngine:
         self._config = config or ATPConfig()
     
     @property
-    def connection(self) -> Optional[psycopg.Connection]:
+    def connection(self) -> Optional[DictRowConnection]:
         """Get the database connection."""
         return self._conn
     
     @connection.setter
-    def connection(self, conn: psycopg.Connection):
+    def connection(self, conn: DictRowConnection):
         """Set the database connection."""
         self._conn = conn
     

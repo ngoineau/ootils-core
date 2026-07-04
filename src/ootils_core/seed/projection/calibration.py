@@ -20,8 +20,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
 from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.orchestration.propagator_sql import SqlPropagationEngine
@@ -46,7 +45,7 @@ class CalibrationResult:
     total_seconds: float
 
 
-def _measure_shortage_pct(conn: psycopg.Connection) -> tuple[int, int]:
+def _measure_shortage_pct(conn: DictRowConnection) -> tuple[int, int]:
     """Return (pi_with_shortage, pi_total) for the baseline scenario."""
     row = conn.execute(
         """
@@ -63,7 +62,7 @@ def _measure_shortage_pct(conn: psycopg.Connection) -> tuple[int, int]:
     return int(row["short_n"]), int(row["total_n"])
 
 
-def _mark_all_pi_dirty_and_start_run(conn: psycopg.Connection) -> tuple[UUID, set[UUID]]:
+def _mark_all_pi_dirty_and_start_run(conn: DictRowConnection) -> tuple[UUID, set[UUID]]:
     """Create a fresh calc_run, persist all active PIs as dirty under it."""
     # Complete any prior running calc_run on this scenario so the advisory
     # lock can be re-acquired.
@@ -96,7 +95,7 @@ def _mark_all_pi_dirty_and_start_run(conn: psycopg.Connection) -> tuple[UUID, se
     return calc_run.calc_run_id, pi_ids
 
 
-def _scale_on_hand(conn: psycopg.Connection, factor: float) -> int:
+def _scale_on_hand(conn: DictRowConnection, factor: float) -> int:
     """Multiply every OnHandSupply.quantity by `factor`. Returns rowcount."""
     cur = conn.execute(
         """
@@ -111,7 +110,7 @@ def _scale_on_hand(conn: psycopg.Connection, factor: float) -> int:
     return cur.rowcount or 0
 
 
-def _build_sql_engine(conn: psycopg.Connection) -> SqlPropagationEngine:
+def _build_sql_engine(conn: DictRowConnection) -> SqlPropagationEngine:
     from ootils_core.engine.kernel.graph.store import GraphStore
     from ootils_core.engine.kernel.graph.traversal import GraphTraversal
     from ootils_core.engine.kernel.calc.projection import ProjectionKernel
@@ -128,7 +127,7 @@ def _build_sql_engine(conn: psycopg.Connection) -> SqlPropagationEngine:
     )
 
 
-def _run_propagation(conn: psycopg.Connection) -> float:
+def _run_propagation(conn: DictRowConnection) -> float:
     """One full propagation pass on all dirty PIs. Returns wall_seconds."""
     from ootils_core.models import CalcRun
 
@@ -170,7 +169,7 @@ def _run_propagation(conn: psycopg.Connection) -> float:
 
 
 def _bootstrap_oh_from_demand(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     horizon_days: int,
     target_cover_days: int = 30,
 ) -> int:
@@ -255,7 +254,7 @@ def _next_oh_scale(pct: float, target_pct: float, tolerance: float) -> tuple[flo
 
 
 def calibrate(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     target_pct: float = 0.07,
     tolerance: float = 0.02,
     max_iterations: int = 10,

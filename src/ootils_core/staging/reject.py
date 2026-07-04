@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class RejectionResult:
 
 
 def reject_batch(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     batch_id: UUID,
     rejected_by: str,
     reason: str,

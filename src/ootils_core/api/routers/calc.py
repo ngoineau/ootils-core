@@ -8,12 +8,12 @@ from uuid import UUID, uuid4
 from datetime import datetime, timezone
 from typing import Optional
 
-import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/calc", tags=["calc"])
@@ -35,7 +35,7 @@ class CalcRunResponse(BaseModel):
 @router.post("/run", response_model=CalcRunResponse)
 def trigger_calc_run(
     body: CalcRunRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> CalcRunResponse:
