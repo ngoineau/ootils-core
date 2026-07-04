@@ -24,7 +24,9 @@ from ootils_core.engine.mrp import core, loader  # noqa: E402
 CORE_SYMBOLS = [
     "BASELINE", "DEFAULT_LT_DAYS", "SUPPLY_TYPES", "FIRM_RECEIPT_TYPES", "DEMAND_TYPES",
     "lot_size", "cost_of", "_spread_period", "apply_lot_rule", "PlanningData",
-    "consume_demand", "run_timephased", "first_shortage", "excess_obsolete", "peg_origins",
+    "ReceiptOrder", "RescheduleSignal",
+    "consume_demand", "run_timephased", "first_shortage", "reschedule_signals",
+    "excess_obsolete", "peg_origins",
 ]
 LOADER_SYMBOLS = ["guard_db", "_m", "load_planning_data"]
 
