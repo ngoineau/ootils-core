@@ -9,12 +9,15 @@ import datetime as _dt
 import math
 from collections import defaultdict
 
+from psycopg.rows import tuple_row
+
 from ootils_core.engine.mrp.core import (
     BASELINE,
     FIRM_RECEIPT_TYPES,
     PlanningData,
     _spread_period,
 )
+from ootils_core.engine.scenario.param_overlay import resolved_params_sql
 
 
 def guard_db(dsn: str, allow_dev: bool = False) -> str:
@@ -31,7 +34,12 @@ def _m(cur, sql, params=None):
 
 
 def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningData:
-    cur = conn.cursor()
+    # All SQL below reads rows positionally (r[0], r[1], ...). Pin the cursor
+    # to tuple rows so this works regardless of the connection's row_factory:
+    # the mrp_core CLIs open tuple-row connections, but a scenario-aware caller
+    # (watchers, API paths per #347) hands us the app's dict_row connection,
+    # under which positional access would raise KeyError: 0.
+    cur = conn.cursor(row_factory=tuple_row)
     b = {"b": scenario}
     horizon_start = cur.execute("SELECT CURRENT_DATE").fetchone()[0]
     d = PlanningData(horizon_start=horizon_start, n_buckets=math.ceil(horizon_days / 7) + 1)
@@ -42,21 +50,65 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
     # (was 12 separate GROUP BY scans of the same table). Same WHERE + same
     # per-item aggregates => byte-identical dicts. Measured 5.5x / -386ms on the
     # pilote DB (24K params rows); see scripts/bench_mrp.py.
+    #
+    # Scenario param overlay (ADR-025, chantier #347 PR2): the pooling here is
+    # SUM/MAX *across locations* for a single item — an override scoped to one
+    # (item, location) must be resolved BEFORE that pooling, or the overlaid
+    # value would never reach the aggregate (a location-scoped override on a
+    # single-location item is invisible to a bare `GROUP BY item_id` over the
+    # raw table; on a multi-location item it would silently pool the UN-
+    # overlaid base value instead). resolved_params_sql() is composed as the
+    # FROM source of this GROUP BY (joined back to item_planning_params on
+    # param_id only for the two fields the resolver does not cover — see
+    # below) instead of grouping the raw table directly, so every whitelisted
+    # field entering the aggregate is already scenario-resolved.
+    # scenario_id=None (baseline) degrades every LEFT JOIN LATERAL inside the
+    # fragment to "no override row", producing the byte-identical baseline
+    # aggregate — see resolved_params_sql()'s docstring.
+    #
+    # `order_multiple` (legacy, no `_qty` suffix) and `is_make` are NOT part
+    # of ALLOWED_PARAM_FIELDS (mig 060 / ADR-025 V1): is_make would change
+    # graph topology (excluded by design from a purely parametric overlay)
+    # and order_multiple is the pre-021 legacy column the resolver
+    # deliberately does not cover. This core-A loader reads `order_multiple`
+    # (the legacy column) straight off base — byte-identical to the pre-PR2
+    # `MAX(order_multiple)` — while the APICS engine reads the modern
+    # `order_multiple_qty`; that column divergence between the two MRP engines
+    # predates #347 and PR2 preserves it exactly. Both `order_multiple` and
+    # `is_make` are read straight off the base table here, unresolved, joined
+    # back on param_id (the resolver's one row per current item_planning_params
+    # row).
+    #
+    # lead_time_total_days is a GENERATED column on the base table and is NOT
+    # in ALLOWED_PARAM_FIELDS either (only its 3 components are overlay-able)
+    # — recomputed here as COALESCE(component,0) summed, byte-for-byte the base
+    # column's own generation expression (COALESCE(s,0)+COALESCE(m,0)+
+    # COALESCE(t,0)), so a NULL component yields the same total as before
+    # instead of NULL-propagating.
+    resolved_ipp_sql = resolved_params_sql("ipp")
+    overlay_scenario_id = scenario if scenario != BASELINE else None
     for r in cur.execute(
-        "SELECT item_id, "
-        "bool_or(is_make), "
-        "SUM(COALESCE(safety_stock_qty,0)), "
-        "MAX(lead_time_total_days), "
-        "MAX(order_multiple), "
-        "MIN(lot_size_rule::text), "
-        "MAX(lot_size_poq_periods), "
-        "MAX(economic_order_qty), "
-        "MAX(max_order_qty), "
-        "MAX(min_order_qty), "
-        "MAX(frozen_time_fence_days), "
-        "MAX(slashed_time_fence_days), "
-        "MIN(forecast_consumption_strategy::text) "
-        "FROM item_planning_params WHERE effective_to IS NULL GROUP BY item_id"
+        f"""
+        SELECT rp.item_id,
+            bool_or(base.is_make),
+            SUM(COALESCE(rp.safety_stock_qty, 0)),
+            MAX(COALESCE(rp.lead_time_sourcing_days, 0)
+                + COALESCE(rp.lead_time_manufacturing_days, 0)
+                + COALESCE(rp.lead_time_transit_days, 0)),
+            MAX(base.order_multiple),
+            MIN(rp.lot_size_rule),
+            MAX(rp.lot_size_poq_periods),
+            MAX(rp.economic_order_qty),
+            MAX(rp.max_order_qty),
+            MAX(rp.min_order_qty),
+            MAX(rp.frozen_time_fence_days),
+            MAX(rp.slashed_time_fence_days),
+            MIN(rp.forecast_consumption_strategy)
+        FROM ({resolved_ipp_sql}) rp
+        JOIN item_planning_params base ON base.param_id = rp.param_id
+        GROUP BY rp.item_id
+        """,
+        {"scenario_id": overlay_scenario_id},
     ).fetchall():
         it = r[0]
         d.is_make[it] = r[1]

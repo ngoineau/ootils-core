@@ -51,6 +51,10 @@ def run_once(dsn: str, horizon_days: int) -> dict:
         # write — protects a loaded/pilote DB from any accidental mutation.
         conn.execute("SET statement_timeout = '120s'")
         conn.execute("SET default_transaction_read_only = on")
+        # psycopg3: SET default_transaction_read_only only applies to
+        # transactions AFTER the current one — commit so the guard is live
+        # before the loader runs (same fix as bench_reconciliation).
+        conn.commit()
 
         d, phases["load"] = _time(core.load_planning_data, conn, horizon_days)
 
