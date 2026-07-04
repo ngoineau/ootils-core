@@ -15,6 +15,7 @@ from uuid import UUID
 
 import psycopg
 
+from ootils_core.constants import BASELINE_SCENARIO_ID
 from ootils_core.models import CalcRun, Node, Scenario
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.engine.kernel.graph.traversal import GraphTraversal
@@ -23,8 +24,15 @@ from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.kernel.calc.projection import ProjectionKernel
 from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
 from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
 logger = logging.getLogger(__name__)
+
+# resolved_field_lateral_sql()'s documented baseline-purity path is
+# `scenario_id=None`; a CalcRun's scenario_id is the literal baseline UUID
+# (never None), so we translate it to None before resolving overrides.
+# BASELINE_SCENARIO_ID is the shared canonical constant (constants.py,
+# audit finding F-057 — new code imports it, never re-declares the UUID).
 
 
 class PropagationEngine:
@@ -284,6 +292,9 @@ class PropagationEngine:
         # 4. Pre-load all safety-stock parameters for the (item, location) pairs
         # touched by the dirty PI set — drops `_get_safety_stock` from "1 query
         # per PI" to "0 queries per PI" in the common case.
+        # Cache is LOCAL to this call (rebuilt per calc_run) — it is naturally
+        # scoped to `scenario_id` already; do not promote it to an
+        # instance-level attribute (chantier #347 PR3).
         safety_stock_cache: dict[tuple[UUID, Optional[UUID]], Decimal] = {}
         # Unit costs for severity valuation (#342). Mirrors mrp_core.cost_of
         # — the single valuation precedence used by the watcher fleet:
@@ -300,14 +311,31 @@ class PropagationEngine:
             }
             if pi_pairs:
                 item_ids = list({pair[0] for pair in pi_pairs})
+                # safety_stock_qty (chantier #347 PR3, ADR-025): resolved
+                # through resolved_field_lateral_sql() so a scenario-scoped
+                # override is visible to this preload — same `scenario_id`
+                # already driving this calc_run's propagation (calc_run.
+                # scenario_id, resolved above). Baseline is translated to
+                # None: overrides can never exist for the baseline scenario
+                # (set_param_override() refuses is_baseline=TRUE), and None
+                # is the resolver's documented baseline-purity path — the
+                # LATERAL degrades to "no override row", byte-identical to
+                # the pre-#347 query.
+                overlay_scenario_id = (
+                    None if scenario_id == BASELINE_SCENARIO_ID else scenario_id
+                )
                 rows = db.execute(
-                    """
-                    SELECT item_id, location_id, safety_stock_qty
-                    FROM item_planning_params
-                    WHERE item_id = ANY(%s)
-                      AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
+                    f"""
+                    SELECT ipp.item_id, ipp.location_id, ipp_ss.ipp_ss AS safety_stock_qty
+                    FROM item_planning_params ipp
+                    {resolved_field_lateral_sql("safety_stock_qty", "ipp", "ipp_ss")}
+                    WHERE ipp.item_id = ANY(%(item_ids)s)
+                      AND (ipp.effective_to IS NULL OR ipp.effective_to = '9999-12-31'::DATE)
                     """,
-                    (item_ids,),
+                    {
+                        "item_ids": item_ids,
+                        "scenario_id": overlay_scenario_id,
+                    },
                 ).fetchall()
                 for r in rows:
                     if r["safety_stock_qty"] is None:
@@ -617,7 +645,7 @@ class PropagationEngine:
                         or safety_stock_cache.get((node.item_id, None))
                     )
                 else:
-                    safety_stock = self._get_safety_stock(node, db)
+                    safety_stock = self._get_safety_stock(node, scenario_id, db)
                 # Severity valuation (#342): items.standard_cost when known,
                 # detector proxy (1) otherwise. Standalone calls (no cache)
                 # keep the proxy — cost lookup is a batch concern.
@@ -646,21 +674,40 @@ class PropagationEngine:
 
         return changed
 
-    def _get_safety_stock(self, node: Node, db: psycopg.Connection) -> Optional[Decimal]:
-        """Fetch safety_stock_qty from item_planning_params for this node's item/location."""
+    def _get_safety_stock(
+        self, node: Node, scenario_id: UUID, db: psycopg.Connection
+    ) -> Optional[Decimal]:
+        """Fetch safety_stock_qty from item_planning_params for this node's
+        item/location, resolved for `scenario_id` (chantier #347 PR3,
+        ADR-025) — a scenario-scoped override wins over the base column via
+        resolved_field_lateral_sql(), same precedence as the batch preload
+        in _propagate(). This is the standalone-call fallback path (used
+        when safety_stock_cache is None, e.g. tests / callers outside the
+        batched _propagate loop): baseline is translated to None so the
+        resolver's documented baseline-purity path applies, matching the
+        cache-preload translation above."""
         if node.item_id is None:
             return None
         try:
+            overlay_scenario_id = (
+                None if scenario_id == BASELINE_SCENARIO_ID else scenario_id
+            )
             row = db.execute(
-                """
-                SELECT safety_stock_qty FROM item_planning_params
-                WHERE item_id = %s
-                  AND (location_id = %s OR location_id IS NULL)
-                  AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-                ORDER BY location_id NULLS LAST
+                f"""
+                SELECT ipp_ss.ipp_ss AS safety_stock_qty
+                FROM item_planning_params ipp
+                {resolved_field_lateral_sql("safety_stock_qty", "ipp", "ipp_ss")}
+                WHERE ipp.item_id = %(item_id)s
+                  AND (ipp.location_id = %(location_id)s OR ipp.location_id IS NULL)
+                  AND (ipp.effective_to IS NULL OR ipp.effective_to = '9999-12-31'::DATE)
+                ORDER BY ipp.location_id NULLS LAST
                 LIMIT 1
                 """,
-                (node.item_id, node.location_id),
+                {
+                    "item_id": node.item_id,
+                    "location_id": node.location_id,
+                    "scenario_id": overlay_scenario_id,
+                },
             ).fetchone()
             if row and row["safety_stock_qty"] is not None:
                 return Decimal(str(row["safety_stock_qty"]))

@@ -33,6 +33,7 @@ from uuid import UUID
 import psycopg
 
 from ootils_core.engine.orchestration.propagator import PropagationEngine
+from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
 if TYPE_CHECKING:
     from ootils_core.models import CalcRun
@@ -230,6 +231,25 @@ SHORTAGES_SQL = """
 -- shortage_date  = COALESCE(time_span_start, time_ref)
 -- Restricted to the dirty subgraph for this calc_run; clean PIs' shortages
 -- are left to RESOLVE_STALE_SQL below.
+-- safety_stock_qty (chantier #347 PR3, ADR-025): resolved through
+-- resolved_field_lateral_sql() instead of a raw item_planning_params
+-- LATERAL, so a scenario-scoped safety_stock_qty override (set via
+-- set_param_override()) is visible to shortage detection inside a fork.
+-- %(scenario_id)s here is the SAME parameter already bound for the PI
+-- filter below (`pi.scenario_id = %(scenario_id)s`) — psycopg3 binds a
+-- repeated named placeholder from a single dict key, and this query needs
+-- exactly one scenario_id value for BOTH purposes: unlike the Python
+-- engine's preload query (propagator.py), which resolves overrides in a
+-- query separate from the PI scenario filter and can afford to translate
+-- baseline -> None, this single combined query cannot use two different
+-- values for the same placeholder. Passing the real (non-translated)
+-- baseline UUID here is still baseline-pure: set_param_override() refuses
+-- overrides on the baseline scenario (is_baseline=TRUE), so
+-- scenario_planning_overrides can structurally never carry a row for it —
+-- the LATERAL degrades to "no override row" exactly like scenario_id=NULL
+-- would, just via "no matching row" instead of "NULL never equals NOT NULL".
+-- Ownership of `shortages` stays exclusively ShortageDetector's (ADR-021);
+-- this only corrects the VALUE the query reads, never who writes the row.
 WITH pi_with_ss AS (
     SELECT
         pi.scenario_id,
@@ -239,7 +259,7 @@ WITH pi_with_ss AS (
         pi.closing_stock,
         COALESCE(pi.time_span_start, pi.time_ref) AS shortage_date,
         GREATEST((pi.time_span_end - pi.time_span_start), 1) AS days_in_bucket,
-        ipp.safety_stock_qty,
+        ipp_ss.ipp_ss AS safety_stock_qty,
         COALESCE(sup.unit_cost, i.standard_cost, 1)::numeric AS unit_cost
     FROM nodes pi
     JOIN dirty_nodes dn
@@ -255,8 +275,15 @@ WITH pi_with_ss AS (
         ORDER BY is_preferred DESC, unit_cost ASC
         LIMIT 1
     ) sup ON TRUE
+    -- This inner LATERAL exposes item_id/location_id so the overlay
+    -- LATERAL below can correlate on them. It pins location_id = pi.location_id
+    -- and item_planning_params.location_id is NOT NULL, so ipp.location_id is
+    -- always the PI's exact location — that is what makes the overlay's
+    -- exact-location > item-global precedence resolve correctly here. If a
+    -- future migration makes item_planning_params.location_id nullable, or
+    -- this filter loosens, revisit the correlation below.
     LEFT JOIN LATERAL (
-        SELECT safety_stock_qty
+        SELECT item_id, location_id, safety_stock_qty
         FROM item_planning_params
         WHERE item_id = pi.item_id
           AND location_id = pi.location_id
@@ -264,6 +291,7 @@ WITH pi_with_ss AS (
         ORDER BY effective_from DESC
         LIMIT 1
     ) ipp ON TRUE
+    {ipp_ss_lateral}
     WHERE dn.calc_run_id = %(calc_run_id)s
       AND pi.node_type = 'ProjectedInventory'
       AND pi.scenario_id = %(scenario_id)s
@@ -315,7 +343,7 @@ ON CONFLICT (pi_node_id, calc_run_id) DO UPDATE SET
     status         = EXCLUDED.status,
     severity_class = EXCLUDED.severity_class,
     updated_at     = EXCLUDED.updated_at;
-"""
+""".format(ipp_ss_lateral=resolved_field_lateral_sql("safety_stock_qty", "ipp", "ipp_ss"))
 
 
 RESOLVE_STALE_SQL = """
