@@ -25,11 +25,17 @@ fails, simulable candidates are STILL emitted but demoted to
 confidence=NEEDS_DATA_REVIEW and carry NO delta — never a fabricated one.
 See :func:`effective_confidence`.
 
-Scope note: only shortage_watcher and material_watcher are scenario-backed
-(their actions are node overrides in the ScenarioManager whitelist). The
-lot_policy / eando / dq watchers stay baseline-only: their actions are
-parameter / disposition changes not expressible as node overrides — gated on
-the scenario parameter overlay (chantier #347).
+Scope note: shortage_watcher and material_watcher are scenario-backed via
+:func:`simulate_run` (node overrides — EXPEDITE advances an existing firm
+receipt). lot_policy is ALSO scenario-backed, via the sibling
+:func:`simulate_param_run` (chantier #347 PR4): its actions map onto
+whitelisted planning-param overlay fields (``lot_size_rule`` /
+``min_order_qty`` / ``order_multiple_qty``, see ``ALLOWED_PARAM_FIELDS``),
+applied through ``simulate_param_overrides`` instead of
+``simulate_overrides``, but sharing the same one-fork-per-run /
+archive-at-end harness shape. eando / dq stay baseline-only: their actions
+are disposition changes, not expressible as either a node override or a
+planning-param overlay field.
 """
 from __future__ import annotations
 
@@ -41,7 +47,11 @@ import psycopg
 from psycopg.rows import dict_row
 
 import mrp_core as core
-from ootils_core.tools.agent_tools import archive_scenario, simulate_overrides
+from ootils_core.tools.agent_tools import (
+    archive_scenario,
+    simulate_overrides,
+    simulate_param_overrides,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +62,10 @@ NOT_SIMULABLE_NEW_ORDER = (
 NOT_SIMULABLE_NO_RECEIPT = (
     "no existing future firm receipt lands after the need date for this item — "
     "nothing to advance by override"
+)
+NOT_SIMULABLE_NON_PARAMETRIC = (
+    "action does not map onto a whitelisted planning-param overlay field "
+    "(ALLOWED_PARAM_FIELDS) — nothing to simulate by parameter override"
 )
 
 
@@ -224,6 +238,119 @@ def simulate_run(dsn: str, agent_name: str, candidates: list, receipts_by_item: 
         logger.exception(
             "agent=%s: scenario simulation failed — simulable candidates will be "
             "emitted as NEEDS_DATA_REVIEW without delta", agent_name,
+        )
+        if summary["propagation_status"] is None:
+            summary["propagation_status"] = "failed"
+    return summary, results
+
+
+def simulate_param_run(dsn: str, agent_name: str, candidates: list, applied_by: str):
+    """Run the ONE-fork-per-run counter-factual for a planning-param overlay
+    watcher run (chantier #347 PR4 — sibling of :func:`simulate_run`).
+
+    candidates: list of {"item": uuid, "simulable": bool,
+                 "param_override": {"item_id", "location_id", "field_name",
+                 "value"} | list[{...}] | None, "reason": str | None}. A list
+                 covers a proposal that maps onto MORE than one whitelisted
+                 field at once (e.g. SET_LOT_RULE:POQ needs BOTH
+                 lot_size_rule and lot_size_poq_periods to be meaningful —
+                 see agent_lot_policy_watcher.build_param_override); every
+                 override in the list is applied inside the SAME candidate's
+                 fork contribution, and its per-item delta share is still
+                 attributed as ONE candidate. The CALLER (the watcher)
+                 decides simulability and builds the whitelisted
+                 param_override(s) — this harness only owns the
+                 fork/propagate/archive lifecycle, exactly like simulate_run
+                 owns it for node overrides.
+
+    Returns (summary, results) — SAME shape as simulate_run:
+      summary — {"scenario_id", "scenario_name", "propagation_status",
+                 "delta_computed", "aggregate", "archived",
+                 "simulated_candidates", "non_simulated_candidates"}.
+                 aggregate = {"new_shortages", "resolved_shortages",
+                 "net_change"} or None. No fork is created when no candidate
+                 is simulable (scenario_id stays None).
+      results — one dict per candidate (index-aligned):
+                 {"simulated": bool, "reason": str|None,
+                  "delta": {"new_shortages", "resolved_shortages",
+                            "net_change"} | None,
+                  "override": {...}|list[{...}]|None} (same shape the
+                  candidate supplied — dict or list).
+    """
+    results = []
+    overrides, sim_idx = [], []
+    for i, c in enumerate(candidates):
+        if not c.get("simulable") or not c.get("param_override"):
+            results.append({
+                "simulated": False,
+                "reason": c.get("reason") or NOT_SIMULABLE_NON_PARAMETRIC,
+                "delta": None, "override": None,
+            })
+            continue
+        ov = c["param_override"]
+        ov_list = ov if isinstance(ov, list) else [ov]
+        results.append({"simulated": True, "reason": None, "delta": None, "override": ov})
+        overrides.extend({k: o[k] for k in ("item_id", "location_id", "field_name", "value")} for o in ov_list)
+        sim_idx.append(i)
+
+    summary = {
+        "scenario_id": None, "scenario_name": None,
+        "propagation_status": None, "delta_computed": False,
+        "aggregate": None, "archived": False,
+        "simulated_candidates": len(sim_idx),
+        "non_simulated_candidates": len(candidates) - len(sim_idx),
+    }
+    if not overrides:
+        return summary, results
+
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    name = f"what-if-{agent_name}-{ts}"
+    summary["scenario_name"] = name
+    try:
+        # Dedicated dict_row connection: simulate_param_overrides owns its own
+        # transaction/commits and the engine kernels need dict rows — never
+        # reuse the watcher's governed-run connection.
+        with psycopg.connect(dsn, row_factory=dict_row) as simconn:
+            try:
+                sim = simulate_param_overrides(
+                    simconn, overrides,
+                    scenario_name=name, base_scenario_id=core.BASELINE,
+                    applied_by=applied_by,
+                )
+                summary["scenario_id"] = sim["scenario_id"]
+                summary["propagation_status"] = sim["propagation_status"]
+                summary["delta_computed"] = sim["delta_computed"]
+                if sim["delta_computed"]:
+                    delta = sim["delta"]
+                    new_by = Counter(str(e["item_id"]) for e in delta["new_shortages"] if e["item_id"])
+                    res_by = Counter(str(e["item_id"]) for e in delta["resolved_shortages"] if e["item_id"])
+                    summary["aggregate"] = {
+                        "new_shortages": len(delta["new_shortages"]),
+                        "resolved_shortages": len(delta["resolved_shortages"]),
+                        "net_change": delta["net_shortage_change"],
+                    }
+                    # Attribute each simulable candidate its per-item share of
+                    # the aggregate delta.
+                    for i in sim_idx:
+                        it = str(candidates[i]["item"])
+                        n_new, n_res = new_by.get(it, 0), res_by.get(it, 0)
+                        results[i]["delta"] = {
+                            "new_shortages": n_new,
+                            "resolved_shortages": n_res,
+                            "net_change": n_new - n_res,
+                        }
+            finally:
+                # ALWAYS retire the run's fork, even on a failed recompute —
+                # TTL pattern (status='archived'), never DELETE.
+                if summary["scenario_id"]:
+                    archive_scenario(simconn, summary["scenario_id"])
+                    summary["archived"] = True
+    except Exception:
+        # Fail-loudly: the run continues, simulable candidates are demoted to
+        # NEEDS_DATA_REVIEW by effective_confidence() — no fabricated delta.
+        logger.exception(
+            "agent=%s: param-overlay scenario simulation failed — simulable "
+            "candidates will be emitted as NEEDS_DATA_REVIEW without delta", agent_name,
         )
         if summary["propagation_status"] is None:
             summary["propagation_status"] = "failed"

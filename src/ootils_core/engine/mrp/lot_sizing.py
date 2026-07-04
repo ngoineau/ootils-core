@@ -451,8 +451,8 @@ class LotSizingEngine:
         Scenario param overlay (ADR-025, chantier #347 PR2): composes on
         resolved_params_sql() so a scenario-scoped override on any of the 15
         whitelisted fields is visible here. scenario_id=None (default,
-        matching every current call — this method has no production caller
-        yet; see TODO(#347-PR4) below) resolves to baseline-identical values.
+        matching every current call — this method has no production caller;
+        see NOTE below) resolves to baseline-identical values.
 
         order_multiple_qty legacy fallback: COALESCE(rp.order_multiple_qty,
         base.order_multiple) is a legacy COLUMN fallback (pre-021 column
@@ -476,9 +476,12 @@ class LotSizingEngine:
         COALESCE(component,0) summed, byte-for-byte the base column's own
         generation expression (a NULL component must not NULL the total).
 
-        TODO(#347-PR4): this method has no caller today (calculate_lot_size
-        is what mrp_apics_engine.py actually wires) — scenario_id is threaded
-        for when a caller appears, not because one exists yet.
+        NOTE: this method currently has no caller (calculate_lot_size is what
+        mrp_apics_engine.py actually wires); scenario_id is threaded so a
+        future caller resolves overlay-aware by default. This is a stable,
+        intentional state — NOT #347 debt (the chantier's live read paths are
+        all wired; see ADR-025). Kept overlay-composed for parity with its
+        siblings should a caller appear.
         """
         resolved_ipp_sql = resolved_params_sql("ipp")
         loc_filter = "AND rp.location_id = %(location_id)s" if location_id else ""
