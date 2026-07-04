@@ -1,6 +1,6 @@
 # ADR-025 — Overlay scénarisé des paramètres de planification : un résolveur unique, jamais promu
 
-**Statut :** Accepté — chantier #347. PR1 (branche `feat/param-overlay-foundation`) : fondation (table + résolveur), non branchée à aucun lecteur. PR2 (lecteurs MRP batch) mergée. PR3 (propagation/`SHORTAGES_SQL` + 5ᵉ lecteur `mrp.py` mode simple) mergée — voir section dédiée ci-dessous. PR4 (chemin agent + endpoint REST) reste à faire.
+**Statut :** Accepté — chantier #347 **CLÔTURÉ**, 4 PRs mergées. PR1 (`feat/param-overlay-foundation`) : fondation (table + résolveur), non branchée à aucun lecteur. PR2 (lecteurs MRP batch) mergée. PR3 (propagation/`SHORTAGES_SQL` + 5ᵉ lecteur `mrp.py` mode simple) mergée — voir section dédiée ci-dessous. PR4 (chemin agent + endpoint REST) mergée — voir section dédiée ci-dessous. Les 15 champs whitelistés (`ALLOWED_PARAM_FIELDS`) sont désormais forkables de bout en bout : loaders MRP batch → propagation/détection de pénurie → chemin agent (watcher scenario-backed) → endpoint REST.
 **Date :** 2026-07-03
 **Contexte mesuré :** REVIEW-2026-07-APS A10 (`docs/REVIEW-2026-07-APS.md`) — master data non forkable, what-if lead time/MOQ/safety stock structurellement impossible.
 
@@ -65,12 +65,30 @@ Deux options ont été écartées d'emblée (voir Alternatives) : forker le mast
 
 5. **Baseline byte-identique — garanti par construction, pas par un cas spécial.** Sur le scénario baseline, le résolveur dégrade en « aucun override » : `scenario_planning_overrides` ne peut structurellement porter aucune ligne pour la baseline (`set_param_override()` refuse `is_baseline=TRUE`, cf. PR1 point 6), donc chaque `LEFT JOIN LATERAL` ne matche rien et `COALESCE(NULL, base) = base`. Aucune branche de code dédiée « si baseline, ignorer l'overlay » — c'est le même chemin SQL qui, sur baseline, ne trouve jamais de ligne à joindre. Preuve attendue : un run de propagation baseline avant/après le patch produit des lignes `shortages` identiques (UUID déterministes inchangés) et le garde-fou CI `tests/integration/test_shortage_truth_consistency_integration.py` reste vert sans modification de son propre code.
 
+## PR4 — chemin agent & endpoint REST
+
+**Statut :** Mergée. Portée : brancher le dernier axe restant — poser/lister/effacer un override depuis un agent (contre-factuel scenario-backed) et depuis l'API REST — sans introduire un second point de résolution ni une deuxième forme de promotion.
+
+1. **`simulate_param_overrides` — frère de `simulate_overrides`, cœur partagé.** `src/ootils_core/tools/agent_tools.py` ajoute `simulate_param_overrides`, qui pose N overrides de planning-param via `set_param_override()` (au lieu de `ScenarioManager.apply_override()` pour les node overrides), puis délègue le fork→propagate→delta au même helper interne `_fork_propagate_delta` que `simulate_overrides` — ce helper n'a aucune connaissance du type d'override appliqué en amont. Même contrat : une connexion dict_row dédiée, la fonction possède sa propre transaction et commit deux fois (fork+overrides d'abord, pour survivre à un recompute qui échoue ; fin de propagation ensuite), un override rejeté (`ParamOverlayError` — whitelist, valeur illégale, cible orpheline, scénario baseline) est consigné dans `failed_overrides` avec message hand-authored (UUID/field-only, même carve-out que `api/routers/staging.py`), jamais fatal et jamais fabriqué en delta silencieux.
+2. **Harness `simulate_param_run`** (`scripts/agent_simulation.py`) — sibling de `simulate_run`, même forme de retour (`summary`, `results`), même cycle de vie fork→propagate→archive (TTL, jamais DELETE, jamais promue). Un candidat peut porter **un seul** override ou une **liste** d'overrides appliqués ensemble dans la même contribution au fork (cas `SET_LOT_RULE:POQ`, qui a besoin à la fois de `lot_size_rule` et `lot_size_poq_periods` pour être signifiant) ; le delta par-item reste attribué comme **un seul** candidat même quand plusieurs overrides le composent. Aucun fork n'est créé si aucun candidat n'est simulable (`scenario_id` reste `None`).
+3. **`lot_policy_watcher` passe de baseline-only à scenario-backed.** `scripts/agent_lot_policy_watcher.py` forke désormais un what-if (`what-if-lot_policy_watcher-<ts>`) par run via `simulate_param_run`, sur le sous-ensemble mappable de ses 3 `change_type` :
+
+   | `change_type` | Champ overlay ciblé |
+   |---|---|
+   | `SET_LOT_RULE` | `lot_size_rule` (+ `lot_size_poq_periods` si la règle proposée est POQ) |
+   | `RENEGOTIATE_MOQ` | `min_order_qty` |
+   | `REVIEW_MULTIPLE` | `order_multiple_qty` |
+
+   Les 3 `change_type` que ce watcher émet sont **tous** dans la whitelist V1 (§ Décision, point 4) — donc l'intégralité de son périmètre d'actions est simulable, contrairement à shortage_watcher/material_watcher où seul EXPEDITE-sur-réception-ferme-future l'est. Une propagation de fork qui échoue démote la reco simulée à `NEEDS_DATA_REVIEW` sans delta fabriqué (`agent_simulation.effective_confidence`, même contrat fail-loudly que #340). Ce watcher reste **L1 DRAFT strict** : il n'écrit que dans `parameter_recommendations`, jamais dans `shortages` ni dans l'ERP — la simulation ne change ni son autorité d'écriture ni son niveau de gouvernance (`scripts/agent_governance.py:decision_level`).
+4. **Endpoint REST `POST/GET/DELETE /v1/scenarios/{id}/param-overrides`** (`src/ootils_core/api/routers/param_overrides.py`, branché dans `api/app.py`) — wrapper HTTP fin sans logique métier propre : `POST` upsert un override scoped-scénario (201, corps `ParamOverrideIn`), `GET` liste (200, liste vide légitime sur baseline ou scénario sans override), `DELETE .../param-overrides/{field_name}` efface (204, idempotent — override absent = no-op, pas une erreur). Kill-switch `OOTILS_PARAM_OVERLAY_ENABLED` (défaut ON) vérifié comme dépendance FastAPI **avant** `Depends(get_db)` — un overlay désactivé répond 503 sans toucher au pool DB. `ParamOverlayError` → 422 avec `detail=str(e)`, même carve-out que `DiffError`/`ApprovalError`/`RejectionError` (`staging.py`) : message hand-authored (UUID/field/enum seuls), aucune fuite DSN/psycopg. **L0, aucune porte d'approbation** — poser un override est de la simulation pure, jamais promue sur baseline ; la porte humaine qui compte reste `POST /v1/scenarios/{id}/promote`, qui ne rejoue jamais les overrides de param (décision ferme, § Décision point 5 — pas un TODO).
+5. **eando/dq restent hors périmètre, par nature — pas de la dette #347.** Leurs actions sont des changements de **disposition** (non paramétriques), non mappables sur un champ de la whitelist overlay ni sur un node override existant. Ce n'est pas un oubli de PR4 ni un reste-à-faire du chantier : les débloquer nécessiterait un mécanisme de simulation non paramétrique distinct — un autre chantier, hors #347.
+
 ## Limites assumées V1
 
 - Pas d'émission `StreamChanges` à la pose d'un overlay — l'observabilité passe par le `calc_run` scénario-scopé qui suit (PR2/PR3), pas par un événement dédié à l'overlay lui-même.
 - Pas de dimension temporelle sur l'overlay (pas de fenêtre d'effectivité) — une seule valeur active par (scénario, item, location, champ).
 - Effectivité au **prochain run scénario-scopé**, pas de push temps réel : poser un override ne recalcule rien tant qu'aucun caller ne relit à travers `resolved_params_sql()`.
-- PR1 a fourni la fondation seule (table + résolveur + CRUD d'override), sans lecteur branché. Depuis PR2 (loaders MRP batch) et PR3 (propagation/`SHORTAGES_SQL` + 5ᵉ lecteur `mrp.py` mode simple), un override posé a un effet observable sur un run MRP batch et sur la propagation/détection de pénurie scénarisées. Reste non branché : le chemin agent + endpoint REST (PR4) — tant que PR4 n'est pas mergée, poser/lister/effacer un override ne passe encore que par appel direct au module Python, pas par l'API.
+- Chantier #347 complet (PR1→PR4) : la fondation (PR1), les loaders MRP batch (PR2), la propagation/détection de pénurie (PR3) et le chemin agent + endpoint REST (PR4) sont tous mergés et branchés sur le même résolveur unique. eando/dq restent hors périmètre par nature (actions de disposition non paramétriques, cf. section PR4 point 5) — limite assumée, pas une PR différée.
 
 ## Alternatives rejetées
 
@@ -79,9 +97,9 @@ Deux options ont été écartées d'emblée (voir Alternatives) : forker le mast
 
 ## Conséquences
 
-- **Positif :** le what-if lead time/MOQ/safety stock devient possible dans un fork sans toucher la baseline ni les scénarios frères ; un seul point de résolution (`resolved_params_sql()`) empêche la dérive de précédence que deux `COALESCE` écrits indépendamment produiraient tôt ou tard.
-- **Négatif / dette :** le chemin agent + endpoint REST (PR4) n'est pas branché — poser/lister/effacer un override ne passe encore que par appel direct au module Python (pas d'exposition API), donc pas encore accessible aux watchers scenario-backed (#340) ni à un opérateur humain via l'API.
-- **Reste à faire :** PR4 (chemin agent + endpoint REST pour poser/lister/effacer des overrides depuis l'API). PR2 (loaders MRP batch) et PR3 (propagation / `SHORTAGES_SQL` + 5ᵉ lecteur `mrp.py`) sont mergées — voir section dédiée PR3 ci-dessus.
+- **Positif :** le what-if lead time/MOQ/safety stock devient possible dans un fork sans toucher la baseline ni les scénarios frères ; un seul point de résolution (`resolved_params_sql()`) empêche la dérive de précédence que deux `COALESCE` écrits indépendamment produiraient tôt ou tard ; le chemin agent (`simulate_param_overrides`/`simulate_param_run`) et l'endpoint REST partagent ce même résolveur et le même cycle fork/propagate/archive que les watchers node-override (#340), donc `lot_policy_watcher` est scenario-backed sans code de simulation dupliqué.
+- **Négatif / dette :** aucune dette de branchement restante sur le périmètre V1 — la seule limite est le périmètre lui-même (15 champs, pas de topologie/BOM, eando/dq hors scope par nature, cf. section PR4 point 5).
+- **Reste à faire :** rien sur le chantier #347 (PR1→PR4 toutes mergées). Débloquer eando/dq nécessiterait un mécanisme de simulation non paramétrique — hors #347, à instruire séparément si le besoin se confirme.
 
 ## Code references
 
@@ -90,6 +108,10 @@ Deux options ont été écartées d'emblée (voir Alternatives) : forker le mast
 - `src/ootils_core/engine/orchestration/propagator_sql.py` — `SHORTAGES_SQL`, scénarisé en PR3.
 - `src/ootils_core/engine/orchestration/propagator.py` — `safety_stock_cache` et `_get_safety_stock()`, scénarisés en PR3.
 - `src/ootils_core/api/routers/mrp.py` — `_get_planning_params()`, le 5ᵉ lecteur (mode simple `POST /v1/mrp/run`), scénarisé en PR3.
+- `src/ootils_core/tools/agent_tools.py` — `simulate_param_overrides()` (PR4), factorisée sur `_fork_propagate_delta`, partagé avec `simulate_overrides()`.
+- `src/ootils_core/api/routers/param_overrides.py` — endpoint REST `POST/GET/DELETE /v1/scenarios/{id}/param-overrides` (PR4), kill-switch `OOTILS_PARAM_OVERLAY_ENABLED`.
+- `scripts/agent_simulation.py` — `simulate_param_run()` (PR4), harness one-fork-per-run partagé par le lot_policy watcher.
+- `scripts/agent_lot_policy_watcher.py` — `_CHANGE_TYPE_FIELD` / `build_param_override()` (PR4), mapping des 3 `change_type` sur la whitelist V1.
 - `tests/test_param_overlay.py` — couverture pure-Python (whitelist, garde d'alias, surface d'injection).
 - `tests/integration/test_param_overlay_integration.py` — isolation par fork (C0), rétention FK.
 - `docs/REVIEW-2026-07-APS.md` — item A10, source du chantier.
