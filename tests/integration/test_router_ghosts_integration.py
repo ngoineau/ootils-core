@@ -441,6 +441,170 @@ class TestListGhostsEndpoint:
                 conn.commit()
 
 
+class TestListGhostsJoinAndOrdering:
+    """Non-regression for #188 (N+1 -> single LEFT JOIN) and #185 (psycopg.sql
+    WHERE composition): a ghost with 2 members, a ghost with 0 members, and a
+    3rd ghost used only for the scenario_id/status filter assertions. Verifies
+    created_at DESC ordering, correct member grouping (including the
+    zero-member LEFT JOIN case), and that the composed WHERE still filters
+    correctly on ghost_type / scenario_id / status.
+    """
+
+    def test_list_ghosts_join_grouping_and_order(self, api_client, auth, seeded_db):
+        import time
+
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(seeded_db, row_factory=dict_row) as conn:
+            pump_id, valve_id = _seed_item_uuids(conn)
+
+        suffix = uuid4().hex[:6]
+        name_first = f"g_join_a_{suffix}"       # created first -> should sort LAST
+        name_no_members = f"g_join_b_{suffix}"  # created second, 0 members
+        name_last = f"g_join_c_{suffix}"        # created last -> should sort FIRST
+
+        try:
+            r1 = api_client.post(
+                "/v1/ingest/ghosts",
+                json={
+                    "name": name_first,
+                    "ghost_type": "capacity_aggregate",
+                    "members": [
+                        {"item_id": pump_id, "role": "member"},
+                        {"item_id": valve_id, "role": "member"},
+                    ],
+                },
+                headers=auth,
+            )
+            assert r1.status_code == 201, r1.text
+            ghost_id_first = r1.json()["ghost_id"]
+
+            # created_at has TIMESTAMPTZ precision; force ordering apart.
+            time.sleep(1.1)
+
+            r2 = api_client.post(
+                "/v1/ingest/ghosts",
+                json={
+                    "name": name_no_members,
+                    "ghost_type": "capacity_aggregate",
+                },
+                headers=auth,
+            )
+            assert r2.status_code == 201, r2.text
+            ghost_id_no_members = r2.json()["ghost_id"]
+            assert r2.json()["member_count"] == 0
+
+            time.sleep(1.1)
+
+            r3 = api_client.post(
+                "/v1/ingest/ghosts",
+                json={
+                    "name": name_last,
+                    "ghost_type": "capacity_aggregate",
+                    "members": [{"item_id": pump_id, "role": "member"}],
+                },
+                headers=auth,
+            )
+            assert r3.status_code == 201, r3.text
+            ghost_id_last = r3.json()["ghost_id"]
+
+            resp = api_client.get(
+                "/v1/ghosts",
+                params={"ghost_type": "capacity_aggregate"},
+                headers=auth,
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+
+            ids_in_order = [g["ghost_id"] for g in body["ghosts"]]
+            our_ids_in_order = [
+                gid for gid in ids_in_order
+                if gid in (ghost_id_first, ghost_id_no_members, ghost_id_last)
+            ]
+            # created_at DESC -> most recently inserted ghost appears first.
+            assert our_ids_in_order == [ghost_id_last, ghost_id_no_members, ghost_id_first]
+
+            by_id = {g["ghost_id"]: g for g in body["ghosts"]}
+
+            g_no_members = by_id[ghost_id_no_members]
+            assert g_no_members["members"] == []
+
+            g_first = by_id[ghost_id_first]
+            assert len(g_first["members"]) == 2
+            assert {m["item_id"] for m in g_first["members"]} == {pump_id, valve_id}
+            for m in g_first["members"]:
+                assert m["role"] == "member"
+                assert m["member_id"] is not None
+
+            g_last = by_id[ghost_id_last]
+            assert len(g_last["members"]) == 1
+            assert g_last["members"][0]["item_id"] == pump_id
+        finally:
+            with psycopg.connect(seeded_db, row_factory=dict_row) as conn:
+                for n in (name_first, name_no_members, name_last):
+                    _cleanup_ghost(conn, n)
+                conn.commit()
+
+    def test_list_ghosts_filters_scenario_id_and_status(self, api_client, auth, seeded_db):
+        """WHERE composed via psycopg.sql still filters correctly on
+        scenario_id AND status combined (multi-condition AND join)."""
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(seeded_db, row_factory=dict_row) as conn:
+            pump_id, _ = _seed_item_uuids(conn)
+
+        scenario_id = "00000000-0000-0000-0000-000000000001"  # baseline, always present
+        name = f"g_filt_{uuid4().hex[:6]}"
+        try:
+            r_ins = api_client.post(
+                "/v1/ingest/ghosts",
+                json={
+                    "name": name,
+                    "ghost_type": "capacity_aggregate",
+                    "scenario_id": scenario_id,
+                    "status": "draft",
+                    "members": [{"item_id": pump_id, "role": "member"}],
+                },
+                headers=auth,
+            )
+            assert r_ins.status_code == 201, r_ins.text
+            ghost_id = r_ins.json()["ghost_id"]
+
+            # Matches all three conditions (ghost_type AND scenario_id AND status).
+            resp = api_client.get(
+                "/v1/ghosts",
+                params={
+                    "ghost_type": "capacity_aggregate",
+                    "scenario_id": scenario_id,
+                    "ghost_status": "draft",
+                },
+                headers=auth,
+            )
+            assert resp.status_code == 200
+            ids = [g["ghost_id"] for g in resp.json()["ghosts"]]
+            assert ghost_id in ids
+
+            # Same filters but status='active' -> our draft ghost must NOT match.
+            resp_wrong_status = api_client.get(
+                "/v1/ghosts",
+                params={
+                    "ghost_type": "capacity_aggregate",
+                    "scenario_id": scenario_id,
+                    "ghost_status": "active",
+                },
+                headers=auth,
+            )
+            assert resp_wrong_status.status_code == 200
+            ids_wrong_status = [g["ghost_id"] for g in resp_wrong_status.json()["ghosts"]]
+            assert ghost_id not in ids_wrong_status
+        finally:
+            with psycopg.connect(seeded_db, row_factory=dict_row) as conn:
+                _cleanup_ghost(conn, name)
+                conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/ghosts/{ghost_id} (detail)
 # ---------------------------------------------------------------------------
