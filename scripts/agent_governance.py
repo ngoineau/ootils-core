@@ -48,11 +48,22 @@ logger = logging.getLogger(__name__)
 #   L1  — DRAFT of something NEW (a new order, a parameter proposal, a
 #         disposition suggestion): nothing exists outside Ootils yet, the
 #         draft is freely reversible.
-#   L2  — EXPEDITE of an EXISTING order/receipt: approving it touches a real
-#         supplier/production commitment (a date already promised).
-#   L3+ — anything that would write to the ERP or mutate planning state.
-#         The watchers do NOT emit such actions today; that path is owned by
-#         the recommendation/approval state machine.
+#   L2  — EXPEDITE or RE-DATE of an EXISTING order/receipt: approving it
+#         touches a real supplier/production commitment (a date already
+#         promised) but is still reversible (the order moves, it is not
+#         destroyed).
+#   L3  — CANCEL of an engaged order: approving it releases a supplier /
+#         production commitment that is IRREVERSIBLE on the vendor side (a
+#         re-order later is a fresh commitment, not an undo). The reschedule
+#         emitter (agent_reschedule_watcher, #346 PR-B) is the FIRST watcher
+#         to emit an L3 DRAFT. It does NOT bypass governance: the emitter
+#         only ever writes status='DRAFT', and the recommendation/approval
+#         state machine (#341, engine/recommendation/state_machine.py) gates
+#         every L3+ promotion behind a HUMAN actor (HUMAN_ONLY_TARGETS —
+#         APPROVED/APPLIED are never reachable by a non-human actor). A
+#         watcher emitting an L3 DRAFT is therefore safe by construction: it
+#         proposes, the human disposes.
+#   L4  — reserved (irreversible + high blast radius). Not emitted.
 # ---------------------------------------------------------------------------
 _ACTION_DECISION_LEVELS: dict = {
     # shortage watcher — drafts of NEW purchase orders
@@ -60,6 +71,13 @@ _ACTION_DECISION_LEVELS: dict = {
     "ORDER_RUSH": "L1",
     # shortage + material watchers — touches an EXISTING order/receipt
     "EXPEDITE": "L2",
+    # reschedule watcher (#346) — re-date an existing order (reversible move)
+    "RESCHEDULE_IN": "L2",
+    "RESCHEDULE_OUT": "L2",
+    "DEFER": "L2",
+    # reschedule watcher (#346) — cancel an engaged order (irreversible on the
+    # supplier side => human gate mandatory, handled by the state machine)
+    "CANCEL": "L3",
     # lot policy watcher — parameter-change proposals (drafts)
     "RENEGOTIATE_MOQ": "L1",
     "REVIEW_MULTIPLE": "L1",
@@ -75,9 +93,12 @@ def decision_level(action: str) -> str:
     """Pure, deterministic mapping from a watcher action to its decision level.
 
     Single implementation for the fleet: draft of a NEW order (ORDER_NOW /
-    ORDER_RUSH) or a parameter/disposition proposal is L1; EXPEDITE of an
-    existing order is L2; ERP-touching actions would be L3+ but are not
-    emitted by the watchers today.
+    ORDER_RUSH) or a parameter/disposition proposal is L1; EXPEDITE or a
+    RE-DATE (RESCHEDULE_IN/OUT/DEFER) of an existing order is L2 (reversible
+    move); CANCEL of an engaged order is L3 (irreversible on the supplier
+    side). The reschedule watcher (#346) is the first to emit an L3 DRAFT —
+    the state machine (#341) enforces the mandatory human gate on its
+    promotion, so emitting it as a DRAFT is safe.
 
     Raises ValueError on an unknown action (fail-loudly — a silent default
     level would misclassify governance risk).

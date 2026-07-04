@@ -69,6 +69,7 @@ import agent_dq_watcher  # noqa: E402
 import agent_eando_watcher  # noqa: E402
 import agent_lot_policy_watcher  # noqa: E402
 import agent_material_watcher  # noqa: E402
+import agent_reschedule_watcher  # noqa: E402
 import agent_shortage_watcher  # noqa: E402
 from agent_governance import decision_level  # noqa: E402
 
@@ -87,6 +88,13 @@ WATCHERS = [
     {"name": "shortage_watcher",  "module": agent_shortage_watcher,
      "table": "recommendations",            "active": "DRAFT", "graded": "full"},
     {"name": "material_watcher",  "module": agent_material_watcher,
+     "table": "recommendations",            "active": "DRAFT", "graded": "full"},
+    # reschedule_watcher (#346): the fleet seed carries no firm receipts
+    # (no PO/WO/Transfer/FPO nodes -> sched_orders empty -> zero signals), so it
+    # emits no artifact here; it is held to the universal governed-run +
+    # idempotency contract only, like lot_policy_watcher. Its per-output
+    # behaviour is asserted in test_reschedule_watcher_integration.py.
+    {"name": "reschedule_watcher", "module": agent_reschedule_watcher,
      "table": "recommendations",            "active": "DRAFT", "graded": "full"},
     {"name": "eando_watcher",     "module": agent_eando_watcher,
      "table": "eando_recommendations",      "active": "DRAFT", "graded": "full"},
