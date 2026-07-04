@@ -31,12 +31,12 @@ jobs:
         run: ruff check src/
 
   typecheck:
-    name: mypy (non-blocking)
+    name: mypy
     runs-on: ubuntu-latest
-    # Reports type issues without blocking merges. The codebase has untyped
-    # boundaries (psycopg row dicts, dynamic SQL helpers); strict mode is a
-    # future goal. See [tool.mypy] in pyproject.toml.
-    continue-on-error: true
+    # Blocking: src/ootils_core type-checks clean under [tool.mypy] (see
+    # pyproject.toml). The permissive-but-green baseline was reached by the
+    # mypy campaign (PRs #378/#379); this gate keeps it from regressing.
+    # Strict mode remains a future, rule-at-a-time goal.
     steps:
       - uses: actions/checkout@v6
 
