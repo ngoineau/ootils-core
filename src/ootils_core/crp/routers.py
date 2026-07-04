@@ -163,8 +163,8 @@ async def calculate_crp(
         logger.exception("CRP calculation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CRP calculation failed: {str(e)}",
-        )
+            detail="CRP calculation failed.",
+        ) from e
     
     # Convert load profiles to output format
     load_profiles_out: Dict[str, LoadProfileOut] = {}
@@ -259,8 +259,8 @@ async def get_load_profile(
         logger.exception("Failed to get load profile: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get load profile: {str(e)}",
-        )
+            detail="Failed to get load profile.",
+        ) from e
     
     if profile is None:
         raise HTTPException(
@@ -348,8 +348,8 @@ async def get_overloads(
         logger.exception("Failed to get overloads: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get overloads: {str(e)}",
-        )
+            detail="Failed to get overloads.",
+        ) from e
     
     # Calculate horizon dates (approximate based on current calculation)
     horizon_start = date.today()
@@ -464,8 +464,8 @@ async def suggest_resolutions(
         logger.exception("Failed to suggest resolutions: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to suggest resolutions: {str(e)}",
-        )
+            detail="Failed to suggest resolutions.",
+        ) from e
     
     horizon_start = date.today()
     horizon_end = horizon_start + timedelta(days=body.horizon_days)

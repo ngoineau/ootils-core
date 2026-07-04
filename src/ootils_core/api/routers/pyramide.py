@@ -247,6 +247,10 @@ def create_pyramide_run(
     try:
         result = PyramideRunner().run(config, history)
     except PyramideError as exc:
+        # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
+        # message from config validation (horizon_days, granularity, method)
+        # or a wrapped forecasting-engine error — both DB-free, no SQL/DSN
+        # can reach this string.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     # Freshness gate (ADR-023) — measured at ITEM level: the ingest

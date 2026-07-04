@@ -112,8 +112,8 @@ def create_simulation(
         logger.exception("simulate.create_scenario_failed name=%s", body.scenario_name)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create scenario: {exc}",
-        )
+            detail="Failed to create scenario.",
+        ) from exc
 
     # Apply overrides
     applied = 0

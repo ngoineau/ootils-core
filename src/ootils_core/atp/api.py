@@ -178,8 +178,8 @@ async def check_atp_availability(
         logger.exception("ATP calculation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ATP calculation failed: {str(e)}",
-        )
+            detail="ATP calculation failed.",
+        ) from e
     
     # Build response
     buckets_detail = [_convert_bucket_to_detail(b) for b in result.buckets]

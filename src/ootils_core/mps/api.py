@@ -328,16 +328,20 @@ async def aggregate_demand(
             clear_existing=body.clear_existing,
         )
     except ValueError as e:
+        # Safe: AggregateDemandEngine.aggregate() raises ValueError only from
+        # its own parameter validation (time_grain/forecast_weight/
+        # orders_weight/horizon), before any DB access — psycopg errors are
+        # never ValueError, so no SQL/DSN text can reach this branch.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(e),
-        )
+            detail=f"Invalid aggregation parameters: {e}",
+        ) from e
     except Exception as e:
         logger.exception("mps.aggregate_demand failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Aggregation failed: {str(e)}",
-        )
+            detail="Aggregation failed.",
+        ) from e
 
     # 3. Fetch MPS node summaries for response
     mps_summaries = engine.get_mps_nodes_summary(

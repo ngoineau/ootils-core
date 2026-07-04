@@ -246,11 +246,14 @@ def create_event(
             # The 503 tells the caller to retry; on retry, the event
             # is idempotent because event_id is unique + the engine's
             # F-014 seq-guard skips already-applied writes.
+            # Generic detail — the full exception (possibly raw psycopg text)
+            # is in the logger.error above, never echoed to the client
+            # (CLAUDE.md generic-handler doctrine). event_id is a safe path UUID.
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"propagation engine error: {type(exc).__name__}: {exc}. "
-                    "Event {event_id} recorded; retry safe."
+                    f"Propagation engine error. Event {event_id} recorded; "
+                    "retry safe."
                 ),
             ) from exc
 
