@@ -103,8 +103,8 @@ def run_dq_batch(
         logger.exception("DQ run failed for batch %s: %s", batch_id, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"DQ run failed: {exc}",
-        )
+            detail="DQ run failed.",
+        ) from exc
 
     return DQRunResponse(
         batch_id=result.batch_id,
@@ -359,8 +359,8 @@ def run_agent_batch(
         logger.exception("DQ Agent run failed for batch %s: %s", batch_id, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"DQ Agent run failed: {exc}",
-        )
+            detail="DQ Agent run failed.",
+        ) from exc
 
     return AgentRunResponse(
         run_id=result.run_id,

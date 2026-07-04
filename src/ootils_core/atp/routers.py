@@ -166,8 +166,8 @@ async def check_atp(
         logger.exception("ATP calculation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ATP calculation failed: {str(e)}",
-        )
+            detail="ATP calculation failed.",
+        ) from e
 
     # Import here to avoid circular dependency
     from ootils_core.atp.api import _convert_bucket_to_detail, _extract_shortage_details
@@ -257,8 +257,8 @@ async def check_ctp(
         logger.exception("CTP check failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CTP check failed: {str(e)}",
-        )
+            detail="CTP check failed.",
+        ) from e
     
     # Build response
     from ootils_core.atp.api import _convert_bucket_to_detail
@@ -360,8 +360,8 @@ async def simulate_ctp(
         logger.exception("CTP simulation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CTP simulation failed: {str(e)}",
-        )
+            detail="CTP simulation failed.",
+        ) from e
     
     # Find first feasible date
     first_feasible = None

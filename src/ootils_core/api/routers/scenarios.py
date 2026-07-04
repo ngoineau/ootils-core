@@ -478,9 +478,10 @@ def create_sandbox_scenario(
     except RuntimeError as exc:
         raise _engine_unavailable_response(exc) from exc
     except Exception as exc:  # noqa: BLE001
+        logger.exception("sandbox.fork_scenario_failed name=%s", body.name)
         raise HTTPException(
             status_code=500,
-            detail=f"engine ForkScenario failed: {exc}",
+            detail="engine ForkScenario failed.",
         ) from exc
 
     logger.info(
