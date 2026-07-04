@@ -15,6 +15,7 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from psycopg import sql
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
@@ -324,59 +325,88 @@ def list_ghosts(
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict[str, Any]:
-    """Return all ghosts filtered by optional ghost_type, scenario_id, status."""
+    """Return all ghosts filtered by optional ghost_type, scenario_id, status.
+
+    Single LEFT JOIN against ghost_members (grouped in Python) instead of an
+    N+1 per-ghost query. Ghosts are grouped by insertion order into a dict
+    keyed by ghost_id, which — for CPython dicts — preserves first-seen
+    order, i.e. the ORDER BY created_at DESC ordering below (no itertools
+    .groupby, which would require contiguous rows per key).
+    """
     params: list[Any] = []
-    where_clauses: list[str] = []
+    conditions: list[sql.Composable] = []
 
     if ghost_type:
-        where_clauses.append("g.ghost_type = %s")
+        conditions.append(sql.SQL("g.ghost_type = %s"))
         params.append(ghost_type)
     if scenario_id:
-        where_clauses.append("g.scenario_id = %s")
+        conditions.append(sql.SQL("g.scenario_id = %s"))
         params.append(scenario_id)
     if ghost_status:
-        where_clauses.append("g.status = %s")
+        conditions.append(sql.SQL("g.status = %s"))
         params.append(ghost_status)
 
-    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    where_sql = (
+        sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+        if conditions
+        else sql.SQL("")
+    )
 
-    ghost_rows = db.execute(
-        f"""
-        SELECT ghost_id, name, ghost_type, scenario_id, resource_id,
-               node_id, status, description, created_at, updated_at
+    query = sql.SQL(
+        """
+        SELECT g.ghost_id, g.name, g.ghost_type, g.scenario_id, g.resource_id,
+               g.node_id, g.status, g.description, g.created_at, g.updated_at,
+               gm.member_id AS member_id, gm.item_id AS member_item_id,
+               gm.role AS member_role,
+               gm.transition_start_date AS member_transition_start_date,
+               gm.transition_end_date AS member_transition_end_date,
+               gm.transition_curve AS member_transition_curve,
+               gm.weight_at_start AS member_weight_at_start,
+               gm.weight_at_end AS member_weight_at_end
         FROM ghost_nodes g
+        LEFT JOIN ghost_members gm ON gm.ghost_id = g.ghost_id
         {where_sql}
-        ORDER BY created_at DESC
-        """,
-        params,
-    ).fetchall()
+        ORDER BY g.created_at DESC
+        """
+    ).format(where_sql=where_sql)
 
-    results = []
-    for g in ghost_rows:
-        members = db.execute(
-            """
-            SELECT member_id, item_id, role,
-                   transition_start_date, transition_end_date,
-                   transition_curve, weight_at_start, weight_at_end
-            FROM ghost_members WHERE ghost_id = %s
-            """,
-            (g["ghost_id"],),
-        ).fetchall()
+    rows = db.execute(query, params or None).fetchall()
 
-        results.append({
-            "ghost_id": str(g["ghost_id"]),
-            "name": g["name"],
-            "ghost_type": g["ghost_type"],
-            "scenario_id": str(g["scenario_id"]) if g["scenario_id"] else None,
-            "resource_id": str(g["resource_id"]) if g["resource_id"] else None,
-            "node_id": str(g["node_id"]) if g["node_id"] else None,
-            "status": g["status"],
-            "description": g["description"],
-            "created_at": g["created_at"].isoformat() if g["created_at"] else None,
-            "updated_at": g["updated_at"].isoformat() if g["updated_at"] else None,
-            "members": [_serialize_member(m) for m in members],
-        })
+    ghosts_by_id: dict[Any, dict[str, Any]] = {}
+    for r in rows:
+        ghost_id = r["ghost_id"]
+        if ghost_id not in ghosts_by_id:
+            ghosts_by_id[ghost_id] = {
+                "ghost_id": str(r["ghost_id"]),
+                "name": r["name"],
+                "ghost_type": r["ghost_type"],
+                "scenario_id": str(r["scenario_id"]) if r["scenario_id"] else None,
+                "resource_id": str(r["resource_id"]) if r["resource_id"] else None,
+                "node_id": str(r["node_id"]) if r["node_id"] else None,
+                "status": r["status"],
+                "description": r["description"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+                "members": [],
+            }
 
+        if r["member_id"] is not None:
+            ghosts_by_id[ghost_id]["members"].append(
+                _serialize_member(
+                    {
+                        "member_id": r["member_id"],
+                        "item_id": r["member_item_id"],
+                        "role": r["member_role"],
+                        "transition_start_date": r["member_transition_start_date"],
+                        "transition_end_date": r["member_transition_end_date"],
+                        "transition_curve": r["member_transition_curve"],
+                        "weight_at_start": r["member_weight_at_start"],
+                        "weight_at_end": r["member_weight_at_end"],
+                    }
+                )
+            )
+
+    results = list(ghosts_by_id.values())
     return {"ghosts": results, "total": len(results)}
 
 
