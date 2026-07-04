@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
 logger = logging.getLogger(__name__)
 
@@ -128,19 +129,50 @@ def _get_planning_params(
     db: psycopg.Connection,
     item_id: UUID,
     location_id: UUID,
+    scenario_id: UUID,
 ) -> dict:
-    """Return the current active planning params for item/location. Returns defaults if none found."""
+    """
+    Return the current active planning params for item/location, resolved
+    for `scenario_id` (chantier #347 PR3, ADR-025) — a scenario-scoped
+    override on lead_time_sourcing/manufacturing/transit_days, min_order_qty
+    or safety_stock_qty wins over the base item_planning_params row.
+    Returns defaults if no current row exists.
+
+    lead_time_total_days is a GENERATED column on item_planning_params
+    (COALESCE(sourcing,0) + COALESCE(manufacturing,0) + COALESCE(transit,0))
+    and is NOT itself in ALLOWED_PARAM_FIELDS — only its 3 components are
+    overlay-able. It is recomposed here from the 3 RESOLVED components with
+    the exact same COALESCE(component, 0) shape as the base column's own
+    GENERATED expression — a naive `a + b + c` would NULL-propagate on any
+    single NULL component and silently zero out this field for every caller,
+    which the base column itself never does.
+    """
+    overlay_scenario_id = None if scenario_id == BASELINE_SCENARIO_ID else scenario_id
     row = db.execute(
-        """
-        SELECT lead_time_total_days, min_order_qty, safety_stock_qty
-        FROM item_planning_params
-        WHERE item_id = %s
-          AND location_id = %s
-          AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-        ORDER BY effective_from DESC
+        f"""
+        SELECT
+            COALESCE(lt_sourcing.lt_sourcing, 0)
+                + COALESCE(lt_mfg.lt_mfg, 0)
+                + COALESCE(lt_transit.lt_transit, 0) AS lead_time_total_days,
+            moq.moq AS min_order_qty,
+            ss.ss AS safety_stock_qty
+        FROM item_planning_params ipp
+        {resolved_field_lateral_sql("lead_time_sourcing_days", "ipp", "lt_sourcing")}
+        {resolved_field_lateral_sql("lead_time_manufacturing_days", "ipp", "lt_mfg")}
+        {resolved_field_lateral_sql("lead_time_transit_days", "ipp", "lt_transit")}
+        {resolved_field_lateral_sql("min_order_qty", "ipp", "moq")}
+        {resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")}
+        WHERE ipp.item_id = %(item_id)s
+          AND ipp.location_id = %(location_id)s
+          AND (ipp.effective_to IS NULL OR ipp.effective_to = '9999-12-31'::DATE)
+        ORDER BY ipp.effective_from DESC
         LIMIT 1
         """,
-        (item_id, location_id),
+        {
+            "item_id": item_id,
+            "location_id": location_id,
+            "scenario_id": overlay_scenario_id,
+        },
     ).fetchone()
 
     if row:
@@ -305,7 +337,7 @@ def _run_simple_mrp(
         )
 
     # 2. Get planning params (lead_time, min_order_qty, safety_stock_qty)
-    params = _get_planning_params(db, item_uuid, location_uuid)
+    params = _get_planning_params(db, item_uuid, location_uuid, scenario_uuid)
     lead_time_days: int = params["lead_time_total_days"]
     min_order_qty: Decimal | None = params["min_order_qty"]
     safety_stock_qty: Decimal | None = params["safety_stock_qty"]

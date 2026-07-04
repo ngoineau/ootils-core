@@ -503,6 +503,116 @@ def resolved_params_sql(alias: str = "ipp") -> str:
 
 
 # ---------------------------------------------------------------------------
+# resolved_field_lateral_sql
+# ---------------------------------------------------------------------------
+
+
+def resolved_field_lateral_sql(field: str, base_alias: str, out_col: str) -> str:
+    """
+    Build a single composable `LEFT JOIN LATERAL ... AS <out_col>` fragment
+    that resolves ONE whitelisted planning-param field, with the exact same
+    precedence/COALESCE semantics as `resolved_params_sql()` (chantier #347
+    PR3: propagation call sites — SHORTAGES_SQL, the safety-stock cache
+    preload, mrp.py's `_get_planning_params` — read one or two fields inline
+    inside an already-large host query and do not want a full per-field
+    LATERAL fan-out for every whitelisted field they never touch).
+
+    Field-name safety: `field` MUST be a key of ALLOWED_PARAM_FIELDS —
+    ValueError (ParamOverlayError) otherwise. Exactly like
+    resolved_params_sql(), no field name here is ever built from external
+    input.
+
+    Precedence, identical to resolved_params_sql(): an override scoped to
+    the exact (item_id, location_id) wins over an override scoped to
+    (item_id, location_id IS NULL) ("item-global"), via
+    `ORDER BY location_id NULLS LAST LIMIT 1` on the current row of
+    scenario_planning_overrides for `%(scenario_id)s`.
+
+    `base_alias` is the alias of item_planning_params in the HOST query —
+    the fragment correlates the override's item_id/location_id against
+    `{base_alias}.item_id` / `{base_alias}.location_id`, so the caller must
+    place this fragment's `LEFT JOIN LATERAL` immediately after the FROM/JOIN
+    clause that introduces `base_alias`.
+
+    `out_col` names the fragment's TWO internal joins — the override lookup
+    (`{out_col}_ov`) and the COALESCE'd result (`{out_col}`), read downstream
+    as `{out_col}.{out_col}` (see the usage example below). `out_col` must be
+    a safe SQL identifier and must not collide with the reserved internal
+    prefix used by this module's own aliases (_RESERVED_INTERNAL_ALIAS_PREFIX)
+    — the same anti-tautology guard resolved_params_sql() enforces on its
+    `alias` parameter. Callers composing more than one field in the same
+    host query must pass a distinct `out_col` per field (e.g. the field name
+    itself) — psycopg's parser would otherwise reject the duplicate alias.
+
+    Cast: the override's TEXT value and the host query's base column are
+    both cast to the field's ALLOWED_PARAM_FIELDS type before COALESCE, same
+    rule as resolved_params_sql() (matters for lot_size_rule's ENUM base
+    column).
+
+    scenario_id = NULL (baseline): scenario_planning_overrides.scenario_id
+    is NOT NULL, so the LATERAL's subquery matches nothing and
+    COALESCE(NULL, base) degrades to the base column — baseline
+    byte-identical, same guarantee as resolved_params_sql().
+
+    Composable as:
+        f'''
+        SELECT {out_col}.{out_col}
+        FROM item_planning_params {base_alias}
+        {resolved_field_lateral_sql("safety_stock_qty", base_alias, out_col)}
+        WHERE ...
+        '''
+    executed with `{"scenario_id": ..., ...}` — exactly ONE
+    `%(scenario_id)s` placeholder per call, so composing N calls in one
+    query (one per field, each with its own `out_col`) is safe (psycopg3
+    binds the repeated named placeholder from the single dict key).
+    """
+    if field not in ALLOWED_PARAM_FIELDS:
+        raise ParamOverlayError(
+            f"field {field!r} is not in the allowed planning-param overlay "
+            f"list. Allowed: {sorted(ALLOWED_PARAM_FIELDS)}"
+        )
+    if not _SAFE_IDENTIFIER.match(base_alias):
+        raise ParamOverlayError(f"base_alias {base_alias!r} is not a safe SQL identifier.")
+    if base_alias.startswith(_RESERVED_INTERNAL_ALIAS_PREFIX):
+        raise ParamOverlayError(
+            f"base_alias {base_alias!r} uses the reserved internal prefix "
+            f"{_RESERVED_INTERNAL_ALIAS_PREFIX!r} — reserved for this "
+            f"module's own LATERAL-join aliases."
+        )
+    if not _SAFE_IDENTIFIER.match(out_col):
+        raise ParamOverlayError(f"out_col {out_col!r} is not a safe SQL identifier.")
+    if out_col.startswith(_RESERVED_INTERNAL_ALIAS_PREFIX):
+        raise ParamOverlayError(
+            f"out_col {out_col!r} uses the reserved internal prefix "
+            f"{_RESERVED_INTERNAL_ALIAS_PREFIX!r} — reserved for this "
+            f"module's own LATERAL-join aliases."
+        )
+
+    cast_type = ALLOWED_PARAM_FIELDS[field]
+    # Same reserved-prefix, collision-proof-by-construction alias as
+    # resolved_params_sql() — see that function's inline comment for the
+    # alias-collision/tautology bug this construction closes by design.
+    overrides_alias = f"{_RESERVED_INTERNAL_ALIAS_PREFIX}ov_{field}"[:63]
+
+    return f"""
+    LEFT JOIN LATERAL (
+        SELECT {overrides_alias}.value
+        FROM scenario_planning_overrides {overrides_alias}
+        WHERE {overrides_alias}.scenario_id = %(scenario_id)s
+          AND {overrides_alias}.item_id = {base_alias}.item_id
+          AND ({overrides_alias}.location_id = {base_alias}.location_id
+               OR {overrides_alias}.location_id IS NULL)
+          AND {overrides_alias}.field_name = '{field}'
+        ORDER BY {overrides_alias}.location_id NULLS LAST
+        LIMIT 1
+    ) {out_col}_ov ON TRUE
+    CROSS JOIN LATERAL (
+        SELECT COALESCE({out_col}_ov.value::{cast_type}, {base_alias}.{field}::{cast_type}) AS {out_col}
+    ) {out_col}
+    """
+
+
+# ---------------------------------------------------------------------------
 # set_param_override / clear_param_override / list_param_overrides
 # ---------------------------------------------------------------------------
 

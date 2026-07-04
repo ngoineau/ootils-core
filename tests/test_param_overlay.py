@@ -1,13 +1,14 @@
 """
 tests/test_param_overlay.py — pure unit tests for
-ootils_core.engine.scenario.param_overlay (chantier #347, PR1).
+ootils_core.engine.scenario.param_overlay (chantier #347, PR1 + PR3's
+resolved_field_lateral_sql()).
 
-No DB required: exercises ALLOWED_PARAM_FIELDS, the pure SQL-string builder
-resolved_params_sql(), and the pure write-time validators (_validate_value,
-plus the "fail before any DB access" ordering of set/clear — provable with
-conn=None). DB round-trip coverage (set/clear/list, precedence, COALESCE
-correctness, scenario_id=None baseline-pure behaviour) lives in
-tests/integration/test_param_overlay_integration.py.
+No DB required: exercises ALLOWED_PARAM_FIELDS, the pure SQL-string builders
+resolved_params_sql() / resolved_field_lateral_sql(), and the pure
+write-time validators (_validate_value, plus the "fail before any DB
+access" ordering of set/clear — provable with conn=None). DB round-trip
+coverage (set/clear/list, precedence, COALESCE correctness, scenario_id=None
+baseline-pure behaviour) lives in tests/integration/test_param_overlay_integration.py.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from ootils_core.engine.scenario.param_overlay import (
     _validate_field_name,
     _validate_value,
     clear_param_override,
+    resolved_field_lateral_sql,
     resolved_params_sql,
     set_param_override,
 )
@@ -533,3 +535,119 @@ def test_clear_param_override_rejects_unknown_field_before_db():
     # Symmetry with set: a typo'd field is a caller bug, not a False no-op.
     with pytest.raises(ParamOverlayError, match="not in the allowed"):
         clear_param_override(None, uuid4(), uuid4(), "not_a_field")
+
+
+# ---------------------------------------------------------------------------
+# resolved_field_lateral_sql — chantier #347 PR3: the mono-field LATERAL
+# helper used by the propagation call sites (SHORTAGES_SQL, the safety-stock
+# cache preload, mrp.py's _get_planning_params) instead of the full
+# resolved_params_sql() fan-out.
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_field_lateral_sql_rejects_unknown_field():
+    with pytest.raises(ParamOverlayError, match="not in the allowed"):
+        resolved_field_lateral_sql("not_a_real_column", "ipp", "out")
+
+
+def test_resolved_field_lateral_sql_rejects_sql_injection_attempt_in_field():
+    with pytest.raises(ParamOverlayError):
+        resolved_field_lateral_sql(
+            "safety_stock_qty; DROP TABLE items;--", "ipp", "out"
+        )
+
+
+def test_resolved_field_lateral_sql_rejects_unsafe_base_alias():
+    with pytest.raises(ParamOverlayError):
+        resolved_field_lateral_sql("safety_stock_qty", "ipp; DROP TABLE items;--", "out")
+
+
+def test_resolved_field_lateral_sql_rejects_unsafe_out_col():
+    with pytest.raises(ParamOverlayError):
+        resolved_field_lateral_sql("safety_stock_qty", "ipp", "out; DROP TABLE items;--")
+
+
+def test_resolved_field_lateral_sql_rejects_base_alias_with_reserved_prefix():
+    with pytest.raises(ParamOverlayError):
+        resolved_field_lateral_sql(
+            "safety_stock_qty", f"{_RESERVED_INTERNAL_ALIAS_PREFIX}x", "out"
+        )
+
+
+def test_resolved_field_lateral_sql_rejects_out_col_with_reserved_prefix():
+    with pytest.raises(ParamOverlayError):
+        resolved_field_lateral_sql(
+            "safety_stock_qty", "ipp", f"{_RESERVED_INTERNAL_ALIAS_PREFIX}x"
+        )
+
+
+def test_resolved_field_lateral_sql_contains_single_scenario_id_placeholder():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    # Exactly ONE %(scenario_id)s — this fragment resolves ONE field, unlike
+    # resolved_params_sql() which repeats the placeholder once per whitelisted
+    # field. Composing N calls (one per field) in one host query is safe
+    # because psycopg3 binds every occurrence from the same dict key.
+    assert fragment.count("%(scenario_id)s") == 1
+    assert fragment.replace("%(scenario_id)s", "").count("%s") == 0
+
+
+def test_resolved_field_lateral_sql_is_left_join_lateral():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    assert "LEFT JOIN LATERAL" in fragment
+    assert "scenario_planning_overrides" in fragment
+
+
+def test_resolved_field_lateral_sql_correlates_on_base_alias():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "custom", "ss")
+    assert ".item_id = custom.item_id" in fragment
+    assert ".location_id = custom.location_id" in fragment
+    assert "custom.safety_stock_qty" in fragment
+
+
+def test_resolved_field_lateral_sql_precedence_orders_exact_location_first():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    assert "ORDER BY" in fragment
+    assert "location_id NULLS LAST" in fragment
+    assert "LIMIT 1" in fragment
+
+
+def test_resolved_field_lateral_sql_uses_reserved_internal_alias_prefix():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    assert _RESERVED_INTERNAL_ALIAS_PREFIX in fragment
+    assert f"{_RESERVED_INTERNAL_ALIAS_PREFIX}ov_safety_stock_qty" in fragment
+
+
+def test_resolved_field_lateral_sql_casts_both_sides_to_field_type():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    assert "::numeric" in fragment
+    fragment_int = resolved_field_lateral_sql("lead_time_sourcing_days", "ipp", "lt")
+    assert "::integer" in fragment_int
+    fragment_text = resolved_field_lateral_sql("lot_size_rule", "ipp", "rule")
+    assert "::text" in fragment_text
+
+
+def test_resolved_field_lateral_sql_output_column_matches_out_col():
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "my_out")
+    assert "AS my_out" in fragment
+    assert ") my_out" in fragment
+
+
+def test_resolved_field_lateral_sql_no_suspicious_interpolation():
+    """No field name in the generated fragment can come from anywhere other
+    than ALLOWED_PARAM_FIELDS — mirrors
+    test_resolved_params_sql_no_suspicious_interpolation for the mono-field
+    helper."""
+    fragment = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    for match in re.finditer(r"field_name = '([^']*)'", fragment):
+        assert match.group(1) in ALLOWED_PARAM_FIELDS
+
+
+def test_resolved_field_lateral_sql_distinct_out_col_per_field_is_composable():
+    # Two fragments for two different fields, distinct out_col each — the
+    # real usage pattern in propagator.py / mrp.py (multiple fields resolved
+    # in one host query). No alias collision between the two fragments.
+    frag_a = resolved_field_lateral_sql("safety_stock_qty", "ipp", "ss")
+    frag_b = resolved_field_lateral_sql("min_order_qty", "ipp", "moq")
+    combined = frag_a + frag_b
+    assert "ss_ov" in combined and "moq_ov" in combined
+    assert combined.count("%(scenario_id)s") == 2
