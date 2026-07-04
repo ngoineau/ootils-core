@@ -519,14 +519,18 @@ def test_simulate_param_run_archives_fork_and_leaves_baseline_unchanged(migrated
 def test_simulate_param_run_stamps_per_item_delta_and_touches_no_shortages(migrated_db, db):
     """A lot_policy-shaped candidate whose override trips a shortage gets a
     per-item delta stamped in its result; and simulate_param_run writes NOTHING
-    into the shortages table (ADR-021 — watchers are read-only on shortages)."""
+    into the BASELINE shortages (ADR-021 — the watcher path never writes baseline
+    shortage rows; the fork's own counter-factual rows are written by
+    ShortageDetector, scoped to the archived fork — PR3 scoped persistence)."""
     item_id = _seed_item(db)
     location_id = _seed_location(db)
     _seed_planning_params(db, item_id, location_id, safety_stock_qty=0)
     _seed_pi_bucket(db, scenario_id=BASELINE_UUID, item_id=item_id, location_id=location_id)
     db.commit()
 
-    shortages_before = db.execute("SELECT count(*) AS n FROM shortages").fetchone()["n"]
+    baseline_shortages_before = db.execute(
+        "SELECT count(*) AS n FROM shortages WHERE scenario_id = %s", (BASELINE_UUID,)
+    ).fetchone()["n"]
 
     # safety_stock_qty is a whitelisted lot-policy-adjacent field; use it as the
     # candidate override so the fork trips a real, attributable shortage.
@@ -546,11 +550,17 @@ def test_simulate_param_run_stamps_per_item_delta_and_touches_no_shortages(migra
     assert ev["delta"] is not None
     assert ev["delta"]["new_shortages"] >= 1
 
-    # ADR-021: the watcher/harness path never writes to shortages.
-    shortages_after = db.execute("SELECT count(*) AS n FROM shortages").fetchone()["n"]
-    assert shortages_after == shortages_before, (
-        "simulate_param_run must not write into shortages (ADR-021 — the "
-        "shortages table is owned exclusively by ShortageDetector)"
+    # ADR-021: the watcher/harness path never writes BASELINE shortages. The
+    # fork's own counter-factual rows are written by ShortageDetector, scoped to
+    # the (archived) fork scenario — expected PR3 scoped-persistence behaviour,
+    # not a baseline write. So the baseline-scoped count must be unchanged.
+    baseline_shortages_after = db.execute(
+        "SELECT count(*) AS n FROM shortages WHERE scenario_id = %s", (BASELINE_UUID,)
+    ).fetchone()["n"]
+    assert baseline_shortages_after == baseline_shortages_before, (
+        "simulate_param_run must not write BASELINE shortages (ADR-021 — the "
+        "baseline shortage truth is owned exclusively by ShortageDetector; the "
+        "fork's scoped rows are expected and archived)"
     )
 
 
