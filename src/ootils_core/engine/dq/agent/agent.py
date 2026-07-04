@@ -74,7 +74,7 @@ def _load_existing_issues(
     return issues
 
 
-def _get_entity_type(db: DictRowConnection, batch_id: UUID) -> str:
+def _get_entity_type(db: DictRowConnection, batch_id: UUID) -> tuple[str, int]:
     row = db.execute(
         "SELECT entity_type, total_rows FROM ingest_batches WHERE batch_id = %s",
         (batch_id,),

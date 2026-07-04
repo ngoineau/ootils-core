@@ -267,11 +267,11 @@ async def check_ctp(
     
     violations_out = [
         CapacityViolationOut(
-            resource_id=v.resource_id,
+            resource_id=str(v.resource_id),
             resource_name=v.resource_name,
             violation_date=v.violation_date,
-            required_capacity=v.required_capacity,
-            available_capacity=v.available_capacity,
+            required_capacity=float(v.required_capacity),
+            available_capacity=float(v.available_capacity),
             overload_pct=v.overload_pct,
         )
         for v in result.violations

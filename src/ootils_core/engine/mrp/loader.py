@@ -212,7 +212,7 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
     # pooled demand, and — critically — collapses duplicate dates so the
     # period-to-next-date proration below never sees a zero-length period (which
     # would silently drop a location's volume).
-    raw_fc = defaultdict(lambda: defaultdict(float))
+    raw_fc: defaultdict[str, defaultdict[_dt.date, float]] = defaultdict(lambda: defaultdict(float))
     for item, tref, qty in cur.execute(
         "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
         "AND node_type='ForecastDemand' AND time_ref IS NOT NULL AND quantity IS NOT NULL", b).fetchall():
@@ -234,7 +234,7 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         {"b": scenario, "t": FIRM_RECEIPT_TYPES}).fetchall():
         d.sched_b[item][d.bucket(tref)] += float(qty)
 
-    involved = set()
+    involved: set = set()
     for m in (d.llc, d.is_make, d.on_hand, d.safety, d.co_b, d.fc_b, d.sched_b):
         involved.update(m.keys())
     for parent, comps in d.bom.items():

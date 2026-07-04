@@ -378,6 +378,10 @@ def promote_scenario(
             result.siblings_invalidated,
         ),
     ).fetchone()
+    if audit is None:
+        raise RuntimeError(
+            "INSERT ... RETURNING into scenario_promotions returned no row"
+        )
     logger.info(
         "scenario.promoted scenario_id=%s promotion_id=%s by=%s overrides=%d",
         scenario_id,

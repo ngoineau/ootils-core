@@ -129,6 +129,10 @@ class ShortageDetector:
 
         severity_score = shortage_qty * Decimal(str(days_in_bucket)) * effective_unit_cost
 
+        # May be None when the PI node has no time coordinate at all (unit
+        # tests exercise this in-memory). ShortageRecord.shortage_date is
+        # Optional[date]; the shortages.shortage_date NOT NULL column rejects a
+        # None only at persist time — the pre-existing behaviour, unchanged.
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
         # Drive timestamps from the injected clock so the record is fully

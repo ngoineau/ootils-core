@@ -833,7 +833,7 @@ def ingest_supplier_items(
         _raise_422(errors)
 
     if body.dry_run:
-        results = [
+        results: list[dict] = [
             {
                 "supplier_external_id": si.supplier_external_id,
                 "item_external_id": si.item_external_id,
@@ -861,7 +861,7 @@ def ingest_supplier_items(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
 
-    results: list[dict] = []
+    results = []
     inserted = updated = 0
 
     for si in body.supplier_items:
@@ -972,7 +972,7 @@ def ingest_on_hand(
         _raise_422(errors)
 
     if body.dry_run:
-        results = [
+        results: list[dict] = [
             {"item_external_id": r.item_external_id, "location_external_id": r.location_external_id, "action": "dry_run"}
             for r in body.on_hand
         ]
@@ -996,7 +996,7 @@ def ingest_on_hand(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
 
-    results: list[dict] = []
+    results = []
     inserted = updated = 0
 
     for row in body.on_hand:
@@ -2296,7 +2296,7 @@ def ingest_planning_params(
 
     if body.dry_run:
         # Show what would happen without writing
-        results = []
+        results: list[dict] = []
         for r in body.params:
             item_id = item_map[r.item_external_id]
             location_id = loc_map[r.location_external_id]
@@ -2329,7 +2329,7 @@ def ingest_planning_params(
     )
 
     inserted = updated = 0
-    results: list[dict] = []
+    results = []
 
     for r in body.params:
         item_id = item_map[r.item_external_id]
@@ -2349,7 +2349,14 @@ def ingest_planning_params(
             continue
 
         if decision.action == Scd2Action.UPDATED_INPLACE:
-            # Same-day UPDATE on the active row's param_id
+            # Same-day UPDATE on the active row's param_id.
+            # decide_action only yields UPDATED_INPLACE when an active row
+            # exists (see scd2.decide_action); guard fail-loudly so a broken
+            # invariant surfaces here instead of an opaque NoneType index.
+            if active is None:
+                raise RuntimeError(
+                    "SCD2 UPDATED_INPLACE requires an active row but none was found"
+                )
             assignments = ", ".join(f"{k} = %s" for k in decision.changed_fields.keys())
             params_values = list(decision.changed_fields.values()) + [active["param_id"]]
             db.execute(
@@ -2368,6 +2375,13 @@ def ingest_planning_params(
 
         # CREATED or ROTATED — both need an INSERT. ROTATED also closes the active row first.
         if decision.action == Scd2Action.ROTATED:
+            # decide_action only yields ROTATED when an active row exists
+            # (see scd2.decide_action); guard fail-loudly so a broken
+            # invariant surfaces here instead of an opaque NoneType index.
+            if active is None:
+                raise RuntimeError(
+                    "SCD2 ROTATED requires an active row but none was found"
+                )
             # Half-open interval: old.[effective_from, effective_to=today),
             # new.[effective_from=today, effective_to=NULL). Matches the
             # daterange(...) WITH && EXCLUDE constraint, and the CHECK

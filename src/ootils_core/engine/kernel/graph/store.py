@@ -743,6 +743,8 @@ def _row_to_node(row: dict) -> Node:
         has_exact_date_inputs=bool(row.get("has_exact_date_inputs", False)),
         has_week_inputs=bool(row.get("has_week_inputs", False)),
         has_month_inputs=bool(row.get("has_month_inputs", False)),
+        # .get(): this converter tolerates partial rows (Optional[datetime]
+        # fields); see test_minimal_row_defaults.
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -793,6 +795,8 @@ def _row_to_edge(row: dict) -> Edge:
         effective_start=row.get("effective_start"),
         effective_end=row.get("effective_end"),
         active=bool(row.get("active", True)),
+        # .get(): this converter tolerates partial rows (Optional[datetime]
+        # field); see test_minimal_row_defaults.
         created_at=row.get("created_at"),
     )
 
@@ -823,6 +827,8 @@ def _row_to_series(row: dict) -> ProjectionSeries:
         scenario_id=UUID(str(row["scenario_id"])),
         horizon_start=row["horizon_start"],
         horizon_end=row["horizon_end"],
+        # .get(): this converter tolerates partial rows (Optional[datetime]
+        # fields); see test_minimal_row_defaults.
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )

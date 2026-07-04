@@ -37,8 +37,8 @@ class DistributionLink:
         priority: Priority for sourcing (1=highest)
     """
     distribution_link_id: UUID = field(default_factory=uuid4)
-    upstream_location_id: UUID = None
-    downstream_location_id: UUID = None
+    upstream_location_id: Optional[UUID] = None
+    downstream_location_id: Optional[UUID] = None
     item_id: Optional[UUID] = None
     transit_lead_time_days: Decimal = Decimal("7")
     transit_cost_per_unit: Optional[Decimal] = None
@@ -149,7 +149,7 @@ class TransportationLane:
         active: Whether this lane is currently active
     """
     lane_id: UUID = field(default_factory=uuid4)
-    distribution_link_id: UUID = None
+    distribution_link_id: Optional[UUID] = None
     carrier: Optional[str] = None
     mode: str = "truck"
     service_level: str = "standard"
@@ -227,9 +227,9 @@ class DistributionLinkEdge:
     Represents the network topology: upstream_location → distribution_link → downstream_location
     """
     edge_id: UUID = field(default_factory=uuid4)
-    distribution_link_id: UUID = None
-    upstream_location_id: UUID = None
-    downstream_location_id: UUID = None
+    distribution_link_id: Optional[UUID] = None
+    upstream_location_id: Optional[UUID] = None
+    downstream_location_id: Optional[UUID] = None
     item_id: Optional[UUID] = None
     active: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -243,7 +243,7 @@ class LaneRequiresLinkEdge:
     Represents that a transportation lane serves a specific distribution link.
     """
     edge_id: UUID = field(default_factory=uuid4)
-    lane_id: UUID = None
-    distribution_link_id: UUID = None
+    lane_id: Optional[UUID] = None
+    distribution_link_id: Optional[UUID] = None
     active: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

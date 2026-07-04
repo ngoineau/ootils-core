@@ -1003,7 +1003,7 @@ async def promote_to_mrp(
             # Find peak load date (date with highest total load across all work centers)
             if crp_result.load_profiles:
                 peak_date = None
-                peak_load = 0.0
+                peak_load = Decimal("0")
                 for profile in crp_result.load_profiles.values():
                     for bucket in profile.buckets:
                         if bucket.load_hours > peak_load:

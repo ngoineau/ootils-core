@@ -157,7 +157,13 @@ def list_issues(
         JOIN ingest_batches b ON b.batch_id = i.batch_id
         WHERE {where_clause}
     """
-    total = db.execute(count_sql, params).fetchone()["cnt"]
+    count_row = db.execute(count_sql, params).fetchone()
+    if count_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="COUNT query returned no row",
+        )
+    total = count_row["cnt"]
 
     query_sql = f"""
         SELECT
@@ -481,9 +487,15 @@ def list_agent_runs(
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> AgentRunsResponse:
-    total = db.execute(
+    count_row = db.execute(
         "SELECT COUNT(*) AS cnt FROM dq_agent_runs"
-    ).fetchone()["cnt"]
+    ).fetchone()
+    if count_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="COUNT query returned no row",
+        )
+    total = count_row["cnt"]
 
     rows = db.execute(
         """

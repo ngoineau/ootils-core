@@ -282,7 +282,10 @@ def create_simulation(
             # advisory lock is still held by this pooled connection — release
             # it (and persist the failure record) or every subsequent
             # /v1/simulate on this scenario would silently return 'skipped'.
-            if calc_run is not None and not calc_run_finished:
+            # calc_run_mgr is always set immediately before calc_run above, so
+            # the two are non-None together; the explicit calc_run_mgr guard
+            # narrows the type for the fail_calc_run call (no behaviour change).
+            if calc_run is not None and calc_run_mgr is not None and not calc_run_finished:
                 try:
                     calc_run_mgr.fail_calc_run(
                         calc_run, "simulate propagation failed", db

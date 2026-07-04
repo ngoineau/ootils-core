@@ -148,16 +148,18 @@ class ExplanationBuilder:
             shortage_qty = pi_node.shortage_qty or Decimal("0")
             supply_qty = primary_supply.quantity or Decimal("0")
 
+            supply_time_ref = primary_supply.time_ref
+            bucket_end = pi_node.time_span_end
             is_delayed = (
-                primary_supply.time_ref is not None
-                and pi_node.time_span_end is not None
-                and primary_supply.time_ref > pi_node.time_span_end
+                supply_time_ref is not None
+                and bucket_end is not None
+                and supply_time_ref > bucket_end
             )
             is_insufficient = supply_qty < shortage_qty
 
-            if is_delayed:
+            if is_delayed and supply_time_ref is not None and bucket_end is not None:
                 root_cause_node_id = primary_supply.node_id
-                delay_days = (primary_supply.time_ref - pi_node.time_span_end).days
+                delay_days = (supply_time_ref - bucket_end).days
                 fact = (
                     f"{primary_supply.node_type} {primary_supply.node_id} "
                     f"is delayed {delay_days} day(s) beyond bucket end "

@@ -76,7 +76,7 @@ class LotSizingEngine:
         projected_on_hand: Decimal,
         planning_params: dict,
         future_net_reqs: Optional[List[Decimal]] = None,
-    ) -> Tuple[Decimal, str]:
+    ) -> Tuple[Decimal, Optional[str]]:
         """
         Calculate the planned order receipt quantity for a single period.
 

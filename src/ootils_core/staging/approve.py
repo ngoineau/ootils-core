@@ -369,6 +369,14 @@ def _upsert_canonical_rows(
     for ext_id, record in batch_records.items():
         params = tuple(record.get(f) for f in fields)
         row = conn.execute(upsert_sql, params).fetchone()
+        if row is None:
+            # INSERT ... ON CONFLICT DO UPDATE ... RETURNING always yields one
+            # row; a None here signals a driver/contract breakage — fail loudly
+            # rather than index into None below.
+            raise ApprovalError(
+                f"UPSERT into {table} produced no RETURNING row for external_id "
+                f"{ext_id!r}"
+            )
         internal_id = (
             row[spec.pk_column] if isinstance(row, dict) else row[0]
         )

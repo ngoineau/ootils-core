@@ -181,7 +181,10 @@ class Routing:
         Returns:
             Total time in hours (sum of all operation times)
         """
-        return sum(op.total_time(quantity) for op in self.operations if op.active)
+        return sum(
+            (op.total_time(quantity) for op in self.operations if op.active),
+            Decimal("0"),
+        )
     
     def validate(self) -> tuple[bool, list[str]]:
         """

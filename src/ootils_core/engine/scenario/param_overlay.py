@@ -787,6 +787,15 @@ def set_param_override(
             f"cannot set a planning-param override against it."
         ) from None
 
+    if row is None:
+        # INSERT ... ON CONFLICT DO UPDATE ... RETURNING always yields one row;
+        # a None here would signal a driver/contract breakage — fail loudly
+        # rather than dereference None.
+        raise ParamOverlayError(
+            "param_overlay.set: RETURNING clause produced no row for override "
+            f"scenario={scenario_id} item={item_id} location={location_id} "
+            f"field={field_name}"
+        )
     persisted_override_id = UUID(str(row["override_id"]))
 
     logger.info(

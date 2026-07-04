@@ -581,7 +581,7 @@ class MrpApicsEngine:
         ))
 
     def _complete_run_record(
-        self, run_id: UUID, status: str, elapsed_ms: float, error_msg: str = None
+        self, run_id: UUID, status: str, elapsed_ms: float, error_msg: Optional[str] = None
     ):
         """Update the mrp_runs record with completion status."""
         # Map our status to DB enum values (lowercase)

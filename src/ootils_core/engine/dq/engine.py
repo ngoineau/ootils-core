@@ -355,9 +355,9 @@ def _check_l2(
     issues: list[DQIssue] = []
 
     if entity_type == "purchase_orders":
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        loc_ids = [r[2].get("location_external_id") for r in rows_data if r[2].get("location_external_id")]
-        sup_ids = [r[2].get("supplier_external_id") for r in rows_data if r[2].get("supplier_external_id")]
+        item_ids: list[str] = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        loc_ids: list[str] = [str(r[2]["location_external_id"]) for r in rows_data if r[2].get("location_external_id")]
+        sup_ids: list[str] = [str(r[2]["supplier_external_id"]) for r in rows_data if r[2].get("supplier_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_locs = _batch_resolve_locations(db, list(set(loc_ids)))
@@ -383,8 +383,8 @@ def _check_l2(
                     ))
 
     elif entity_type in ("forecast_demand", "forecasts", "on_hand"):
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        loc_ids = [r[2].get("location_external_id") for r in rows_data if r[2].get("location_external_id")]
+        item_ids = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        loc_ids = [str(r[2]["location_external_id"]) for r in rows_data if r[2].get("location_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_locs = _batch_resolve_locations(db, list(set(loc_ids)))
@@ -408,8 +408,8 @@ def _check_l2(
                     ))
 
     elif entity_type == "supplier_items":
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        sup_ids = [r[2].get("supplier_external_id") for r in rows_data if r[2].get("supplier_external_id")]
+        item_ids = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        sup_ids = [str(r[2]["supplier_external_id"]) for r in rows_data if r[2].get("supplier_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_sups = _batch_resolve_suppliers(db, list(set(sup_ids)))
