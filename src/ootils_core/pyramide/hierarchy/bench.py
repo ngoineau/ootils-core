@@ -91,7 +91,7 @@ from .reconcile import (
     ReconciliationError,
     reconcile,
 )
-from .summing import AGGREGATE, LEAF, SummingBlock, load_summing_blocks
+from .summing import AGGREGATE, LEAF, SeriesRef, SummingBlock, load_summing_blocks
 from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
@@ -686,7 +686,7 @@ def _bench_mint_inputs(
     a tail shorter than MINT_MIN_INSAMPLE skips MinT (the dispatcher then
     falls back to middle-out, and the bench warns).
     """
-    histories: list[tuple[object, list[Decimal]]] = []
+    histories: list[tuple[SeriesRef, list[Decimal]]] = []
     for i, ref in enumerate(block.series):
         if ref.kind == AGGREGATE:
             series = node_insample.get(ref.key) or _sparse_sum(

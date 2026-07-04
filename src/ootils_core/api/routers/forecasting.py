@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Union, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -323,8 +323,15 @@ def generate_forecast(
 
     # 3. Fetch historical demand
     historical_periods = max(body.horizon_days, 90)  # At least as many history as horizon
-    historical_demand = _get_historical_demand(
-        db, item_uuid, location_uuid, historical_periods, scenario_id=scenario_uuid
+    # _get_historical_demand returns list[Decimal]; the ForecastingEngine
+    # params are typed list[Decimal | float | int]. Every Decimal is a valid
+    # member of that union, but list is invariant so the assignment needs an
+    # explicit widening cast (no runtime effect, no behaviour change).
+    historical_demand: list[Union[Decimal, float, int]] = cast(
+        "list[Union[Decimal, float, int]]",
+        _get_historical_demand(
+            db, item_uuid, location_uuid, historical_periods, scenario_id=scenario_uuid
+        ),
     )
 
     if not historical_demand or len(historical_demand) < 3:
@@ -868,6 +875,10 @@ def adjust_forecast(
         """,
         (forecast_id,),
     ).fetchone()
+    if total_row is None:
+        raise RuntimeError(
+            "SUM(quantity) aggregate query returned no row for forecast total"
+        )
 
     new_total = Decimal(str(total_row["total_qty"]))
 

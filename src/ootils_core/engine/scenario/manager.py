@@ -596,8 +596,14 @@ class ScenarioManager:
                 if b_val == s_val:
                     continue
 
-                # Use the scenario node_id if available, else baseline node_id
-                node_id = UUID(str(s_node["node_id"])) if s_node else UUID(str(b_node["node_id"]))
+                # Use the scenario node_id if available, else baseline node_id.
+                # At least one side is non-None here: if both were None, b_val and
+                # s_val would both be None (equal) and we would have `continue`d
+                # above. Resolve explicitly so the type is a plain dict.
+                node_row = s_node if s_node is not None else b_node
+                if node_row is None:  # unreachable given the invariant above; guard for the type
+                    continue
+                node_id = UUID(str(node_row["node_id"]))
 
                 diff_id = uuid4()
                 db.execute(

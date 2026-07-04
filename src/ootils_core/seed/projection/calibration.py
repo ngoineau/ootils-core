@@ -59,6 +59,8 @@ def _measure_shortage_pct(conn: DictRowConnection) -> tuple[int, int]:
         """,
         (BASELINE_SCENARIO_ID,),
     ).fetchone()
+    if row is None:
+        raise RuntimeError("shortage-count aggregate returned no row")
     return int(row["short_n"]), int(row["total_n"])
 
 
@@ -137,6 +139,10 @@ def _run_propagation(conn: DictRowConnection) -> float:
         "SELECT * FROM calc_runs WHERE calc_run_id = %s",
         (calc_run_id,),
     ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"calc_run {calc_run_id} vanished immediately after being started"
+        )
     calc_run = CalcRun(
         calc_run_id=UUID(str(row["calc_run_id"])),
         scenario_id=UUID(str(row["scenario_id"])),

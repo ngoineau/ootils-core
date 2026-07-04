@@ -175,6 +175,14 @@ def transition_one(
             "RETURNING transition_id, created_at",
             (recommendation_id, from_status, to_status, actor, actor_kind, reason),
         ).fetchone()
+        if audit is None:
+            # INSERT ... RETURNING always yields exactly one row; a None here
+            # would mean the driver contract is broken — fail loudly rather
+            # than index into None below.
+            raise RuntimeError(
+                "recommendation_transitions INSERT ... RETURNING produced no row "
+                f"for recommendation {recommendation_id}"
+            )
 
     logger.info(
         "recommendation.transition reco=%s %s->%s actor=%s kind=%s",

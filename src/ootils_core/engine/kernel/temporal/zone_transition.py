@@ -225,8 +225,10 @@ class ZoneTransitionEngine:
                 self._complete_transition_run(run_id, 0, 0, db)
                 return True
 
-            # Find the first weekly bucket — the one entering the daily zone
-            target_bucket = min(weekly_nodes, key=lambda n: n.time_span_start)
+            # Find the first weekly bucket — the one entering the daily zone.
+            # weekly_nodes is filtered on time_span_start is not None above, so the
+            # `or date.min` fallback is unreachable — it only satisfies the type checker.
+            target_bucket = min(weekly_nodes, key=lambda n: n.time_span_start or date.min)
 
             logger.debug(
                 "_run_weekly_to_daily: splitting week %s–%s into daily buckets for series=%s",
@@ -295,8 +297,10 @@ class ZoneTransitionEngine:
                 self._complete_transition_run(run_id, 0, 0, db)
                 return True
 
-            # First monthly bucket — the one entering the weekly zone
-            target_bucket = min(monthly_nodes, key=lambda n: n.time_span_start)
+            # First monthly bucket — the one entering the weekly zone.
+            # monthly_nodes is filtered on time_span_start is not None above, so the
+            # `or date.min` fallback is unreachable — it only satisfies the type checker.
+            target_bucket = min(monthly_nodes, key=lambda n: n.time_span_start or date.min)
 
             logger.debug(
                 "_run_monthly_to_weekly: splitting month %s–%s into weekly buckets for series=%s",
@@ -347,13 +351,19 @@ class ZoneTransitionEngine:
         """
         span_start = source_node.time_span_start
         span_end = source_node.time_span_end
+        if span_start is None or span_end is None:
+            raise ValueError(
+                f"Cannot split weekly node {source_node.node_id}: "
+                f"time_span_start={span_start!r}, time_span_end={span_end!r} "
+                "(both required to enumerate daily buckets)"
+            )
 
         new_nodes: list[Node] = []
         base_sequence = source_node.bucket_sequence or 0
 
         # Enumerate 7 days in the week span
         day_spans: list[tuple[date, date]] = []
-        current = span_start
+        current: date = span_start
         while current < span_end:
             day_end = current + timedelta(days=1)
             if day_end > span_end:
@@ -423,11 +433,17 @@ class ZoneTransitionEngine:
         """
         span_start = source_node.time_span_start
         span_end = source_node.time_span_end
+        if span_start is None or span_end is None:
+            raise ValueError(
+                f"Cannot split monthly node {source_node.node_id}: "
+                f"time_span_start={span_start!r}, time_span_end={span_end!r} "
+                "(both required to enumerate weekly buckets)"
+            )
         base_sequence = source_node.bucket_sequence or 0
 
         # Enumerate ISO-week buckets within [span_start, span_end)
         week_spans: list[tuple[date, date]] = []
-        current = span_start
+        current: date = span_start
         while current < span_end:
             # Align to Monday of current week if we're not already on one
             week_start = current - timedelta(days=current.weekday())

@@ -164,6 +164,9 @@ class TemporalBridge:
             zone3_grain=row["zone3_grain"],
             week_start_dow=row["week_start_dow"],
             active=bool(row["active"]),
+            # .get(): tolerate a partial row without the audit columns (the
+            # field is Optional[datetime] on the dataclass); see the
+            # test_row_get_returns_none_for_missing_timestamps contract.
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )

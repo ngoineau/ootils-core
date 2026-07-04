@@ -473,16 +473,16 @@ class CapacityCheckEngine:
             
             # Calculer totaux pour la semaine
             week_base_load = sum(
-                base_load.get(d, Decimal("0"))
-                for d in self._date_range(current, week_end)
+                (base_load.get(d, Decimal("0")) for d in self._date_range(current, week_end)),
+                Decimal("0"),
             )
             week_added_load = sum(
-                added_load.get(d, Decimal("0"))
-                for d in self._date_range(current, week_end)
+                (added_load.get(d, Decimal("0")) for d in self._date_range(current, week_end)),
+                Decimal("0"),
             )
             week_capacity = sum(
-                capacity.get(d, Decimal("0"))
-                for d in self._date_range(current, week_end)
+                (capacity.get(d, Decimal("0")) for d in self._date_range(current, week_end)),
+                Decimal("0"),
             )
             
             total_load = week_base_load + week_added_load

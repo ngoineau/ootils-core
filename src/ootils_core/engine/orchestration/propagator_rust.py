@@ -29,9 +29,9 @@ from uuid import UUID
 
 
 try:
-    import ootils_kernel  # type: ignore[import-not-found]
+    import ootils_kernel
 except ImportError as _exc:  # pragma: no cover — guarded at construction
-    ootils_kernel = None  # type: ignore[assignment]
+    ootils_kernel = None
     _IMPORT_ERROR: ImportError | None = _exc
 else:
     _IMPORT_ERROR = None

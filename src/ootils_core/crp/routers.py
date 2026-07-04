@@ -168,7 +168,7 @@ async def calculate_crp(
     
     # Convert load profiles to output format
     load_profiles_out: Dict[str, LoadProfileOut] = {}
-    for wc_id, profile in result.load_profiles.items():
+    for wc_uuid, profile in result.load_profiles.items():
         buckets_out = [
             LoadBucketOut(
                 work_center_id=str(b.work_center_id),
@@ -180,7 +180,7 @@ async def calculate_crp(
             )
             for b in profile.buckets
         ]
-        load_profiles_out[str(wc_id)] = LoadProfileOut(
+        load_profiles_out[str(wc_uuid)] = LoadProfileOut(
             work_center_id=str(profile.work_center_id),
             work_center_code=profile.work_center_code,
             buckets=buckets_out,

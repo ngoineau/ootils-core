@@ -134,7 +134,7 @@ def consume_demand(d: PlanningData) -> dict:
     Beyond: strategy (max_only = max(orders, forecast); never the sum).
     Returns {item: {bucket: qty}}.
     """
-    gross = defaultdict(lambda: defaultdict(float))
+    gross: defaultdict[str, defaultdict[int, float]] = defaultdict(lambda: defaultdict(float))
     for item in set(d.co_b) | set(d.fc_b):
         dtf_weeks = math.ceil(float(d.frozen_d.get(item, 0) or 0) / 7)
         s = (d.strat.get(item) or "max_only").lower()
@@ -162,8 +162,9 @@ def run_timephased(d: PlanningData, gross: dict, force_rule=None, poq_periods=4,
     (item, shortfall_before_lot, qty_after_lot, moq, mult, rule, kind) — used by
     lot-sizing diagnostics.
     """
-    dependent = defaultdict(lambda: defaultdict(float))
-    planned, rule_orders = [], defaultdict(int)
+    dependent: defaultdict[str, defaultdict[int, float]] = defaultdict(lambda: defaultdict(float))
+    planned: list = []
+    rule_orders: defaultdict[str, int] = defaultdict(int)
     n_wo = n_po = past_due = within_ptf = 0
     for level in range(0, d.max_llc + 1):
         for item in d.by_level[level]:
@@ -278,7 +279,7 @@ def excess_obsolete(d: PlanningData, gross: dict, months: float = 12.0) -> dict:
         s = sum(q for t, q in buckets.items() if t < weeks_win) * scale
         if s:
             indep12[item] = s
-    dep12 = defaultdict(float)
+    dep12: defaultdict[str, float] = defaultdict(float)
     for level in range(0, d.max_llc + 1):
         for item in d.by_level[level]:
             use = indep12.get(item, 0.0) + dep12.get(item, 0.0)
@@ -311,8 +312,8 @@ def peg_origins(d: PlanningData, gross: dict):
     origin) where origin[item] = {finished_good: qty}. Uses consumed demand.
     """
     indep_agg = {i: sum(v.values()) for i, v in gross.items()}
-    dependent = defaultdict(float)
-    origin = defaultdict(lambda: defaultdict(float))
+    dependent: defaultdict[str, float] = defaultdict(float)
+    origin: defaultdict[str, defaultdict[str, float]] = defaultdict(lambda: defaultdict(float))
     for level in range(0, d.max_llc + 1):
         for item in d.by_level[level]:
             ind = float(indep_agg.get(item, 0) or 0)

@@ -254,6 +254,9 @@ class CTPEngine:
         """
         resources = []
 
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             cur.execute("""
                 SELECT DISTINCT r.external_id
@@ -329,8 +332,11 @@ class CTPEngine:
         Returns:
             List of CapacityViolation (empty if no violations)
         """
-        violations = []
-        
+        violations: List[CapacityViolation] = []
+
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             # Fetch resource capacity info
             cur.execute("""

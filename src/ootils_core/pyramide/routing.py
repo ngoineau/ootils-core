@@ -406,6 +406,7 @@ def route(
     abc = _abc_class(features, thresholds)
 
     candidates: tuple[str, ...]
+    features_used: dict[str, Any]
     if series_class == CLASS_COLD_START:
         trigger = (
             "lifecycle 'launch'"

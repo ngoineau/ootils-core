@@ -97,8 +97,10 @@ class Node:
     has_week_inputs: bool = False
     has_month_inputs: bool = False
 
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Optional: the store row-converters tolerate partial rows via row.get()
+    # (see test_minimal_row_defaults / test_row_get_returns_none_for_missing_timestamps).
+    created_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # Typed node subclasses for clarity in type hints
@@ -119,7 +121,8 @@ class Edge:
     effective_start: Optional[date] = None
     effective_end: Optional[date] = None
     active: bool = True
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Optional: the store row-converter tolerates partial rows via row.get().
+    created_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -130,8 +133,9 @@ class ProjectionSeries:
     scenario_id: UUID
     horizon_start: date
     horizon_end: date
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Optional: the store row-converter tolerates partial rows via row.get().
+    created_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -145,8 +149,11 @@ class NodeTypeTemporalPolicy:
     zone3_grain: str = "month"
     week_start_dow: int = 0  # 0 = Monday
     active: bool = True
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Optional: a policy built from a partial row (e.g. a hand-constructed
+    # dict without the audit columns) carries None here — see
+    # TemporalBridge.get_policy's row.get() and its test.
+    created_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +517,7 @@ class ShortageRecord:
     pi_node_id: UUID        # the PI node with closing_stock < 0
     item_id: Optional[UUID]
     location_id: Optional[UUID]
-    shortage_date: date     # time_span_start of the PI node
+    shortage_date: Optional[date]   # time_span_start of the PI node (None if the node has no time coordinate; the shortages.shortage_date NOT NULL column rejects it at persist-time)
     shortage_qty: Decimal   # abs(closing_stock)
     severity_score: Decimal  # qty × days_at_shortage × unit_cost_proxy
     explanation_id: Optional[UUID]  # FK to explanations (M3)

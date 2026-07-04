@@ -153,6 +153,8 @@ def _count_working_days(
         ).fetchone()
         # SELECT COUNT(*) always returns one row; cnt == 0 means the calendar
         # has no working_day entries for this range → fall through to Mon-Fri.
+        if row is None:
+            raise RuntimeError("COUNT(*) query returned no row for working-day count")
         if row["cnt"] > 0:
             return int(row["cnt"])
 

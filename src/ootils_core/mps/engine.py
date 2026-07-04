@@ -214,10 +214,10 @@ class AggregateDemandEngine:
                 updated_count += 1
         
         # 7. Calculer les totaux
-        total_demand = sum(b.total_demand for b in bucket_demand)
+        total_demand = sum((b.total_demand for b in bucket_demand), Decimal("0"))
         demand_by_source = {
-            "forecast": sum(b.forecast_quantity for b in bucket_demand),
-            "sales_orders": sum(b.sales_orders_quantity for b in bucket_demand),
+            "forecast": sum((b.forecast_quantity for b in bucket_demand), Decimal("0")),
+            "sales_orders": sum((b.sales_orders_quantity for b in bucket_demand), Decimal("0")),
         }
         
         demand_by_period = [
@@ -802,8 +802,12 @@ class AggregateDemandEngine:
             Dict avec job_id et components_count.
         """
         try:
-            from ootils_core.api.routers.mrp import MRPExplosionEngine
-            
+            # MRPExplosionEngine was removed from routers.mrp during the MRP
+            # consolidation (ADR-020); this optional import is intentionally
+            # guarded by the ImportError fallback below. Kept as a soft hook so
+            # the fallback (skip BOM explosion) remains the current behaviour.
+            from ootils_core.api.routers.mrp import MRPExplosionEngine  # type: ignore[attr-defined]
+
             engine = MRPExplosionEngine()
             result = engine.explode_bom(
                 db=db,
