@@ -9,6 +9,8 @@ Query params:
   from_date   : date début (YYYY-MM-DD), défaut = today
   to_date     : date fin (YYYY-MM-DD), défaut = from_date + 12 semaines
   grain       : day | week | month (défaut : week)
+  scenario_id : UUID de scénario ou 'baseline' (aussi via header X-Scenario-ID),
+                défaut = baseline — la charge est lue dans ce scénario uniquement
 
 Réponse:
   {
@@ -30,13 +32,14 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from typing import Optional
+from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/rccp", tags=["rccp"])
@@ -128,7 +131,7 @@ def _generate_buckets(from_date: date, to_date: date, grain: str) -> list[tuple[
 
 
 def _count_working_days(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     location_id: Optional[str],
     start: date,
     end: date,
@@ -150,6 +153,8 @@ def _count_working_days(
         ).fetchone()
         # SELECT COUNT(*) always returns one row; cnt == 0 means the calendar
         # has no working_day entries for this range → fall through to Mon-Fri.
+        if row is None:
+            raise RuntimeError("COUNT(*) query returned no row for working-day count")
         if row["cnt"] > 0:
             return int(row["cnt"])
 
@@ -181,7 +186,8 @@ def get_rccp(
     from_date: date = Query(default=None, description="Début de l'horizon (YYYY-MM-DD). Défaut : today."),
     to_date: date = Query(default=None, description="Fin de l'horizon (YYYY-MM-DD). Défaut : from_date + 84 jours."),
     grain: str = Query(default="week", description="Granularité : day | week | month."),
-    db: psycopg.Connection = Depends(get_db),
+    scenario_id: UUID = Depends(resolve_scenario_id),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> RCCPResponse:
     """RCCP endpoint — charge vs capacité par bucket."""
@@ -275,6 +281,8 @@ def get_rccp(
 
     # Query: load = SUM of quantities for supply nodes connected to this resource
     # within the date range, aggregated by time_ref (supply date)
+    # Scenario isolation (#338): supply nodes, edges and the Resource node are
+    # all scenario-scoped (deep-copy fork), so every leg of the join is filtered.
     load_rows = db.execute(
         """
         SELECT
@@ -287,11 +295,14 @@ def get_rccp(
           AND e.edge_type = 'consumes_resource'
           AND e.active = TRUE
           AND n.active = TRUE
+          AND n.scenario_id = %s
+          AND e.scenario_id = %s
           AND rn.node_type = 'Resource'
           AND rn.external_id = %s
+          AND rn.scenario_id = %s
           AND n.time_ref BETWEEN %s AND %s
         """,
-        (resource_external_id, from_date, to_date),
+        (scenario_id, scenario_id, resource_external_id, scenario_id, from_date, to_date),
     ).fetchall()
 
     # Build load by date
@@ -369,8 +380,8 @@ def get_rccp(
         )
 
     logger.info(
-        "rccp.get resource=%s from=%s to=%s grain=%s buckets=%d",
-        resource_external_id, from_date, to_date, grain, len(buckets),
+        "rccp.get resource=%s from=%s to=%s grain=%s scenario=%s buckets=%d",
+        resource_external_id, from_date, to_date, grain, scenario_id, len(buckets),
     )
 
     return RCCPResponse(resource=resource_info, buckets=buckets)

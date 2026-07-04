@@ -203,13 +203,18 @@ class TestGenerateForecastEndpoint:
             },
             headers=auth,
         )
-        # 200 expected on seeded data with sufficient history; if the engine
-        # rejects the data, the router sanitises to a 500 with a generic detail.
-        assert resp.status_code in (200, 500), resp.text
+        # 200 expected on seeded data with sufficient history. If the engine
+        # rejects the series (ForecastingError), the router answers a typed
+        # 422 with a hand-authored message; any other failure stays a
+        # sanitised 500 with a generic detail.
+        assert resp.status_code in (200, 422, 500), resp.text
         if resp.status_code == 200:
             data = resp.json()
             assert data["method"] == method
             _delete_forecast(seeded_db, data["forecast_id"])
+        elif resp.status_code == 422:
+            # Typed data-condition contract: counts only, no internals.
+            assert resp.json()["detail"].startswith("Insufficient historical demand")
         else:
             # Sanitised error message (chantier 2): no leaked exception strings.
             assert resp.json()["detail"] == "Forecast generation failed"

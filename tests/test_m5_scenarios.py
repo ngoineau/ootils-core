@@ -475,14 +475,21 @@ class TestPromote:
         self,
         override_rows: list[dict],
         scenario_nodes: list[dict],
+        baseline_field_value=None,
     ) -> MagicMock:
         db = MagicMock()
 
         # fetchall sequence:
         #   1st → override rows, 2nd → scenario nodes,
-        #   3rd onward → baseline node matches (one per override)
+        #   3rd onward → baseline node matches (one per override).
+        # fetchone → None (parent lookup → sibling logging skipped).
+        # baseline_field_value: current baseline value of the overridden
+        # field — promote compares it to scenario_overrides.old_value for
+        # conflict detection (#341b).
         baseline_node_row = MagicMock()
-        baseline_node_row.__getitem__ = lambda self, k: _uuid(999) if k == "node_id" else None
+        baseline_node_row.__getitem__ = (
+            lambda self, k: _uuid(999) if k == "node_id" else baseline_field_value
+        )
 
         fetchall_side_effects = (
             [override_rows, scenario_nodes]
@@ -493,8 +500,7 @@ class TestPromote:
 
         return db
 
-    def test_archives_scenario_on_promote(self):
-        """promote() should UPDATE scenarios.status = 'archived'."""
+    def _make_scenario_node_and_override(self) -> tuple[dict, dict]:
         scenario_node = make_node_row(
             node_id=_uuid(50),
             scenario_id=self.SCENARIO_ID,
@@ -506,18 +512,58 @@ class TestPromote:
         override = {
             "node_id": _uuid(50),
             "field_name": "quantity",
+            "old_value": None,  # baseline value captured at override time
             "new_value": "200",
         }
+        return scenario_node, override
+
+    def test_archives_scenario_on_promote(self):
+        """promote() should UPDATE scenarios.status = 'archived'."""
+        scenario_node, override = self._make_scenario_node_and_override()
 
         db = self._make_db_for_promote([override], [scenario_node])
         manager = ScenarioManager()
-        manager.promote(scenario_id=self.SCENARIO_ID, db=db)
+        result = manager.promote(scenario_id=self.SCENARIO_ID, db=db)
 
         archive_calls = [
             c for c in db.execute.call_args_list
             if "archived" in str(c) and "UPDATE scenarios" in str(c)
         ]
         assert len(archive_calls) >= 1
+        assert result.override_count == 1
+        assert result.patched_nodes == 1
+        assert result.conflict_checked is True
+
+    def test_promote_conflict_raises_before_any_write(self):
+        """Baseline diverged since the override captured it →
+        PromoteConflictError with the typed conflict list, and no
+        UPDATE/INSERT issued (ADR-018 P2.2.c)."""
+        from ootils_core.engine.scenario.manager import PromoteConflictError
+
+        scenario_node, override = self._make_scenario_node_and_override()
+        override["old_value"] = "100"  # captured baseline value
+
+        # Current baseline value differs → conflict
+        db = self._make_db_for_promote(
+            [override], [scenario_node], baseline_field_value="999"
+        )
+        manager = ScenarioManager()
+        with pytest.raises(PromoteConflictError) as exc_info:
+            manager.promote(scenario_id=self.SCENARIO_ID, db=db)
+
+        conflicts = exc_info.value.conflicts
+        assert len(conflicts) == 1
+        assert conflicts[0].field_name == "quantity"
+        assert conflicts[0].expected == "100"
+        assert conflicts[0].actual == "999"
+        assert conflicts[0].node_id == _uuid(999)
+
+        # Nothing written: no UPDATE nodes, no archive, no merge event
+        writes = [
+            c for c in db.execute.call_args_list
+            if "UPDATE" in str(c) or "INSERT" in str(c)
+        ]
+        assert writes == []
 
     def test_creates_scenario_merge_event(self):
         """promote() should insert a scenario_merge event."""

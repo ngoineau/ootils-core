@@ -25,9 +25,8 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Any
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.crp.models import WorkCenter, Routing, Operation
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -180,11 +179,11 @@ class LoadProfile:
     
     def get_total_load(self) -> Decimal:
         """Get total load across all buckets."""
-        return sum(b.load_hours for b in self.buckets)
-    
+        return sum((b.load_hours for b in self.buckets), _ZERO)
+
     def get_total_capacity(self) -> Decimal:
         """Get total capacity across all buckets."""
-        return sum(b.capacity_hours for b in self.buckets)
+        return sum((b.capacity_hours for b in self.buckets), _ZERO)
     
     def get_overload_count(self) -> int:
         """Get number of days with overloads."""
@@ -298,7 +297,7 @@ class CRPEngine:
     Performance: <500ms for 1000+ planned orders
     """
     
-    def __init__(self, db_conn: Optional[psycopg.Connection] = None):
+    def __init__(self, db_conn: Optional[DictRowConnection] = None):
         """
         Initialize the CRP engine.
         
@@ -308,12 +307,12 @@ class CRPEngine:
         self._conn = db_conn
     
     @property
-    def connection(self) -> Optional[psycopg.Connection]:
+    def connection(self) -> Optional[DictRowConnection]:
         """Get the database connection."""
         return self._conn
     
     @connection.setter
-    def connection(self, conn: psycopg.Connection):
+    def connection(self, conn: DictRowConnection):
         """Set the database connection."""
         self._conn = conn
     
@@ -493,6 +492,9 @@ class CRPEngine:
         """
         work_centers: Dict[UUID, WorkCenter] = {}
 
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             # Migration 034 (ADR-014 D1): work_centers merged into resources.
             # The engine does not discriminate by resource_type — every active
@@ -563,7 +565,10 @@ class CRPEngine:
             List of planned orders with item_id, due_date, quantity
         """
         orders: List[Dict[str, Any]] = []
-        
+
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             if scenario_id:
                 cur.execute("""
@@ -630,7 +635,10 @@ class CRPEngine:
         
         if not item_ids:
             return routings
-        
+
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             # Fetch routings
             placeholders = ",".join("%s" for _ in item_ids)
@@ -819,6 +827,9 @@ class CRPEngine:
         """
         # Fetch planned orders that contribute to this work center on this date
         # These are orders whose operations fall on the overload date
+        if self._conn is None:
+            raise ValueError("Database connection not set")
+
         with self._conn.cursor() as cur:
             # Migration 034: work_centers merged into resources.
             #   wc.code         → wc.external_id
@@ -871,10 +882,17 @@ class CRPEngine:
         order_contributions: Dict[UUID, Dict[str, Any]] = {}
         
         for row in rows:
-            ps_id, item_id, qty, due_date, item_code, r_id, op_id, seq, run_time, setup, wc_code = row
-            qty = Decimal(str(qty)) if qty else _ZERO
-            run_time = Decimal(str(run_time)) if run_time else _ZERO
-            setup = Decimal(str(setup)) if setup else _ZERO
+            ps_id, item_id, raw_qty, due_date, item_code, r_id, op_id, seq, raw_run_time, raw_setup, wc_code = _row_values(
+                row,
+                [
+                    "planned_supply_id", "item_id", "quantity", "due_date", "item_code",
+                    "routing_id", "operation_id", "sequence", "run_time_per_unit",
+                    "setup_time", "work_center_code",
+                ],
+            )
+            qty = Decimal(str(raw_qty)) if raw_qty else _ZERO
+            run_time = Decimal(str(raw_run_time)) if raw_run_time else _ZERO
+            setup = Decimal(str(raw_setup)) if raw_setup else _ZERO
             
             # Calculate operation duration
             total_hours = setup + (run_time * qty)

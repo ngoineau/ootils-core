@@ -9,12 +9,12 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.store import GraphStore
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def get_graph(
     depth: int = Query(default=2, ge=1, le=5, description="Graph traversal depth"),
     from_date: Optional[date] = Query(default=None, alias="from"),
     to_date: Optional[date] = Query(default=None, alias="to"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> GraphResponse:
@@ -209,7 +209,7 @@ def list_nodes(
     node_type: Optional[str] = Query(default=None),
     scenario_id: Optional[UUID] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> NodeListResponse:
     """List nodes with optional filters — used for UI dropdowns (e.g. Simulate page)."""

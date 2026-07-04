@@ -18,6 +18,7 @@ from .algorithms import (
     ForecastingError,
     Forecaster,
     MovingAverageForecaster,
+    SeasonalForecaster,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,11 +105,13 @@ class ForecastingEngine:
         
         Args:
             item_history: Historique des quantités (chronologique, plus récent en dernier).
-            method: Méthode de forecasting (MA, EXP_SMOOTHING, CROSTON).
+            method: Méthode de forecasting (MA, EXP_SMOOTHING, CROSTON, SEASONAL).
             params: Paramètres spécifiques à la méthode:
                     - MA: {"window": int}
                     - EXP_SMOOTHING: {"alpha": float, "auto_calibrate": bool}
                     - CROSTON: {"min_demand_threshold": float}
+                    - SEASONAL: {"season_length": int} (obligatoire, >= 2 —
+                      ex. 7 quotidien, 12 mensuel, 52 hebdomadaire)
             actuals: Valeurs réelles pour calcul des métriques d'accuracy (optionnel).
                     Si fourni, doit être de même longueur que les prévisions testées.
         
@@ -144,9 +147,29 @@ class ForecastingEngine:
                 params["window"] = self._calibrate_window(item_history)
                 warnings.append(f"Window auto-calibré: {params['window']}")
         
+        # SEASONAL : valider le paramètre de cycle et décider saisonnier vs
+        # fallback plat. Le fallback est DOCUMENTÉ (warning + provenance dans
+        # parameters), jamais silencieux.
+        seasonal_fallback = False
+        season_length: Optional[int] = None
+        if method == ForecastMethod.SEASONAL:
+            season_length = self._validate_season_length(params)
+            if len(item_history) < 2 * season_length:
+                # Moins de 2 cycles complets : les indices seraient du bruit.
+                # Niveau plat (MA sur au plus un cycle), tracé en provenance.
+                seasonal_fallback = True
+                fallback_window = min(len(item_history), season_length)
+                warnings.append(
+                    f"SEASONAL fallback: {len(item_history)} point(s) d'historique < "
+                    f"2 cycles complets ({2 * season_length}); niveau plat MA(window={fallback_window})"
+                )
+
         # Créer le forecaster approprié
-        forecaster = self._create_forecaster(method, params)
-        
+        if seasonal_fallback:
+            forecaster: Forecaster = MovingAverageForecaster(window_size=fallback_window)
+        else:
+            forecaster = self._create_forecaster(method, params)
+
         # Générer la prévision
         forecast_value = forecaster.forecast(item_history)
         
@@ -166,11 +189,18 @@ class ForecastingEngine:
             }
         
         # Construire le résultat
+        # Provenance saisonnière portée par le champ parameters existant :
+        # season_length effectif + saisonnier-ou-fallback (pas de JSONB nouveau).
+        parameters = params.copy()
+        if method == ForecastMethod.SEASONAL:
+            parameters["season_length"] = season_length
+            parameters["seasonal_applied"] = not seasonal_fallback
+
         result = ForecastResult(
             method=method,
             forecast_value=forecast_value,
             metrics=metrics,
-            parameters=params.copy(),
+            parameters=parameters,
             historical_count=len(item_history),
             warnings=warnings,
         )
@@ -195,12 +225,43 @@ class ForecastingEngine:
         elif method == ForecastMethod.CROSTON:
             threshold = params.get("min_demand_threshold", 0.0)
             return CrostonForecaster(min_demand_threshold=threshold)
-        
+
+        elif method == ForecastMethod.SEASONAL:
+            season_length = self._validate_season_length(params)
+            return SeasonalForecaster(season_length=season_length)
+
         else:
             raise ForecastingError(
                 f"Méthode de forecasting inconnue: '{method}'. "
-                f"Disponible: {ForecastMethod.MA}, {ForecastMethod.EXP_SMOOTHING}, {ForecastMethod.CROSTON}"
+                f"Disponible: {ForecastMethod.MA}, {ForecastMethod.EXP_SMOOTHING}, "
+                f"{ForecastMethod.CROSTON}, {ForecastMethod.SEASONAL}"
             )
+
+    @staticmethod
+    def _validate_season_length(params: Dict[str, Any]) -> int:
+        """
+        Valider le paramètre season_length de la méthode SEASONAL.
+
+        Obligatoire et sans défaut : la longueur du cycle dépend de la
+        granularité des données (ex. 7 quotidien, 12 mensuel, 52 hebdomadaire)
+        et doit être choisie explicitement par l'appelant.
+
+        Raises:
+            ForecastingError: Si absent, non entier, ou < 2.
+        """
+        raw = params.get("season_length")
+        # Strictement un entier (pas de bool, pas de coercition de 7.9 ni de
+        # "52") — aligné sur le validateur API (routers/forecasting.py).
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise ForecastingError(
+                "SEASONAL requiert params['season_length'] (entier >= 2, "
+                f"ex. 7 quotidien, 12 mensuel, 52 hebdomadaire); reçu: {raw!r}"
+            )
+        if raw < 2:
+            raise ForecastingError(
+                f"season_length doit être >= 2, reçu: {raw}"
+            )
+        return raw
     
     def _calibrate_alpha(self, historical_data: List[Union[Decimal, float, int]]) -> float:
         """
@@ -399,13 +460,26 @@ class ForecastingEngine:
         
         Returns:
             Liste des prévisions pour chaque période future.
-        
+
         Note:
             Pour MA et ES, la prévision est constante sur toutes les périodes.
-            Pour Croston, idem (modèle sans tendance).
+            Pour Croston, idem — PLAT PAR DESIGN : sur demande intermittente,
+            projeter des indices saisonniers revient à extrapoler la position
+            aléatoire des transactions, pas une saison.
+            Pour SEASONAL (opt-in via method + season_length), la série est une
+            COURBE niveau × indices ; si l'historique couvre moins de 2 cycles
+            complets, generate() retombe sur un niveau plat (documenté dans la
+            provenance) et la série est constante.
         """
+        params = params or {}
+
         # Générer la prévision de base
         result = self.generate(item_history, method, params)
-        
-        # Répéter pour le nombre de périodes demandé
+
+        # Chemin saisonnier opt-in : la courbe répète le profil sur l'horizon.
+        if method == ForecastMethod.SEASONAL and result.parameters.get("seasonal_applied"):
+            forecaster = SeasonalForecaster(season_length=int(result.parameters["season_length"]))
+            return forecaster.forecast_curve(item_history, periods)
+
+        # Répéter pour le nombre de périodes demandé (comportement plat historique)
         return [result.forecast_value] * periods

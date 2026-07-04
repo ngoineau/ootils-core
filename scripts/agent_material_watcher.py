@@ -3,10 +3,18 @@ agent_material_watcher.py — Material Watcher agent (thin over mrp_core).
 
 Runs the time-phased level-by-level MRP (mrp_core), takes PAST-DUE component
 planned orders (LLC>=1), pegs each to its driving finished goods, and writes them
-to the governed recommendations table as DRAFT/L1 — the same queue the planner
+to the governed recommendations table as DRAFT — the same queue the planner
 reviews. Convergence of the MRP and control-tower threads.
 
-North Star contract: deterministic core, L1 DRAFT only (never applies), auditable
+Scenario-backed (#340): each run forks ONE what-if scenario
+(what-if-material_watcher-<ts>), simulates the EXPEDITE candidates that have an
+existing future firm receipt to advance (others carry the not-simulated
+marker), stamps every reco's evidence with simulation_scenario_id + its
+per-item shortage delta, then archives the fork. Propagation failure demotes
+simulated recos to NEEDS_DATA_REVIEW (fail-loudly, no fabricated delta).
+
+North Star contract: deterministic core, DRAFT only (never applies; EXPEDITE
+of an existing order = L2 via agent_governance.decision_level), auditable
 (agent_runs), explainable (evidence = pegging + MRP trail), confidence-aware,
 idempotent (supersede prior DRAFTs).
 
@@ -26,7 +34,8 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
-from agent_governance import governed_run
+import agent_simulation
+from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("material_watcher")
@@ -80,6 +89,7 @@ def main(argv=None) -> int:
         spend = defaultdict(float)
 
         with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            candidates = []
             for item, qty in pastdue_qty.items():
                 lvl = d.llc.get(item, 0)
                 kind = kind_of.get(item, "PO")
@@ -108,12 +118,36 @@ def main(argv=None) -> int:
                 evidence = {"kind": kind, "llc": lvl, "need_week": int(pastdue_need.get(item, 0)),
                             "pastdue": True, "pegging": peg,
                             "rule": "MRP time-phased past-due (need − lead_time < today)"}
+                candidates.append({"item": item, "action": "EXPEDITE", "need_date": need_date,
+                                   "conf": conf, "evidence": evidence, "qty": qty, "cost": cost,
+                                   "ccy": ccy, "sid": sid, "sext": sext, "lt": lt,
+                                   "runway": runway, "margin": margin, "kind": kind, "llc": lvl,
+                                   "peg": peg})
+
+            # Scenario-backed counter-factual (#340): ONE fork for the whole run.
+            # Simulable = EXPEDITE with an existing future firm receipt to advance;
+            # the rest carries the not-simulated marker. Fork archived by simulate_run.
+            receipts = agent_simulation.load_future_receipts(conn)
+            sim_summary, sim_results = agent_simulation.simulate_run(
+                args.dsn, AGENT_NAME,
+                [{"item": c["item"], "action": c["action"], "need_date": c["need_date"]} for c in candidates],
+                receipts)
+
+            for c, res in zip(candidates, sim_results):
+                item = c["item"]
+                conf = agent_simulation.effective_confidence(
+                    c["conf"], res["simulated"], sim_summary["propagation_status"])
+                evidence = dict(c["evidence"])
+                evidence["simulation_scenario_id"] = sim_summary["scenario_id"]
+                evidence["simulation"] = agent_simulation.simulation_evidence(sim_summary, res)
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                             need_date, qty, qty, cost, ccy, sid, sext, lt, runway, margin,
-                             "EXPEDITE", "L1", "DRAFT", conf, Jsonb(evidence)))
-                display.append({"ext": d.names.get(item, str(item)[:8]), "kind": kind, "llc": lvl,
-                                "qty": qty, "cost": cost, "ccy": ccy, "need": str(need_date),
-                                "peg": peg[0]["fg"] if peg else "—", "pegpct": peg[0]["pct"] if peg else 0})
+                             c["need_date"], c["qty"], c["qty"], c["cost"], c["ccy"], c["sid"], c["sext"],
+                             c["lt"], c["runway"], c["margin"],
+                             "EXPEDITE", decision_level("EXPEDITE"), "DRAFT", conf, Jsonb(evidence)))
+                display.append({"ext": d.names.get(item, str(item)[:8]), "kind": c["kind"], "llc": c["llc"],
+                                "qty": c["qty"], "cost": c["cost"], "ccy": c["ccy"], "need": str(c["need_date"]),
+                                "peg": c["peg"][0]["fg"] if c["peg"] else "—",
+                                "pegpct": c["peg"][0]["pct"] if c["peg"] else 0})
 
             superseded = run.supersede("recommendations", "DRAFT", "EXPIRED")
             run.insert(
@@ -129,14 +163,19 @@ def main(argv=None) -> int:
                 "superseded": superseded,
                 "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
                 "max_llc": d.max_llc,
+                "simulation": sim_summary,
             })
             metrics = run.metrics
 
     elapsed = round(time.perf_counter() - t0, 2)
     logger.info("=" * 96)
     logger.info("MATERIAL WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
-    logger.info("  Component recommendations (DRAFT/L1) : %d  (PO %d / WO %d)", len(recs), n_po, n_wo)
+    logger.info("  Component recommendations (DRAFT)    : %d  (PO %d / WO %d)", len(recs), n_po, n_wo)
     logger.info("  Prior drafts superseded              : %d", metrics["superseded"])
+    sim = metrics["simulation"]
+    logger.info("  Scenario-backed (#340)               : fork=%s status=%s simulated=%d not-simulated=%d archived=%s",
+                sim["scenario_name"] or "—", sim["propagation_status"] or "not-run",
+                sim["simulated_candidates"], sim["non_simulated_candidates"], sim["archived"])
     logger.info("  Est. procurement spend               : %s", metrics["estimated_spend"])
     logger.info("=" * 96)
     display.sort(key=lambda x: -(x["cost"] or 0))

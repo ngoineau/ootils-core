@@ -13,13 +13,13 @@ from datetime import date, timedelta
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Path
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
 from ootils_core.crp.engine import CRPEngine
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class CRPOverloadsResponse(BaseModel):
 )
 async def calculate_crp(
     body: CRPCalculateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPCalculateResponse:
     """
@@ -163,12 +163,12 @@ async def calculate_crp(
         logger.exception("CRP calculation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CRP calculation failed: {str(e)}",
-        )
+            detail="CRP calculation failed.",
+        ) from e
     
     # Convert load profiles to output format
     load_profiles_out: Dict[str, LoadProfileOut] = {}
-    for wc_id, profile in result.load_profiles.items():
+    for wc_uuid, profile in result.load_profiles.items():
         buckets_out = [
             LoadBucketOut(
                 work_center_id=str(b.work_center_id),
@@ -180,7 +180,7 @@ async def calculate_crp(
             )
             for b in profile.buckets
         ]
-        load_profiles_out[str(wc_id)] = LoadProfileOut(
+        load_profiles_out[str(wc_uuid)] = LoadProfileOut(
             work_center_id=str(profile.work_center_id),
             work_center_code=profile.work_center_code,
             buckets=buckets_out,
@@ -231,7 +231,7 @@ async def calculate_crp(
 async def get_load_profile(
     work_center_id: UUID = Path(..., description="Work center UUID"),
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> LoadProfileOut:
     """
@@ -259,8 +259,8 @@ async def get_load_profile(
         logger.exception("Failed to get load profile: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get load profile: {str(e)}",
-        )
+            detail="Failed to get load profile.",
+        ) from e
     
     if profile is None:
         raise HTTPException(
@@ -306,7 +306,7 @@ async def get_load_profile(
 async def get_overloads(
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
     work_center_ids: Optional[str] = Query(None, description="Comma-separated list of work center IDs to filter"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPOverloadsResponse:
     """
@@ -348,8 +348,8 @@ async def get_overloads(
         logger.exception("Failed to get overloads: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get overloads: {str(e)}",
-        )
+            detail="Failed to get overloads.",
+        ) from e
     
     # Calculate horizon dates (approximate based on current calculation)
     horizon_start = date.today()
@@ -424,7 +424,7 @@ class CRPSuggestResolutionsResponse(BaseModel):
 )
 async def suggest_resolutions(
     body: CRPSuggestResolutionsRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPSuggestResolutionsResponse:
     """
@@ -464,8 +464,8 @@ async def suggest_resolutions(
         logger.exception("Failed to suggest resolutions: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to suggest resolutions: {str(e)}",
-        )
+            detail="Failed to suggest resolutions.",
+        ) from e
     
     horizon_start = date.today()
     horizon_end = horizon_start + timedelta(days=body.horizon_days)

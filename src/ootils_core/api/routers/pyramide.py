@@ -6,21 +6,26 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
+from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS
 from ootils_core.pyramide.repository import (
+    PyramideAggregateCommitError,
     commit_run,
+    fetch_accuracy_metrics,
     fetch_run_summary,
     fetch_run_values,
     fetch_snapshot_values,
+    get_demand_freshness,
     get_historical_demand,
     list_snapshots,
     persist_run,
+    record_stale_demand_finding,
     resolve_item_uuid,
     resolve_location_uuid,
     resolve_scenario_uuid,
@@ -40,22 +45,58 @@ class PyramideRunRequest(BaseModel):
     method_params: dict[str, Any] = Field(default_factory=dict)
     scenario_id: str | None = None
     model_strategy: str = Field(default="stat", pattern="^(auto|stat|ml|fm|hybrid)$")
-    recon_method: str = Field(default="bottomup", pattern="^(mintrace_wls|bottomup|topdown|middleout|none)$")
+    # Single-series leaf endpoint: nothing is reconciled here, so the
+    # ONLY honest value is 'none' (recon_method = method EFFECTIVELY
+    # applied, migration 054 — provenance never lies). Hierarchical block
+    # runs go through HierarchicalRunner, not this endpoint; a client
+    # requesting a reconciliation method here gets a clear 422 instead of
+    # a silently-false provenance row (review PR3).
+    recon_method: str = Field(default="none", pattern="^none$")
     random_seed: int = Field(default=0, ge=0)
     code_version: str = Field(default="local", min_length=1, max_length=64)
+    # Freshness SLA (ADR-023): demand_history ingested more than this many
+    # days ago is stale — the run is still produced (agents may simulate on
+    # stale data) but carries stale_demand=TRUE and a dq_findings
+    # STALE_DEMAND row. A PARAMETER (pilot default 7 days), never a
+    # hard-coded business constant.
+    freshness_sla_days: int = Field(default=DEFAULT_SLA_DAYS, ge=1, le=365)
 
     @staticmethod
     def _method_error() -> str:
         return f"method must be one of: {sorted(SUPPORTED_METHODS)}"
 
 
+class PyramideAccuracyMetricOut(BaseModel):
+    # horizon None = all-horizons aggregate row; h >= 1 = per-horizon
+    # row (only bias + counts are derivable from the persisted backtest
+    # residuals — the other metrics need the actuals and stay None).
+    # A None metric = "not computable on this data" (None-honest
+    # contract of pyramide/accuracy.py), never a masked 0.
+    horizon: int | None = None
+    mase: Decimal | None = None
+    wape: Decimal | None = None
+    smape: Decimal | None = None
+    bias: Decimal | None = None
+    coverage: Decimal | None = None
+    n_cutoffs: int
+    n_observations: int
+
+
 class PyramideRunOut(BaseModel):
+    # Leaf runs carry (item_id, location_id); aggregate runs (migration
+    # 053) carry (hierarchy_id, level, node_code) — the unused side is
+    # None. Optional on both sides so an aggregate run never 500s on
+    # response validation. snapshot_id is None for aggregate runs
+    # (snapshots are leaf-only — they exist to feed the graph commit).
     run_id: UUID
-    snapshot_id: UUID
+    snapshot_id: UUID | None = None
     forecast_id: UUID
     status: str
-    item_id: UUID
-    location_id: UUID
+    item_id: UUID | None = None
+    location_id: UUID | None = None
+    hierarchy_id: str | None = None
+    level: str | None = None
+    node_code: str | None = None
     scenario_id: UUID
     horizon_start: date
     horizon_end: date
@@ -73,6 +114,16 @@ class PyramideRunOut(BaseModel):
     deterministic_artifact: str
     created_at: datetime
     committed_at: datetime | None = None
+    # Backtest accuracy metrics (migration 055) — populated by
+    # GET /runs/{run_id} only (backward-compatible optional field):
+    # aggregate row first, then per-horizon rows. None on the other
+    # endpoints (not fetched); [] = run persisted without a backtest
+    # report (e.g. ENSEMBLE_STAT blend, external backend).
+    accuracy_metrics: list[PyramideAccuracyMetricOut] | None = None
+    # ADR-023 (migration 056): TRUE when the run was generated while the
+    # demand_history ingest age exceeded the freshness SLA. Additive,
+    # backward-compatible — agents must not auto-act (L0-L2) on TRUE.
+    stale_demand: bool = False
 
 
 class PyramideValueOut(BaseModel):
@@ -136,7 +187,7 @@ class PyramideSnapshotDiffOut(BaseModel):
 )
 def create_pyramide_run(
     body: PyramideRunRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunOut:
     body.method = body.method.upper()
@@ -162,11 +213,15 @@ def create_pyramide_run(
             detail=f"Invalid scenario_id '{body.scenario_id}'",
         ) from exc
 
+    # The reader falls back to past CustomerOrderDemand nodes (scoped to
+    # scenario_uuid) when demand_history is empty — so this runs BEFORE the
+    # history-empty 422 below.
     history = get_historical_demand(
         db=db,
         item_id=item_uuid,
         location_id=location_uuid,
         lookback_days=max(body.horizon_days, 90),
+        scenario_id=scenario_uuid,
     )
     if not history:
         raise HTTPException(
@@ -192,9 +247,45 @@ def create_pyramide_run(
     try:
         result = PyramideRunner().run(config, history)
     except PyramideError as exc:
+        # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
+        # message from config validation (horizon_days, granularity, method)
+        # or a wrapped forecasting-engine error — both DB-free, no SQL/DSN
+        # can reach this string.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    persisted = persist_run(db, result)
+    # Freshness gate (ADR-023) — measured at ITEM level: the ingest
+    # pipeline loads whole extracts, so a per-warehouse filter would
+    # misread a coverage gap as pipeline death. Only a PROVEN breach
+    # (ingest_age_days known AND > SLA) marks the run stale; an unknown
+    # freshness (e.g. degraded CustomerOrderDemand fallback with an empty
+    # demand_history) degrades the confidence score instead — a stale flag
+    # is never invented.
+    freshness = get_demand_freshness(db, item_id=item_uuid)
+    stale = (
+        freshness.ingest_age_days is not None
+        and freshness.ingest_age_days > body.freshness_sla_days
+    )
+
+    persisted = persist_run(db, result, stale_demand=stale)
+    if stale:
+        # Exactly once per run (this endpoint is the only writer and the
+        # run is created exactly once) — no spam, evidence carries run_id.
+        dq_finding_id = record_stale_demand_finding(
+            db,
+            run_id=persisted.run_id,
+            scenario_id=scenario_uuid,
+            item_id=item_uuid,
+            item_external_id=body.item_id,
+            warehouse_external_id=body.location_id,
+            freshness=freshness,
+            sla_days=body.freshness_sla_days,
+        )
+        logger.warning(
+            "pyramide.run stale demand run_id=%s item=%s ingest_age_days=%s "
+            "sla_days=%s dq_finding_id=%s",
+            persisted.run_id, body.item_id, freshness.ingest_age_days,
+            body.freshness_sla_days, dq_finding_id,
+        )
     summary = fetch_run_summary(db, persisted.run_id)
     if summary is None:
         logger.error("pyramide.run persisted but summary missing run_id=%s", persisted.run_id)
@@ -210,13 +301,18 @@ def create_pyramide_run(
 )
 def get_pyramide_run(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunOut:
     summary = fetch_run_summary(db, run_id)
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pyramide run '{run_id}' not found")
-    return _run_out(summary)
+    out = _run_out(summary)
+    out.accuracy_metrics = [
+        _accuracy_metric_out(metric)
+        for metric in fetch_accuracy_metrics(db, run_id)
+    ]
+    return out
 
 
 @router.get(
@@ -226,7 +322,7 @@ def get_pyramide_run(
 )
 def get_pyramide_run_result(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunResultOut:
     summary = fetch_run_summary(db, run_id)
@@ -246,10 +342,16 @@ def get_pyramide_run_result(
 )
 def commit_pyramide_run(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideCommitOut:
-    summary = commit_run(db, run_id)
+    try:
+        summary = commit_run(db, run_id)
+    except PyramideAggregateCommitError as exc:
+        # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
+        # message containing only UUIDs / hierarchy codes — the client
+        # needs it to understand why an aggregate run is not committable.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pyramide run '{run_id}' not found")
     return PyramideCommitOut(
@@ -266,7 +368,7 @@ def commit_pyramide_run(
 )
 def list_pyramide_snapshots(
     limit: int = Query(default=100, ge=1, le=500),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideSnapshotListOut:
     snapshots = list_snapshots(db, limit=limit)
@@ -284,7 +386,7 @@ def list_pyramide_snapshots(
 def diff_pyramide_snapshots(
     snapshot_id: UUID,
     compare_to: UUID = Query(...),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideSnapshotDiffOut:
     base_values = fetch_snapshot_values(db, snapshot_id)
@@ -329,6 +431,9 @@ def _run_out(summary) -> PyramideRunOut:
         status=summary.status,
         item_id=summary.item_id,
         location_id=summary.location_id,
+        hierarchy_id=summary.hierarchy_id,
+        level=summary.level,
+        node_code=summary.node_code,
         scenario_id=summary.scenario_id,
         horizon_start=summary.horizon_start,
         horizon_end=summary.horizon_end,
@@ -346,6 +451,20 @@ def _run_out(summary) -> PyramideRunOut:
         deterministic_artifact=summary.deterministic_artifact,
         created_at=summary.created_at,
         committed_at=summary.committed_at,
+        stale_demand=summary.stale_demand,
+    )
+
+
+def _accuracy_metric_out(metric) -> PyramideAccuracyMetricOut:
+    return PyramideAccuracyMetricOut(
+        horizon=metric.horizon,
+        mase=metric.mase,
+        wape=metric.wape,
+        smape=metric.smape,
+        bias=metric.bias,
+        coverage=metric.coverage,
+        n_cutoffs=metric.n_cutoffs,
+        n_observations=metric.n_observations,
     )
 
 

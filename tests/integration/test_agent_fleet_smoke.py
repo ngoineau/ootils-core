@@ -70,6 +70,7 @@ import agent_eando_watcher  # noqa: E402
 import agent_lot_policy_watcher  # noqa: E402
 import agent_material_watcher  # noqa: E402
 import agent_shortage_watcher  # noqa: E402
+from agent_governance import decision_level  # noqa: E402
 
 import psycopg  # noqa: E402
 from psycopg.rows import dict_row, tuple_row  # noqa: E402
@@ -367,7 +368,9 @@ def test_shortage_watcher_drafts_purchase_for_fg_short(seeded_fleet_db):
             (BASELINE,)).fetchall()
     assert rows, "shortage_watcher must draft a purchase reco for FG-SHORT"
     r = rows[0]
-    assert r["decision_level"] == "L1"
+    # Decision ladder (#340): the level is DERIVED from the action by the
+    # single shared mapping — new-order drafts L1, EXPEDITE L2.
+    assert r["decision_level"] == decision_level(r["action"])
     assert r["confidence"] in _CONFIDENCES
     assert r["action"] in {"EXPEDITE", "ORDER_RUSH", "ORDER_NOW"}
     assert r["recommended_qty"] > 0
@@ -384,7 +387,8 @@ def test_material_watcher_pegs_past_due_component(seeded_fleet_db):
             (BASELINE,)).fetchall()
     assert rows, "material_watcher must draft an expedite for past-due CMP-BUY"
     r = rows[0]
-    assert r["decision_level"] == "L1"
+    # EXPEDITE touches an EXISTING order commitment -> L2 (#340 decision ladder).
+    assert r["decision_level"] == decision_level("EXPEDITE") == "L2"
     assert r["action"] == "EXPEDITE"
     assert r["recommended_qty"] > 0
     # Pegging trail back to the driving finished good is the whole point.

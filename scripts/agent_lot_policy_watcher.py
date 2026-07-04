@@ -16,9 +16,21 @@ order covers (avg order qty / weekly demand) and compares it to a target band:
                                    cut transaction count)
 Sporadic / thin-signal items -> DATA_REVIEW (NEEDS_DATA_REVIEW confidence).
 
-North Star: deterministic core, L1 DRAFT only (never applies), auditable
-(agent_runs + transitions), explainable (evidence = realized-plan footprint),
-confidence-aware, idempotent (supersede prior DRAFTs).
+Scenario-backed (chantier #347 PR4): each run forks ONE what-if scenario
+(what-if-lot_policy_watcher-<ts>) via agent_simulation.simulate_param_run,
+applying the planning-param overlay override each candidate maps onto
+(RENEGOTIATE_MOQ -> min_order_qty, REVIEW_MULTIPLE -> order_multiple_qty,
+SET_LOT_RULE -> lot_size_rule [+ lot_size_poq_periods for POQ]), reads the
+per-item shortage delta, stamps evidence.simulation, then archives the fork
+(TTL, never DELETE — never promoted onto baseline). Propagation failure
+demotes simulated recos to NEEDS_DATA_REVIEW (fail-loudly, no fabricated
+delta) via agent_simulation.effective_confidence.
+
+North Star: deterministic core, L1 DRAFT only (never applies — this watcher
+NEVER writes to parameter_recommendations' target table or to shortages,
+ADR-021), auditable (agent_runs + transitions), explainable (evidence =
+realized-plan footprint + simulation delta), confidence-aware, idempotent
+(supersede prior DRAFTs).
 
 Usage:
     DATABASE_URL=... python scripts/agent_lot_policy_watcher.py [--top 15]
@@ -37,11 +49,54 @@ from collections import defaultdict
 import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
-from agent_governance import governed_run
+import agent_simulation
+from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("lot_policy_watcher")
 AGENT_NAME = "lot_policy_watcher"
+
+# Maps each proposed change_type onto the whitelisted planning-param overlay
+# field it would set (ALLOWED_PARAM_FIELDS, engine/scenario/param_overlay.py)
+# — the ONLY three change_types this watcher emits, all in the V1 whitelist.
+# SET_LOT_RULE additionally carries lot_size_poq_periods when the proposed
+# rule is POQ (build_param_override below), since a POQ lot_size_rule without
+# its period count would resolve against whatever period the base row
+# already has, silently changing the meaning of the override.
+_CHANGE_TYPE_FIELD: dict = {
+    "RENEGOTIATE_MOQ": "min_order_qty",
+    "REVIEW_MULTIPLE": "order_multiple_qty",
+    "SET_LOT_RULE": "lot_size_rule",
+}
+
+
+def build_param_override(item, change_type: str, prop_val: str) -> list:
+    """Pure: translate one watcher proposal into the whitelisted
+    planning-param overlay override(s) it maps onto.
+
+    Returns a list of param_override dicts (item-global: location_id=None,
+    since mrp_core's realized-plan aggregation is not location-scoped —
+    set_param_override accepts an item-global target as long as the item has
+    a current planning-params row at ANY location). SET_LOT_RULE:POQ:<n>
+    yields TWO overrides (lot_size_rule + lot_size_poq_periods); every other
+    change_type yields exactly one.
+
+    Raises ValueError for an unknown change_type (fail-loudly — mirrors
+    agent_governance.decision_level's no-silent-default rule).
+    """
+    if change_type not in _CHANGE_TYPE_FIELD:
+        raise ValueError(
+            f"unknown lot_policy change_type {change_type!r} — add it to "
+            "_CHANGE_TYPE_FIELD in agent_lot_policy_watcher.py"
+        )
+    field = _CHANGE_TYPE_FIELD[change_type]
+    if change_type == "SET_LOT_RULE" and prop_val.startswith("POQ:"):
+        rule, _, periods = prop_val.partition(":")
+        return [
+            {"item_id": str(item), "location_id": None, "field_name": "lot_size_rule", "value": rule},
+            {"item_id": str(item), "location_id": None, "field_name": "lot_size_poq_periods", "value": periods},
+        ]
+    return [{"item_id": str(item), "location_id": None, "field_name": field, "value": prop_val}]
 
 
 def main(argv=None) -> int:
@@ -84,6 +139,7 @@ def main(argv=None) -> int:
         ct_count = defaultdict(int)
 
         with governed_run(conn, AGENT_NAME, core.BASELINE, t0=t0) as run:
+            candidates = []
             for item, a in agg.items():
                 tot_dem = sum(gross.get(item, {}).values())
                 active_wk = sum(1 for v in gross.get(item, {}).values() if v > 0)
@@ -136,14 +192,49 @@ def main(argv=None) -> int:
                     "target_band_weeks": [args.wos_low, args.wos_high],
                     "rule": "WOS-per-order vs target band on the realized time-phased plan",
                 }
+                # SET_LOT_RULE:POQ yields TWO whitelisted overrides (lot_size_rule
+                # + lot_size_poq_periods) — simulate_param_run applies the whole
+                # list in one fork; the per-item delta is still attributed as one
+                # candidate (see agent_simulation.simulate_param_run docstring).
+                param_overrides = build_param_override(item, change, prop_val)
+                candidates.append({
+                    "item": item, "simulable": True,
+                    "param_override": param_overrides if len(param_overrides) > 1 else param_overrides[0],
+                    "reason": None,
+                    "param": param, "cur_val": cur_val, "prop_val": prop_val,
+                    "change": change, "rationale": rationale, "conf": conf,
+                    "wos": wos, "annual": annual, "impact": impact, "evidence": evidence,
+                })
+
+            # Scenario-backed counter-factual (chantier #347 PR4): ONE fork for
+            # the whole run, planning-param overlay overrides instead of node
+            # overrides. Every candidate here maps onto a whitelisted field, so
+            # all are simulable — simulate_param_run still owns the
+            # fork/propagate/archive lifecycle uniformly (never DELETE, never
+            # promoted onto baseline).
+            sim_summary, sim_results = agent_simulation.simulate_param_run(
+                args.dsn, AGENT_NAME,
+                [{"item": c["item"], "simulable": c["simulable"],
+                  "param_override": c["param_override"], "reason": c["reason"]}
+                 for c in candidates],
+                applied_by=f"agent:{AGENT_NAME}",
+            )
+
+            for c, res in zip(candidates, sim_results):
+                item = c["item"]
+                conf = agent_simulation.effective_confidence(
+                    c["conf"], res["simulated"], sim_summary["propagation_status"])
+                evidence = dict(c["evidence"])
+                evidence["simulation_scenario_id"] = sim_summary["scenario_id"]
+                evidence["simulation"] = agent_simulation.simulation_evidence(sim_summary, res)
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
-                             param, cur_val, prop_val, change, rationale,
-                             round(wos, 2), round(annual, 1), round(impact, 1),
-                             "L1", "DRAFT", conf, Jsonb(evidence)))
-                display.append({"ext": d.names.get(item, str(item)[:8]), "param": param, "change": change,
-                                "cur": cur_val, "prop": prop_val, "wos": wos, "annual": annual,
-                                "impact": impact, "conf": conf})
-                ct_count[change] += 1
+                             c["param"], c["cur_val"], c["prop_val"], c["change"], c["rationale"],
+                             round(c["wos"], 2), round(c["annual"], 1), round(c["impact"], 1),
+                             decision_level(c["change"]), "DRAFT", conf, Jsonb(evidence)))
+                display.append({"ext": d.names.get(item, str(item)[:8]), "param": c["param"], "change": c["change"],
+                                "cur": c["cur_val"], "prop": c["prop_val"], "wos": c["wos"], "annual": c["annual"],
+                                "impact": c["impact"], "conf": conf})
+                ct_count[c["change"]] += 1
 
             superseded = run.supersede("parameter_recommendations", "DRAFT", "EXPIRED")
             run.insert(
@@ -157,6 +248,7 @@ def main(argv=None) -> int:
             run.set_metrics({
                 "proposals": len(recs), "by_change_type": dict(ct_count),
                 "superseded": superseded, "items_planned": len(agg),
+                "simulation": sim_summary,
             })
             metrics = run.metrics
 
@@ -165,6 +257,10 @@ def main(argv=None) -> int:
     logger.info("LOT POLICY WATCHER — run %s COMPLETED in %.2fs", str(run.run_id)[:8], elapsed)
     logger.info("  Parameter proposals (DRAFT/L1) : %d   by type: %s", len(recs), dict(ct_count))
     logger.info("  Prior drafts superseded        : %d", metrics["superseded"])
+    sim = metrics["simulation"]
+    logger.info("  Scenario-backed (#347 PR4)     : fork=%s status=%s simulated=%d not-simulated=%d archived=%s",
+                sim["scenario_name"] or "—", sim["propagation_status"] or "not-run",
+                sim["simulated_candidates"], sim["non_simulated_candidates"], sim["archived"])
     logger.info("=" * 100)
     display.sort(key=lambda x: -abs(x["impact"]))
     logger.info("TOP %d proposals (by |inventory impact|):", args.top)

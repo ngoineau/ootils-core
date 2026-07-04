@@ -14,8 +14,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.mps.models import MPSStatus
 
 logger = logging.getLogger(__name__)
@@ -133,7 +132,7 @@ class AggregateDemandEngine:
     
     def aggregate(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         item_id: UUID,
         location_id: UUID,
         scenario_id: UUID,
@@ -215,10 +214,10 @@ class AggregateDemandEngine:
                 updated_count += 1
         
         # 7. Calculer les totaux
-        total_demand = sum(b.total_demand for b in bucket_demand)
+        total_demand = sum((b.total_demand for b in bucket_demand), Decimal("0"))
         demand_by_source = {
-            "forecast": sum(b.forecast_quantity for b in bucket_demand),
-            "sales_orders": sum(b.sales_orders_quantity for b in bucket_demand),
+            "forecast": sum((b.forecast_quantity for b in bucket_demand), Decimal("0")),
+            "sales_orders": sum((b.sales_orders_quantity for b in bucket_demand), Decimal("0")),
         }
         
         demand_by_period = [
@@ -252,7 +251,7 @@ class AggregateDemandEngine:
     
     def _clear_existing_mps_nodes(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         item_id: UUID,
         location_id: UUID,
         scenario_id: UUID,
@@ -344,7 +343,7 @@ class AggregateDemandEngine:
     
     def _fetch_forecast_demand(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         item_id: UUID,
         location_id: UUID,
         scenario_id: UUID,
@@ -391,7 +390,7 @@ class AggregateDemandEngine:
     
     def _fetch_sales_orders_demand(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         item_id: UUID,
         location_id: UUID,
         scenario_id: UUID,
@@ -489,7 +488,7 @@ class AggregateDemandEngine:
     
     def _upsert_mps_node(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         bucket: TimeBucketDemand,
         item_id: UUID,
         location_id: UUID,
@@ -574,7 +573,7 @@ class AggregateDemandEngine:
     
     def get_mps_nodes_summary(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         item_id: UUID,
         location_id: UUID,
         scenario_id: UUID,
@@ -637,7 +636,7 @@ class AggregateDemandEngine:
     
     def promote_to_mrp(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps_id: UUID,
         explode_components: bool = True,
         dry_run: bool = False,
@@ -789,7 +788,7 @@ class AggregateDemandEngine:
     
     def _trigger_mrp_explosion(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         planned_supply_id: UUID,
         item_id: UUID,
         location_id: UUID,
@@ -803,8 +802,12 @@ class AggregateDemandEngine:
             Dict avec job_id et components_count.
         """
         try:
-            from ootils_core.api.routers.mrp import MRPExplosionEngine
-            
+            # MRPExplosionEngine was removed from routers.mrp during the MRP
+            # consolidation (ADR-020); this optional import is intentionally
+            # guarded by the ImportError fallback below. Kept as a soft hook so
+            # the fallback (skip BOM explosion) remains the current behaviour.
+            from ootils_core.api.routers.mrp import MRPExplosionEngine  # type: ignore[attr-defined]
+
             engine = MRPExplosionEngine()
             result = engine.explode_bom(
                 db=db,

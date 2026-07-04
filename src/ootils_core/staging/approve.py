@@ -35,8 +35,7 @@ import logging
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.staging.diff import (
     DELETION_RATIO_THRESHOLD,
     DiffError,
@@ -122,7 +121,7 @@ _SPECS: dict[str, _ApprovalSpec] = {
 
 
 def approve_batch(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     batch_id: UUID,
     approved_by: str,
     notes: str | None = None,
@@ -308,7 +307,7 @@ def approve_batch(
 
 
 def _load_batch_records(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     batch_id: UUID,
     spec: _ApprovalSpec,
 ) -> dict[str, dict]:
@@ -338,7 +337,7 @@ def _load_batch_records(
 
 
 def _upsert_canonical_rows(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     spec: _ApprovalSpec,
     source_system: str,
     batch_records: dict[str, dict],
@@ -370,6 +369,14 @@ def _upsert_canonical_rows(
     for ext_id, record in batch_records.items():
         params = tuple(record.get(f) for f in fields)
         row = conn.execute(upsert_sql, params).fetchone()
+        if row is None:
+            # INSERT ... ON CONFLICT DO UPDATE ... RETURNING always yields one
+            # row; a None here signals a driver/contract breakage — fail loudly
+            # rather than index into None below.
+            raise ApprovalError(
+                f"UPSERT into {table} produced no RETURNING row for external_id "
+                f"{ext_id!r}"
+            )
         internal_id = (
             row[spec.pk_column] if isinstance(row, dict) else row[0]
         )
@@ -388,7 +395,7 @@ def _upsert_canonical_rows(
 
 
 def _all_soft_delete_targets(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     spec: _ApprovalSpec,
     source_system: str,
     batch_external_ids: set[str],
@@ -411,7 +418,7 @@ def _all_soft_delete_targets(
 
 
 def _soft_delete_missing(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     spec: _ApprovalSpec,
     source_system: str,
     soft_delete_ids: list[str],

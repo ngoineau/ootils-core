@@ -98,6 +98,30 @@ Le sur-comptage sériel est éliminé ; le résidu (~4 % médian) relève de l'u
 de planification (pooled vs per-location) et des nuances de règles de lot, à
 fermer aux PAS 3-4. `test_gross_to_net` + golden-master A : 139/139 verts.
 
+### Décomposition du résidu (mesurée au premier run CI du garde-fou, 2026-07-02)
+
+Le garde-fou de parité en CI (#332) sur le seed démo (2 items, médiane 21-24 %
+selon le jour de semaine — amplification petits-volumes du même résidu) a
+permis de **nommer** les écarts qui composent la classe résiduelle. Tous
+préexistants au fix de netting, tous absorbés par le PAS 4 (B devient une
+surcouche du cœur A) — aucun fix côté B :
+
+1. **L4L sans `order_multiple`** — le lot-for-lot de B applique le plancher
+   `min_order_qty` mais jamais le multiple (`lot_sizing.py`), là où le cœur A
+   applique MOQ + multiple à toutes les règles en garde finale (`core.py`).
+   Aggravant dormant : le batch loader de B lit `order_multiple_qty` sans
+   COALESCE sur la colonne legacy `order_multiple`.
+2. **Demande indépendante des composants jetée par B** — pour un composant
+   LLC>0 avec demande dépendante, `gross_to_net.py` retourne la seule demande
+   dépendante et ignore forecast/commandes propres du composant (violation
+   APICS : pièces de rechange). Matériel : −11 % sur VALVE-02 au run CI.
+3. **Sémantique de frozen fence opposée** — A traite `frozen_time_fence_days`
+   comme *demand* time fence (orders-only dans la zone), B comme *order
+   placement* fence (demande conservée, ordre différé au premier bucket
+   libre). S'y ajoutent le Monday-snap des buckets de B (sensibilité au jour
+   de run) vs les buckets ancrés sur CURRENT_DATE de A, et le traitement des
+   réceptions en retard (A les clampe au bucket 0, B les ignore).
+
 ## Conséquences
 
 - **Positif :** une seule source de vérité MRP, déterministe, testée en parité ; B cesse de sur-planifier ; les agents et la matérialisation raisonnent sur le même monde.

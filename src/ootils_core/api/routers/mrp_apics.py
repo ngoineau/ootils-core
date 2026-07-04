@@ -22,11 +22,11 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from psycopg import Connection
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id, BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
 from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
@@ -158,7 +158,7 @@ class LlcResponse(BaseModel):
 def run_mrp_apics(
     request: MrpApicsRunRequest,
     response: Response,
-    db: Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ):
     """
@@ -185,10 +185,7 @@ def run_mrp_apics(
         # Parse scenario
         scenario_id = BASELINE_SCENARIO_ID
         if request.scenario_id:
-            try:
-                scenario_id = resolve_scenario_id(db, request.scenario_id)
-            except Exception:
-                scenario_id = UUID(request.scenario_id)
+            scenario_id = resolve_scenario_id(request.scenario_id)
 
         location_id = UUID(request.location_id) if request.location_id else None
         item_ids = [UUID(i) for i in request.item_ids] if request.item_ids else None
@@ -233,7 +230,7 @@ def run_mrp_apics(
 @router.post("/consumption", response_model=ConsumptionResponse)
 def run_consumption(
     request: ConsumptionRequest,
-    db: Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ):
     """
@@ -247,10 +244,7 @@ def run_consumption(
 
         scenario_id = BASELINE_SCENARIO_ID
         if request.scenario_id:
-            try:
-                scenario_id = resolve_scenario_id(db, request.scenario_id)
-            except Exception:
-                scenario_id = UUID(request.scenario_id)
+            scenario_id = resolve_scenario_id(request.scenario_id)
 
         location_id = UUID(request.location_id) if request.location_id else None
 
@@ -266,7 +260,6 @@ def run_consumption(
                     location_id=location_id,
                     horizon_days=request.horizon_days,
                     strategy=request.strategy,
-                    window_days=request.consumption_window_days,
                 )
                 items.append(ConsumptionItemResult(
                     item_id=item_id_str,
@@ -277,10 +270,10 @@ def run_consumption(
                             period_end=b.period_end.isoformat(),
                             original_forecast=str(b.original_forecast),
                             customer_orders=str(b.customer_orders),
-                            consumed_qty=str(b.consumed_qty),
+                            consumed_qty=str(b.consumed_forecast),
                             remaining_forecast=str(b.remaining_forecast),
-                            carry_forward=str(b.carry_forward),
-                            carry_backward=str(b.carry_backward),
+                            carry_forward="0",
+                            carry_backward="0",
                             net_demand=str(b.net_demand),
                             strategy=b.strategy,
                         )
@@ -313,10 +306,10 @@ def run_consumption(
                             period_end=b.period_end.isoformat(),
                             original_forecast=str(b.original_forecast),
                             customer_orders=str(b.customer_orders),
-                            consumed_qty=str(b.consumed_qty),
+                            consumed_qty=str(b.consumed_forecast),
                             remaining_forecast=str(b.remaining_forecast),
-                            carry_forward=str(b.carry_forward),
-                            carry_backward=str(b.carry_backward),
+                            carry_forward="0",
+                            carry_backward="0",
                             net_demand=str(b.net_demand),
                             strategy=b.strategy,
                         )
@@ -341,7 +334,7 @@ def run_consumption(
 @router.post("/lot-sizing", response_model=LotSizingResponse)
 def calculate_lot_sizing(
     request: LotSizingRequest,
-    db: Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ):
     """
@@ -386,7 +379,7 @@ def calculate_lot_sizing(
 @router.get("/apics/llc", response_model=LlcResponse)
 def get_llc(
     recalculate: bool = Query(default=False, description="Recalculate LLCs from BOM"),
-    db: Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ):
     """
@@ -397,7 +390,9 @@ def get_llc(
         calc = LLCCalculator(db)
 
         if recalculate:
-            llc_map = calc.calculate_all()
+            # calculate_all() returns an LLCResult wrapper; the response needs
+            # the raw item_id → llc mapping it carries.
+            llc_map = calc.calculate_all().llc_map
         else:
             llc_map = calc.load_existing_llc()
 

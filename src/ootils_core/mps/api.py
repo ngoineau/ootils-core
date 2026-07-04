@@ -18,12 +18,12 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.mps.engine import AggregateDemandEngine
 from ootils_core.mps.capacity_engine import CapacityCheckEngine
 
@@ -185,7 +185,7 @@ class CapacityCheckResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_item_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve item external_id → item_id UUID."""
     # Try UUID first
     try:
@@ -207,7 +207,7 @@ def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_location_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve location external_id → location_id UUID."""
     # Try UUID first
     try:
@@ -229,7 +229,7 @@ def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | N
     return row["location_id"] if row else None
 
 
-def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) -> UUID:
+def _resolve_scenario_uuid(db: DictRowConnection, scenario_id_str: str | None) -> UUID:
     """Resolve scenario_id string → UUID, defaulting to baseline."""
     if scenario_id_str is None or scenario_id_str.lower() == "baseline":
         return BASELINE_SCENARIO_ID
@@ -270,7 +270,7 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
 )
 async def aggregate_demand(
     body: AggregateDemandRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> AggregateDemandResponse:
     """
@@ -328,16 +328,20 @@ async def aggregate_demand(
             clear_existing=body.clear_existing,
         )
     except ValueError as e:
+        # Safe: AggregateDemandEngine.aggregate() raises ValueError only from
+        # its own parameter validation (time_grain/forecast_weight/
+        # orders_weight/horizon), before any DB access — psycopg errors are
+        # never ValueError, so no SQL/DSN text can reach this branch.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(e),
-        )
+            detail=f"Invalid aggregation parameters: {e}",
+        ) from e
     except Exception as e:
         logger.exception("mps.aggregate_demand failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Aggregation failed: {str(e)}",
-        )
+            detail="Aggregation failed.",
+        ) from e
 
     # 3. Fetch MPS node summaries for response
     mps_summaries = engine.get_mps_nodes_summary(
@@ -425,7 +429,7 @@ async def list_mps_nodes(
     date_to: Optional[date] = Query(default=None),
     status: Optional[str] = Query(default=None, pattern="^(DRAFT|REVIEWED|APPROVED|RELEASED)$"),
     limit: int = Query(default=100, ge=1, le=1000),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> MPSNodeListResponse:
     """
@@ -532,7 +536,7 @@ async def list_mps_nodes(
 )
 async def get_mps_node(
     mps_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> MPSNodeDetailOut:
     """
@@ -624,7 +628,7 @@ async def get_mps_node(
 )
 async def capacity_check(
     body: CapacityCheckRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CapacityCheckResponse:
     """
@@ -713,7 +717,7 @@ async def capacity_check(
 )
 async def suggest_adjustments(
     mps_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> List[AdjustmentSuggestionOut]:
     """
@@ -801,7 +805,7 @@ class ApproveMPSResponse(BaseModel):
 async def approve_mps_node(
     mps_id: UUID,
     body: ApproveMPSRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     token: str = Depends(require_auth),
 ) -> ApproveMPSResponse:
     """Approve an MPS node for MRP promotion."""
@@ -944,7 +948,7 @@ class PromoteToMRPResponse(BaseModel):
 async def promote_to_mrp(
     mps_id: UUID,
     body: PromoteToMRPRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     token: str = Depends(require_auth),
 ) -> PromoteToMRPResponse:
     """
@@ -1003,7 +1007,7 @@ async def promote_to_mrp(
             # Find peak load date (date with highest total load across all work centers)
             if crp_result.load_profiles:
                 peak_date = None
-                peak_load = 0.0
+                peak_load = Decimal("0")
                 for profile in crp_result.load_profiles.values():
                     for bucket in profile.buckets:
                         if bucket.load_hours > peak_load:

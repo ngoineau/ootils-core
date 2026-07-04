@@ -12,11 +12,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 
 def run_capacity_aggregate(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     ghost_id: str,
     scenario_id: str,
     from_date: date,
@@ -70,11 +70,13 @@ def run_capacity_aggregate(
     current = from_date
     while current <= to_date:
         member_loads = []
+        member_load_values: list[float] = []
         for item_id in item_ids:
             load = _get_supply_load(db, item_id, scenario_id, current)
             member_loads.append({"item_id": item_id, "load": load})
+            member_load_values.append(load)
 
-        load_total = sum(ml["load"] for ml in member_loads)
+        load_total = sum(member_load_values)
         slack = capacity_per_day - load_total
         overloaded = slack < 0
 
@@ -113,7 +115,7 @@ def run_capacity_aggregate(
     }
 
 
-def _get_resource_capacity(db: psycopg.Connection, resource_id: str) -> float:
+def _get_resource_capacity(db: DictRowConnection, resource_id: str) -> float:
     """Return capacity_per_day for a resource."""
     row = db.execute(
         "SELECT capacity_per_day FROM resources WHERE resource_id = %s",
@@ -123,7 +125,7 @@ def _get_resource_capacity(db: psycopg.Connection, resource_id: str) -> float:
 
 
 def _get_supply_load(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: str,
     scenario_id: str,
     ref_date: date,

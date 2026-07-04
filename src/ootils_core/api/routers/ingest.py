@@ -26,13 +26,13 @@ from datetime import date
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.dq.engine import run_dq
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ def _request_hash(body: BaseModel) -> str:
 
 
 def _load_idempotent_response(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     entity_type: str,
     request: Request,
     response: Response,
@@ -160,7 +160,7 @@ def _load_idempotent_response(
 
 
 def _create_ingest_batch(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     entity_type: str,
     rows_data: list[Any],
     source_system: str = "ingest_api",
@@ -221,7 +221,7 @@ def _create_ingest_batch(
 
 
 def _finalize_ingest_batch(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     response_payload: IngestResponse,
 ) -> None:
@@ -238,7 +238,7 @@ def _finalize_ingest_batch(
     )
 
 
-def _trigger_dq(db: psycopg.Connection, batch_id: UUID) -> str:
+def _trigger_dq(db: DictRowConnection, batch_id: UUID) -> str:
     """Run DQ pipeline on a batch. Returns dq_status string, never raises."""
     try:
         with db.transaction():
@@ -250,7 +250,7 @@ def _trigger_dq(db: psycopg.Connection, batch_id: UUID) -> str:
 
 
 def _ensure_projection_series(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     scenario_id: UUID,
@@ -329,7 +329,7 @@ def _ensure_projection_series(
 
 
 def _wire_node_to_pi(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     node_id: UUID,
     node_type: str,
     item_id: UUID,
@@ -391,7 +391,7 @@ def _wire_node_to_pi(
     return 1
 
 
-def _emit_ingestion_event(db: psycopg.Connection, scenario_id: UUID, node_id: UUID) -> None:
+def _emit_ingestion_event(db: DictRowConnection, scenario_id: UUID, node_id: UUID) -> None:
     """Create an unprocessed ingestion_complete event to trigger recalculation."""
     from datetime import datetime, timezone
     db.execute(
@@ -411,7 +411,7 @@ _ALLOWED_COLUMNS = {
 
 
 def _batch_existing(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     table: str,
     id_col: str,
     pk_col: str,
@@ -470,7 +470,7 @@ def ingest_items(
     body: IngestItemsRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert items by external_id. All-or-nothing: any validation error → HTTP 422."""
@@ -578,7 +578,7 @@ def ingest_locations(
     body: IngestLocationsRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert locations by external_id. All-or-nothing: any validation error → HTTP 422."""
@@ -702,7 +702,7 @@ def ingest_suppliers(
     body: IngestSuppliersRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert suppliers by external_id. All-or-nothing: any validation error → HTTP 422."""
@@ -802,7 +802,7 @@ def ingest_supplier_items(
     body: IngestSupplierItemsRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert supplier_items by (supplier_id, item_id). All-or-nothing: any error → HTTP 422."""
@@ -833,7 +833,7 @@ def ingest_supplier_items(
         _raise_422(errors)
 
     if body.dry_run:
-        results = [
+        results: list[dict] = [
             {
                 "supplier_external_id": si.supplier_external_id,
                 "item_external_id": si.item_external_id,
@@ -861,7 +861,7 @@ def ingest_supplier_items(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
 
-    results: list[dict] = []
+    results = []
     inserted = updated = 0
 
     for si in body.supplier_items:
@@ -941,7 +941,7 @@ def ingest_on_hand(
     body: IngestOnHandRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert OnHandSupply nodes in the baseline scenario. All-or-nothing: any error → HTTP 422."""
@@ -972,7 +972,7 @@ def ingest_on_hand(
         _raise_422(errors)
 
     if body.dry_run:
-        results = [
+        results: list[dict] = [
             {"item_external_id": r.item_external_id, "location_external_id": r.location_external_id, "action": "dry_run"}
             for r in body.on_hand
         ]
@@ -996,7 +996,7 @@ def ingest_on_hand(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
 
-    results: list[dict] = []
+    results = []
     inserted = updated = 0
 
     for row in body.on_hand:
@@ -1105,7 +1105,7 @@ def ingest_purchase_orders(
     body: IngestPurchaseOrdersRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert PurchaseOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
@@ -1266,7 +1266,7 @@ def ingest_forecast_demand(
     body: IngestForecastRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert ForecastDemand nodes. Keyed by (item, location, bucket_date, time_grain, scenario).
@@ -1453,7 +1453,7 @@ def ingest_resources(
     body: IngestResourcesRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert resources by external_id. Also maintains a Resource node in the graph."""
@@ -1623,7 +1623,7 @@ def ingest_work_orders(
     body: IngestWorkOrdersRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert WorkOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
@@ -1777,7 +1777,7 @@ def ingest_customer_orders(
     body: IngestCustomerOrdersRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert CustomerOrderDemand nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
@@ -1935,7 +1935,7 @@ def ingest_transfers(
     body: IngestTransfersRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Upsert TransferSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
@@ -2160,7 +2160,7 @@ class IngestPlanningParamsRequest(BaseModel):
 
 
 def _planning_params_active_row(
-    db: psycopg.Connection, item_id: UUID, location_id: UUID
+    db: DictRowConnection, item_id: UUID, location_id: UUID
 ) -> Optional[dict]:
     """Return the currently active (effective_to IS NULL) row, or None."""
     row = db.execute(
@@ -2255,7 +2255,7 @@ def ingest_planning_params(
     body: IngestPlanningParamsRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """SCD2-transparent upsert of item_planning_params (ADR-014 D3)."""
@@ -2296,7 +2296,7 @@ def ingest_planning_params(
 
     if body.dry_run:
         # Show what would happen without writing
-        results = []
+        results: list[dict] = []
         for r in body.params:
             item_id = item_map[r.item_external_id]
             location_id = loc_map[r.location_external_id]
@@ -2329,7 +2329,7 @@ def ingest_planning_params(
     )
 
     inserted = updated = 0
-    results: list[dict] = []
+    results = []
 
     for r in body.params:
         item_id = item_map[r.item_external_id]
@@ -2349,7 +2349,14 @@ def ingest_planning_params(
             continue
 
         if decision.action == Scd2Action.UPDATED_INPLACE:
-            # Same-day UPDATE on the active row's param_id
+            # Same-day UPDATE on the active row's param_id.
+            # decide_action only yields UPDATED_INPLACE when an active row
+            # exists (see scd2.decide_action); guard fail-loudly so a broken
+            # invariant surfaces here instead of an opaque NoneType index.
+            if active is None:
+                raise RuntimeError(
+                    "SCD2 UPDATED_INPLACE requires an active row but none was found"
+                )
             assignments = ", ".join(f"{k} = %s" for k in decision.changed_fields.keys())
             params_values = list(decision.changed_fields.values()) + [active["param_id"]]
             db.execute(
@@ -2368,6 +2375,13 @@ def ingest_planning_params(
 
         # CREATED or ROTATED — both need an INSERT. ROTATED also closes the active row first.
         if decision.action == Scd2Action.ROTATED:
+            # decide_action only yields ROTATED when an active row exists
+            # (see scd2.decide_action); guard fail-loudly so a broken
+            # invariant surfaces here instead of an opaque NoneType index.
+            if active is None:
+                raise RuntimeError(
+                    "SCD2 ROTATED requires an active row but none was found"
+                )
             # Half-open interval: old.[effective_from, effective_to=today),
             # new.[effective_from=today, effective_to=NULL). Matches the
             # daterange(...) WITH && EXCLUDE constraint, and the CHECK
@@ -2518,7 +2532,7 @@ def ingest_routings(
     body: IngestRoutingsRequest,
     request: Request,
     response: Response,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestResponse:
     """Full-reload routings + operations per (item, sequence). ADR-014 D2 unit checks at ingest."""

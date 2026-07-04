@@ -20,7 +20,11 @@ from ootils_core.models import Node, ShortageRecord
 
 logger = logging.getLogger(__name__)
 
-# Unit cost proxy for PoC — will be replaced with actual item cost in future milestones.
+# Fallback unit cost for UNPRICED items only (#342). The real valuation flows
+# in via detect_with_params(unit_cost=...): the propagator batch-loads it with
+# the same precedence as mrp_core.cost_of (negotiated supplier unit_cost, then
+# items.standard_cost) so kernel severity and watcher valuation agree. The SQL
+# engine mirrors this in propagator_sql.SHORTAGES_SQL — keep all three in sync.
 _UNIT_COST_PROXY = Decimal("1")
 
 # Shortage sign-test tolerance. A "stockout" is closing_stock < 0, but the
@@ -125,6 +129,10 @@ class ShortageDetector:
 
         severity_score = shortage_qty * Decimal(str(days_in_bucket)) * effective_unit_cost
 
+        # May be None when the PI node has no time coordinate at all (unit
+        # tests exercise this in-memory). ShortageRecord.shortage_date is
+        # Optional[date]; the shortages.shortage_date NOT NULL column rejects a
+        # None only at persist time — the pre-existing behaviour, unchanged.
         shortage_date = pi_node.time_span_start or pi_node.time_ref
 
         # Drive timestamps from the injected clock so the record is fully

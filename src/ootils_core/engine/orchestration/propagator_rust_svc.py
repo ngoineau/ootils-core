@@ -27,8 +27,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.orchestration.propagator import PropagationEngine
 from ootils_core.engine_rust_service import EngineClient
 
@@ -76,7 +75,7 @@ class RustServicePropagationEngine(PropagationEngine):
         self,
         event_id: UUID,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> Optional["CalcRun"]:
         """
         Override the full lifecycle (not just `_propagate`). The Rust
@@ -165,7 +164,7 @@ class RustServicePropagationEngine(PropagationEngine):
         self,
         calc_run: "CalcRun",
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Bare-minimum completion: mark calc_run complete, flag event
         as processed. Skips the shortage_detector.resolve_stale step

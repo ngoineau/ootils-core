@@ -14,15 +14,31 @@ from .models import (
     SUPPORTED_METHODS,
 )
 from .engines import PyramideForecastEngine
+from .foundation import FoundationUnavailable
+from .routing import (
+    RoutingDecision,
+    RoutingError,
+    RoutingThresholds,
+    SeriesFeatures,
+    route,
+    seasonal_strength,
+)
 from .runner import PyramideError, PyramideRunner
 
 __all__ = [
+    "FoundationUnavailable",
     "PyramideError",
     "PyramideRunConfig",
     "PyramideRunResult",
     "PyramideForecastEngine",
     "PyramideRunner",
     "PyramideValue",
+    "RoutingDecision",
+    "RoutingError",
+    "RoutingThresholds",
+    "SeriesFeatures",
+    "route",
+    "seasonal_strength",
     "SUPPORTED_GRANULARITIES",
     "SUPPORTED_METHODS",
 ]

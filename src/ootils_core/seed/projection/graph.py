@@ -34,8 +34,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
 from ootils_core.seed.transactional.nodes import BASELINE_SCENARIO_ID
@@ -67,7 +66,7 @@ class SeededGraph:
 
 
 def seed_projection_graph(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     item_set: ItemSet,
     loc_set: LocationSet,
     horizon_days: int = 90,
@@ -202,9 +201,10 @@ def seed_projection_graph(
     rep_oh_to: list[UUID] = []
     for r in oh_rows:
         pair = (UUID(str(r["item_id"])), UUID(str(r["location_id"])))
-        sid = series_id_by_pair.get(pair)
-        if sid is None:
+        sid_opt: UUID | None = series_id_by_pair.get(pair)
+        if sid_opt is None:
             continue
+        sid = sid_opt
         pi0 = pi_by_series_seq.get((sid, 0))
         if pi0 is None:
             continue
@@ -242,9 +242,10 @@ def seed_projection_graph(
     rep_t_to: list[UUID] = []
     for r in t_rows:
         pair = (UUID(str(r["item_id"])), UUID(str(r["location_id"])))
-        sid = series_id_by_pair.get(pair)
-        if sid is None:
+        sid_opt = series_id_by_pair.get(pair)
+        if sid_opt is None:
             continue
+        sid = sid_opt
         eta: date = r["time_ref"]
         seq = (eta - horizon_start).days
         pi = pi_by_series_seq.get((sid, seq))
@@ -282,9 +283,10 @@ def seed_projection_graph(
     co_to: list[UUID] = []
     for r in co_rows:
         pair = (UUID(str(r["item_id"])), UUID(str(r["location_id"])))
-        sid = series_id_by_pair.get(pair)
-        if sid is None:
+        sid_opt = series_id_by_pair.get(pair)
+        if sid_opt is None:
             continue
+        sid = sid_opt
         seq = (r["time_ref"] - horizon_start).days
         pi = pi_by_series_seq.get((sid, seq))
         if pi is None:
@@ -322,9 +324,10 @@ def seed_projection_graph(
     fc_to: list[UUID] = []
     for r in fc_rows:
         pair = (UUID(str(r["item_id"])), UUID(str(r["location_id"])))
-        sid = series_id_by_pair.get(pair)
-        if sid is None:
+        sid_opt = series_id_by_pair.get(pair)
+        if sid_opt is None:
             continue
+        sid = sid_opt
         # Iterate days the forecast overlaps the horizon
         ovl_start = max(horizon_start, r["time_span_start"])
         ovl_end = min(horizon_end, r["time_span_end"])

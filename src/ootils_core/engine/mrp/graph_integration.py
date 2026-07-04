@@ -19,8 +19,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.gross_to_net import BucketRecord
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ class GraphIntegration:
       picks up downstream effects.
     """
 
-    def __init__(self, db: psycopg.Connection, scenario_id: UUID):
+    def __init__(self, db: DictRowConnection, scenario_id: UUID):
         self.db = db
         self.scenario_id = scenario_id
 
@@ -351,36 +350,60 @@ class GraphIntegration:
 
     def cleanup_previous_run(self, run_id: Optional[UUID] = None):
         """
-        Clean up nodes/edges from a previous MRP run.
+        Deactivate nodes/edges from a previous MRP run (soft delete).
 
         Two modes:
-        - run_id provided: delete only artefacts belonging to that run
-        - run_id is None: delete all PlannedSupply nodes for this scenario
+        - run_id provided: deactivate only artefacts belonging to that run
+        - run_id is None: deactivate ALL active PlannedSupply nodes for this
+          scenario (full-regeneration contract — see below)
+
+        Soft delete (``active = FALSE``) rather than hard DELETE, for two
+        reasons:
+        - FK integrity: ``events.trigger_node_id``, ``explanations`` and
+          ``node_versions`` reference ``nodes(node_id)`` with no ON DELETE
+          clause; every receipt node gets an ``ingestion_complete`` event on
+          persist, so a hard DELETE of a previous run's nodes would raise an
+          FK violation on any re-run.
+        - Auditability: prior-run planned orders stay queryable (with their
+          ``mrp_run_id``) for explanation/audit trails, matching the simple
+          MRP mode's ``clear_existing`` behaviour (api/routers/mrp.py).
+
+        Regeneration contract (run_id=None): an APICS run regenerates the
+        complete planned-supply picture for the scenario, so the purge scope
+        is node_type='PlannedSupply' + scenario_id — deliberately wider than
+        the run's item/location filter. Firm Planned Orders (FPO) do not
+        exist yet (chantier C2.2); once they do, firmed supply must be
+        excluded from this purge.
         """
         if run_id:
-            # Delete edges referencing nodes from this run
+            # Deactivate edges referencing nodes from this run
             self.db.execute(
                 """
-                DELETE FROM edges
-                WHERE from_node_id IN (
+                UPDATE edges SET active = FALSE
+                WHERE active = TRUE
+                  AND (from_node_id IN (
                     SELECT node_id FROM nodes WHERE mrp_run_id = %s
                 ) OR to_node_id IN (
                     SELECT node_id FROM nodes WHERE mrp_run_id = %s
-                )
+                ))
                 """,
                 (run_id, run_id),
             )
-            # Delete nodes from this run
+            # Deactivate nodes from this run
             self.db.execute(
-                "DELETE FROM nodes WHERE mrp_run_id = %s",
+                """
+                UPDATE nodes SET active = FALSE, updated_at = NOW()
+                WHERE mrp_run_id = %s AND active = TRUE
+                """,
                 (run_id,),
             )
         else:
-            # Delete all PlannedSupply nodes for scenario
+            # Deactivate all PlannedSupply nodes for scenario
             self.db.execute(
                 """
-                DELETE FROM edges
-                WHERE from_node_id IN (
+                UPDATE edges SET active = FALSE
+                WHERE active = TRUE
+                  AND (from_node_id IN (
                     SELECT node_id FROM nodes
                     WHERE node_type = 'PlannedSupply'
                     AND scenario_id = %s
@@ -388,18 +411,25 @@ class GraphIntegration:
                     SELECT node_id FROM nodes
                     WHERE node_type = 'PlannedSupply'
                     AND scenario_id = %s
-                )
+                ))
                 """,
                 (self.scenario_id, self.scenario_id),
             )
             self.db.execute(
                 """
-                DELETE FROM nodes
+                UPDATE nodes SET active = FALSE, updated_at = NOW()
                 WHERE node_type = 'PlannedSupply'
                 AND scenario_id = %s
+                AND active = TRUE
                 """,
                 (self.scenario_id,),
             )
+        logger.info(
+            "cleanup_previous_run: deactivated previous %s "
+            "(scenario %s, run_id=%s)",
+            "run artefacts (all node types)" if run_id else "PlannedSupply nodes",
+            self.scenario_id, run_id,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

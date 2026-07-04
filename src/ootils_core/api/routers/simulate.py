@@ -4,15 +4,15 @@ POST /v1/simulate — Create a scenario with overrides and return delta.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.manager import ScenarioManager, _ALLOWED_FIELDS
 
 logger = logging.getLogger(__name__)
@@ -65,16 +65,33 @@ class SimulateResponse(BaseModel):
     base_scenario_id: UUID
     calc_run_id: Optional[UUID] = None
     nodes_recalculated: int = 0
+    # Outcome of the post-fork recompute (#339):
+    #   'ok'      — propagation ran and the delta below is meaningful
+    #   'failed'  — propagation raised; the delta is NOT meaningful
+    #   'skipped' — propagation never ran (no applied override, or a
+    #               concurrent calc run prevented starting one)
+    propagation_status: Literal["ok", "failed", "skipped"] = "skipped"
+    # Freshness flag for `delta`: True only when propagation succeeded and
+    # the shortage delta was actually computed. Agents must treat an empty
+    # delta with delta_computed=False as "unknown", not "no change".
+    delta_computed: bool = False
     delta: SimulateDelta = SimulateDelta()
 
 
 @router.post("", response_model=SimulateResponse, status_code=status.HTTP_201_CREATED)
 def create_simulation(
     body: SimulateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> SimulateResponse:
-    """Create a new scenario with overrides and compute the delta vs base."""
+    """Create a new scenario with overrides and compute the delta vs base.
+
+    Contract (#339): the fork itself is transactional — if it fails we return
+    500. The post-fork recompute is best-effort: when it fails the response
+    is still 201/'created' (the scenario exists and is usable), but
+    ``propagation_status`` and ``delta_computed`` make the "created but not
+    calculated" state explicit instead of masquerading as an empty delta.
+    """
     # Resolve base scenario
     if body.base_scenario_id and body.base_scenario_id.lower() != "baseline":
         try:
@@ -95,8 +112,8 @@ def create_simulation(
         logger.exception("simulate.create_scenario_failed name=%s", body.scenario_name)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create scenario: {exc}",
-        )
+            detail="Failed to create scenario.",
+        ) from exc
 
     # Apply overrides
     applied = 0
@@ -149,6 +166,11 @@ def create_simulation(
     calc_run_id = None
     nodes_recalculated = 0
     delta = SimulateDelta()
+    propagation_status: Literal["ok", "failed", "skipped"] = "skipped"
+    delta_computed = False
+    calc_run = None
+    calc_run_mgr = None
+    calc_run_finished = False
 
     if applied > 0:
         try:
@@ -202,6 +224,7 @@ def create_simulation(
                     engine._propagate(calc_run, all_pi_ids, db)
 
                 engine._finish_run(calc_run, scenario.scenario_id, db)
+                calc_run_finished = True
                 calc_run_id = calc_run.calc_run_id
                 nodes_recalculated = calc_run.nodes_recalculated or 0
 
@@ -238,10 +261,40 @@ def create_simulation(
                     ],
                     net_shortage_change=len(new_ids) - len(resolved_ids),
                 )
+                propagation_status = "ok"
+                delta_computed = True
 
-        except Exception as exc:
-            logger.warning("simulate.propagation_failed scenario=%s: %s", scenario.scenario_id, exc)
-            # Don't fail the simulate call — scenario is created, propagation is best-effort
+        except Exception:
+            # Deliberately NOT an HTTP 500 (#339): the scenario fork succeeded,
+            # only the best-effort recompute failed. The failure is surfaced
+            # explicitly via propagation_status='failed' + delta_computed=False
+            # so agents can distinguish "no new shortages" from "the calc
+            # crashed". Full traceback goes to the server log only — never to
+            # the client.
+            logger.exception(
+                "simulate.propagation_failed scenario=%s", scenario.scenario_id
+            )
+            propagation_status = "failed"
+            delta_computed = False
+            delta = SimulateDelta()  # a partially built delta is not meaningful
+
+            # If the calc run was started but never finished, the scenario's
+            # advisory lock is still held by this pooled connection — release
+            # it (and persist the failure record) or every subsequent
+            # /v1/simulate on this scenario would silently return 'skipped'.
+            # calc_run_mgr is always set immediately before calc_run above, so
+            # the two are non-None together; the explicit calc_run_mgr guard
+            # narrows the type for the fail_calc_run call (no behaviour change).
+            if calc_run is not None and calc_run_mgr is not None and not calc_run_finished:
+                try:
+                    calc_run_mgr.fail_calc_run(
+                        calc_run, "simulate propagation failed", db
+                    )
+                except Exception:
+                    logger.exception(
+                        "simulate.fail_calc_run_failed scenario=%s run=%s",
+                        scenario.scenario_id, calc_run.calc_run_id,
+                    )
 
     return SimulateResponse(
         scenario_id=scenario.scenario_id,
@@ -252,5 +305,7 @@ def create_simulation(
         base_scenario_id=base_id,
         calc_run_id=calc_run_id,
         nodes_recalculated=nodes_recalculated,
+        propagation_status=propagation_status,
+        delta_computed=delta_computed,
         delta=delta,
     )

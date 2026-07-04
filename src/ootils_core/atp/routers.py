@@ -12,13 +12,13 @@ import logging
 from datetime import date
 from decimal import Decimal
 from typing import List, Optional
+from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.atp.api import (
     ATPCheckRequest,
     ATPCheckResponse,
@@ -28,6 +28,7 @@ from ootils_core.atp.api import (
 )
 from ootils_core.atp.ctp import CTPEngine
 from ootils_core.atp.engine import ATPEngine
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -112,18 +113,20 @@ class CTPSimulateResponse(BaseModel):
 )
 async def check_atp(
     body: ATPCheckRequest,
-    db: psycopg.Connection = Depends(get_db),
+    scenario_id: UUID = Depends(resolve_scenario_id),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ATPCheckResponse:
     """
     Check ATP availability for an item at a location.
-    
+
     - **item_id**: Item external ID or UUID
     - **location_id**: Location external ID or UUID
     - **quantity**: Quantity requested
     - **requested_date**: Date when quantity is needed
     - **horizon_days**: Days to look ahead for availability (default: 365)
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **available**: Whether full quantity is available on requested date
     - **available_date**: Earliest date when full quantity is available
@@ -157,14 +160,15 @@ async def check_atp(
             quantity=body.quantity,
             request_date=body.requested_date,
             horizon_days=body.horizon_days,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("ATP calculation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ATP calculation failed: {str(e)}",
-        )
-    
+            detail="ATP calculation failed.",
+        ) from e
+
     # Import here to avoid circular dependency
     from ootils_core.atp.api import _convert_bucket_to_detail, _extract_shortage_details
     
@@ -199,19 +203,21 @@ async def check_atp(
 )
 async def check_ctp(
     body: CTPCheckRequest,
-    db: psycopg.Connection = Depends(get_db),
+    scenario_id: UUID = Depends(resolve_scenario_id),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CTPCheckResponse:
     """
     Check CTP availability for an item at a location.
-    
+
     - **item_id**: Item external ID or UUID
     - **location_id**: Location external ID or UUID
     - **quantity**: Quantity requested
     - **requested_date**: Date when quantity is needed
     - **horizon_days**: Days to look ahead (default: 365)
     - **include_capacity**: Whether to check capacity constraints (default: True)
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **available**: Whether full quantity is available on requested date
     - **available_date**: Earliest date when full quantity is available
@@ -245,13 +251,14 @@ async def check_ctp(
             requested_date=body.requested_date,
             horizon_days=body.horizon_days,
             include_capacity=body.include_capacity,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("CTP check failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CTP check failed: {str(e)}",
-        )
+            detail="CTP check failed.",
+        ) from e
     
     # Build response
     from ootils_core.atp.api import _convert_bucket_to_detail
@@ -260,11 +267,11 @@ async def check_ctp(
     
     violations_out = [
         CapacityViolationOut(
-            resource_id=v.resource_id,
+            resource_id=str(v.resource_id),
             resource_name=v.resource_name,
             violation_date=v.violation_date,
-            required_capacity=v.required_capacity,
-            available_capacity=v.available_capacity,
+            required_capacity=float(v.required_capacity),
+            available_capacity=float(v.available_capacity),
             overload_pct=v.overload_pct,
         )
         for v in result.violations
@@ -300,7 +307,8 @@ async def check_ctp(
 )
 async def simulate_ctp(
     body: CTPSimulateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    scenario_id: UUID = Depends(resolve_scenario_id),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CTPSimulateResponse:
     """
@@ -315,7 +323,8 @@ async def simulate_ctp(
     - **quantity**: Quantity requested
     - **start_date**: Start date for search (default: today)
     - **max_days**: Maximum days to search (default: 30)
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **first_feasible_date**: First date when order is fully feasible (or None)
     - **options**: List of tested dates with feasibility status
@@ -345,13 +354,14 @@ async def simulate_ctp(
             quantity=body.quantity,
             start_date=body.start_date,
             max_days=body.max_days,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("CTP simulation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"CTP simulation failed: {str(e)}",
-        )
+            detail="CTP simulation failed.",
+        ) from e
     
     # Find first feasible date
     first_feasible = None

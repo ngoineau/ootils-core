@@ -2,7 +2,7 @@
 DQ Engine — Data Quality pipeline, L1 (structural) + L2 (referential).
 
 Interface:
-    run_dq(db: psycopg.Connection, batch_id: UUID) -> DQResult
+    run_dq(db: DictRowConnection, batch_id: UUID) -> DQResult
 
 L1 rules — structural checks on raw_content (JSON):
     - L1_MISSING_FIELD : mandatory field absent or None
@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +307,7 @@ _BATCH_CHUNK_SIZE = 10_000  # safe below PostgreSQL's ANY() array limit (~32 767
 
 
 def _chunked_resolve(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     table: str,
     external_ids: list[str],
 ) -> set[str]:
@@ -330,23 +330,23 @@ def _chunked_resolve(
     return found
 
 
-def _batch_resolve_items(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
+def _batch_resolve_items(db: DictRowConnection, external_ids: list[str]) -> set[str]:
     """Return set of external_ids that exist in items table."""
     return _chunked_resolve(db, "items", external_ids)
 
 
-def _batch_resolve_locations(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
+def _batch_resolve_locations(db: DictRowConnection, external_ids: list[str]) -> set[str]:
     return _chunked_resolve(db, "locations", external_ids)
 
 
-def _batch_resolve_suppliers(db: psycopg.Connection, external_ids: list[str]) -> set[str]:
+def _batch_resolve_suppliers(db: DictRowConnection, external_ids: list[str]) -> set[str]:
     return _chunked_resolve(db, "suppliers", external_ids)
 
 
 def _check_l2(
     rows_data: list[tuple[UUID, int, dict[str, Any]]],
     entity_type: str,
-    db: psycopg.Connection,
+    db: DictRowConnection,
 ) -> list[DQIssue]:
     """
     Batch L2 checks for all rows of a given entity_type.
@@ -355,9 +355,9 @@ def _check_l2(
     issues: list[DQIssue] = []
 
     if entity_type == "purchase_orders":
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        loc_ids = [r[2].get("location_external_id") for r in rows_data if r[2].get("location_external_id")]
-        sup_ids = [r[2].get("supplier_external_id") for r in rows_data if r[2].get("supplier_external_id")]
+        item_ids: list[str] = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        loc_ids: list[str] = [str(r[2]["location_external_id"]) for r in rows_data if r[2].get("location_external_id")]
+        sup_ids: list[str] = [str(r[2]["supplier_external_id"]) for r in rows_data if r[2].get("supplier_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_locs = _batch_resolve_locations(db, list(set(loc_ids)))
@@ -383,8 +383,8 @@ def _check_l2(
                     ))
 
     elif entity_type in ("forecast_demand", "forecasts", "on_hand"):
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        loc_ids = [r[2].get("location_external_id") for r in rows_data if r[2].get("location_external_id")]
+        item_ids = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        loc_ids = [str(r[2]["location_external_id"]) for r in rows_data if r[2].get("location_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_locs = _batch_resolve_locations(db, list(set(loc_ids)))
@@ -408,8 +408,8 @@ def _check_l2(
                     ))
 
     elif entity_type == "supplier_items":
-        item_ids = [r[2].get("item_external_id") for r in rows_data if r[2].get("item_external_id")]
-        sup_ids = [r[2].get("supplier_external_id") for r in rows_data if r[2].get("supplier_external_id")]
+        item_ids = [str(r[2]["item_external_id"]) for r in rows_data if r[2].get("item_external_id")]
+        sup_ids = [str(r[2]["supplier_external_id"]) for r in rows_data if r[2].get("supplier_external_id")]
 
         valid_items = _batch_resolve_items(db, list(set(item_ids)))
         valid_sups = _batch_resolve_suppliers(db, list(set(sup_ids)))
@@ -441,7 +441,7 @@ def _check_l2(
 # Persist issues + update row/batch statuses
 # ──────────────────────────────────────────────────────────────
 
-def _persist_issues(db: psycopg.Connection, batch_id: UUID, issues: list[DQIssue]) -> None:
+def _persist_issues(db: DictRowConnection, batch_id: UUID, issues: list[DQIssue]) -> None:
     if not issues:
         return
     with db.cursor() as cur:
@@ -469,7 +469,7 @@ def _persist_issues(db: psycopg.Connection, batch_id: UUID, issues: list[DQIssue
 
 
 def _update_row_statuses(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     row_issues: dict[UUID, list[DQIssue]],
     all_row_ids: list[UUID],
     max_level_reached: dict[UUID, int],
@@ -500,7 +500,7 @@ def _update_row_statuses(
 
 
 def _update_batch_status(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     all_issues: list[DQIssue],
     total_rows: int,
@@ -531,7 +531,7 @@ def _update_batch_status(
 # Main entry point
 # ──────────────────────────────────────────────────────────────
 
-def run_dq(db: psycopg.Connection, batch_id: UUID) -> DQResult:
+def run_dq(db: DictRowConnection, batch_id: UUID) -> DQResult:
     """
     Execute L1 + L2 DQ checks for all rows in a batch.
 

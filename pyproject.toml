@@ -25,7 +25,7 @@ classifiers = [
 # the next major. Dependabot opens PRs weekly to bump within these ranges.
 # See docs/REVIEW-2026-05.md R4.
 dependencies = [
-    "fastapi ~= 0.128",
+    "fastapi ~= 0.128.0",  # NOT ~= 0.128: that means <1.0 and let CI resolve 0.139 + starlette 1.x (breaking)
     "uvicorn[standard] ~= 0.40",
     "psycopg[binary] ~= 3.3",
     "psycopg-pool ~= 3.3",
@@ -49,6 +49,24 @@ forecast = [
     "mlforecast ~= 1.0",
     "lightgbm ~= 4.0",
     "pandas ~= 2.3",
+    # Optional MinT-shrink reconciliation backend (Pyramide axis A, PR3).
+    # Lazy-imported by pyramide/hierarchy/reconcile.py with a fallback to
+    # the deterministic middle-out path when absent (ADR-022).
+    "hierarchicalforecast ~= 1.0",
+]
+foundation = [
+    # Chronos-2 foundation-model backend (Pyramide axis B, PR-B2) — kept a
+    # SEPARATE extra because it is HEAVY: torch alone is hundreds of MB and
+    # the model weights (~ hundreds of MB more) are pulled from HuggingFace
+    # on first load (pre-download them for offline VMs — see the
+    # pyramide/foundation.py docstring: HF_HOME / HF_HUB_OFFLINE).
+    # Lazy-imported by pyramide/foundation.py; when absent, FM_CHRONOS
+    # falls back to the deterministic AUTO_SELECT path (or fails loudly
+    # under strict_backend). CPU inference is enough for the demo scale;
+    # install the CPU-only torch wheel (--index-url
+    # https://download.pytorch.org/whl/cpu) to avoid the CUDA payload.
+    "chronos-forecasting ~= 2.0",  # Chronos-2 support (Apache-2.0)
+    "torch ~= 2.6",
 ]
 
 [tool.setuptools.packages.find]
@@ -71,6 +89,7 @@ markers = [
     "critical: marks tests as critical path",
     "requires_db: marks tests that require a live DB connection",
     "live_db: tests that need a real Postgres + ootils-engine binary (engine_service battery)",
+    "foundation: tests that REQUIRE the [foundation] extra + downloaded Chronos weights (dedicated CI job only; auto-skip when chronos is not importable)",
 ]
 
 [tool.coverage.run]

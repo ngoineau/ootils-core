@@ -19,8 +19,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import Node
@@ -93,7 +92,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> dict[str, bool]:
         """
         Execute the applicable zone transition(s) for a series on as_of_date.
@@ -186,7 +185,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> bool:
         """
@@ -226,8 +225,10 @@ class ZoneTransitionEngine:
                 self._complete_transition_run(run_id, 0, 0, db)
                 return True
 
-            # Find the first weekly bucket — the one entering the daily zone
-            target_bucket = min(weekly_nodes, key=lambda n: n.time_span_start)
+            # Find the first weekly bucket — the one entering the daily zone.
+            # weekly_nodes is filtered on time_span_start is not None above, so the
+            # `or date.min` fallback is unreachable — it only satisfies the type checker.
+            target_bucket = min(weekly_nodes, key=lambda n: n.time_span_start or date.min)
 
             logger.debug(
                 "_run_weekly_to_daily: splitting week %s–%s into daily buckets for series=%s",
@@ -258,7 +259,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> bool:
         """
@@ -296,8 +297,10 @@ class ZoneTransitionEngine:
                 self._complete_transition_run(run_id, 0, 0, db)
                 return True
 
-            # First monthly bucket — the one entering the weekly zone
-            target_bucket = min(monthly_nodes, key=lambda n: n.time_span_start)
+            # First monthly bucket — the one entering the weekly zone.
+            # monthly_nodes is filtered on time_span_start is not None above, so the
+            # `or date.min` fallback is unreachable — it only satisfies the type checker.
+            target_bucket = min(monthly_nodes, key=lambda n: n.time_span_start or date.min)
 
             logger.debug(
                 "_run_monthly_to_weekly: splitting month %s–%s into weekly buckets for series=%s",
@@ -332,7 +335,7 @@ class ZoneTransitionEngine:
         source_node: Node,
         scenario_id: UUID,
         series_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> list[Node]:
         """
@@ -348,13 +351,19 @@ class ZoneTransitionEngine:
         """
         span_start = source_node.time_span_start
         span_end = source_node.time_span_end
+        if span_start is None or span_end is None:
+            raise ValueError(
+                f"Cannot split weekly node {source_node.node_id}: "
+                f"time_span_start={span_start!r}, time_span_end={span_end!r} "
+                "(both required to enumerate daily buckets)"
+            )
 
         new_nodes: list[Node] = []
         base_sequence = source_node.bucket_sequence or 0
 
         # Enumerate 7 days in the week span
         day_spans: list[tuple[date, date]] = []
-        current = span_start
+        current: date = span_start
         while current < span_end:
             day_end = current + timedelta(days=1)
             if day_end > span_end:
@@ -410,7 +419,7 @@ class ZoneTransitionEngine:
         source_node: Node,
         scenario_id: UUID,
         series_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> list[Node]:
         """
@@ -424,11 +433,17 @@ class ZoneTransitionEngine:
         """
         span_start = source_node.time_span_start
         span_end = source_node.time_span_end
+        if span_start is None or span_end is None:
+            raise ValueError(
+                f"Cannot split monthly node {source_node.node_id}: "
+                f"time_span_start={span_start!r}, time_span_end={span_end!r} "
+                "(both required to enumerate weekly buckets)"
+            )
         base_sequence = source_node.bucket_sequence or 0
 
         # Enumerate ISO-week buckets within [span_start, span_end)
         week_spans: list[tuple[date, date]] = []
-        current = span_start
+        current: date = span_start
         while current < span_end:
             # Align to Monday of current week if we're not already on one
             week_start = current - timedelta(days=current.weekday())
@@ -491,7 +506,7 @@ class ZoneTransitionEngine:
     def _is_transition_done(
         self,
         idempotency_key: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> bool:
         """Return True if a completed transition run exists for this idempotency_key."""
         row = db.execute(
@@ -510,7 +525,7 @@ class ZoneTransitionEngine:
         job_type: str,
         transition_date: date,
         idempotency_key: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> UUID:
         """
         Insert a zone_transition_runs record in 'running' status.
@@ -543,7 +558,7 @@ class ZoneTransitionEngine:
         run_id: UUID,
         series_total: int,
         series_done: int,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Mark a zone_transition_runs record as completed."""
         db.execute(
@@ -561,7 +576,7 @@ class ZoneTransitionEngine:
     def _fail_transition_run(
         self,
         run_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Mark a zone_transition_runs record as failed."""
         db.execute(
@@ -578,7 +593,7 @@ class ZoneTransitionEngine:
     # Advisory lock helpers
     # ------------------------------------------------------------------
 
-    def _try_acquire_lock(self, db: psycopg.Connection) -> bool:
+    def _try_acquire_lock(self, db: DictRowConnection) -> bool:
         """
         Try to acquire the zone_transition global advisory lock.
         Returns True if acquired, False if already held.
@@ -589,7 +604,7 @@ class ZoneTransitionEngine:
         ).fetchone()
         return bool(row["locked"]) if row else False
 
-    def _release_lock(self, db: psycopg.Connection) -> None:
+    def _release_lock(self, db: DictRowConnection) -> None:
         """Release the zone_transition global advisory lock."""
         db.execute(
             "SELECT pg_advisory_unlock(hashtext(%s))",
@@ -606,7 +621,7 @@ def _rewire_edges(
     source_node: "Node",
     new_nodes: list["Node"],
     scenario_id: UUID,
-    db: psycopg.Connection,
+    db: DictRowConnection,
     store: "GraphStore",
 ) -> None:
     """

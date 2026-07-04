@@ -18,12 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-import psycopg
-
 from .stat_rules import AgentIssue, run_stat_rules
 from .temporal_rules import run_temporal_rules
 from .impact_scorer import score_issues
 from .llm_reporter import generate_llm_report, LLMReport
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ class AgentResult:
 
 
 def _load_existing_issues(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
 ) -> list[AgentIssue]:
     """Load L1+L2 issues already in data_quality_issues for this batch."""
@@ -75,7 +74,7 @@ def _load_existing_issues(
     return issues
 
 
-def _get_entity_type(db: psycopg.Connection, batch_id: UUID) -> str:
+def _get_entity_type(db: DictRowConnection, batch_id: UUID) -> tuple[str, int]:
     row = db.execute(
         "SELECT entity_type, total_rows FROM ingest_batches WHERE batch_id = %s",
         (batch_id,),
@@ -84,7 +83,7 @@ def _get_entity_type(db: psycopg.Connection, batch_id: UUID) -> str:
 
 
 def _persist_agent_run(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     run_id: UUID,
     batch_id: UUID,
     status: str,
@@ -122,7 +121,7 @@ def _persist_agent_run(
 
 
 def _persist_new_issues(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     run_id: UUID,
     issues: list[AgentIssue],
@@ -158,7 +157,7 @@ def _persist_new_issues(
 
 
 def _enrich_existing_issues(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     run_id: UUID,
     issues: list[AgentIssue],
 ) -> None:
@@ -184,7 +183,7 @@ def _enrich_existing_issues(
 
 
 def run_dq_agent(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
 ) -> AgentResult:
     """

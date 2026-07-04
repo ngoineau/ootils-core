@@ -12,12 +12,12 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.store import GraphStore
 
 logger = logging.getLogger(__name__)
@@ -137,11 +137,11 @@ def _aggregate_buckets(buckets: list[ProjectionBucket], grain: str) -> list[Proj
             time_span_end=last.time_span_end,
             time_grain=grain,
             opening_stock=first.opening_stock,
-            inflows=sum((b.inflows or Decimal(0)) for b in group),
-            outflows=sum((b.outflows or Decimal(0)) for b in group),
+            inflows=sum(((b.inflows or Decimal(0)) for b in group), Decimal(0)),
+            outflows=sum(((b.outflows or Decimal(0)) for b in group), Decimal(0)),
             closing_stock=last.closing_stock,
             has_shortage=any(b.has_shortage for b in group),
-            shortage_qty=sum((b.shortage_qty or Decimal(0)) for b in group),
+            shortage_qty=sum(((b.shortage_qty or Decimal(0)) for b in group), Decimal(0)),
             supply_details=[d for b in group for d in b.supply_details],
             demand_details=[d for b in group for d in b.demand_details],
         ))
@@ -149,7 +149,7 @@ def _aggregate_buckets(buckets: list[ProjectionBucket], grain: str) -> list[Proj
 
 
 def _fetch_supply_demand_details(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     node_ids: list[UUID],
     scenario_id: UUID,
 ) -> tuple[dict[UUID, list[SupplyDetail]], dict[UUID, list[DemandDetail]]]:
@@ -225,7 +225,7 @@ def get_projection(
     item_id: str = Query(..., description="Item identifier (UUID or external_id)"),
     location_id: str = Query(..., description="Location identifier (UUID or external_id)"),
     grain: Optional[str] = Query(default=None, description="day / week / month — aggregates daily buckets"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> ProjectionResponse:
@@ -345,7 +345,7 @@ def get_projection(
 
 @router.get("/portfolio", response_model=PortfolioResponse)
 def get_portfolio(
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> PortfolioResponse:
@@ -403,7 +403,7 @@ def get_portfolio(
 def get_pegging(
     node_id: str,
     depth: int = Query(default=3, ge=1, le=5, description="Max traversal depth"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> PeggingResponse:

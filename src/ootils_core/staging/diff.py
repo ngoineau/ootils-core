@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from uuid import UUID
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ _SPECS: dict[str, _EntitySpec] = {
 # ---------------------------------------------------------------------------
 
 
-def compute_diff(conn: psycopg.Connection, batch_id: UUID) -> DiffResult:
+def compute_diff(conn: DictRowConnection, batch_id: UUID) -> DiffResult:
     """Compute insert/update/soft-delete impact of approving this batch.
 
     Raises:
@@ -183,7 +183,7 @@ def compute_diff(conn: psycopg.Connection, batch_id: UUID) -> DiffResult:
 
 
 def _load_batch_records(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     batch_id: UUID,
     spec: _EntitySpec,
 ) -> dict[str, dict]:
@@ -215,7 +215,7 @@ def _load_batch_records(
 
 
 def _load_canonical_records(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     source_system: str,
     spec: _EntitySpec,
 ) -> dict[str, dict]:

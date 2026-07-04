@@ -5,16 +5,22 @@ on:
     branches: ["main", "fix/**", "feat/**"]
   pull_request:
     branches: ["main"]
+    # 'labeled' added so applying the 'foundation' label to an open PR
+    # actually triggers a run of the test-foundation job (default types
+    # would ignore the label event). Side effect: labeling re-runs the
+    # cheap jobs too — acceptable, they are minutes not gigabytes.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 jobs:
   lint:
     name: Ruff lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -25,17 +31,17 @@ jobs:
         run: ruff check src/
 
   typecheck:
-    name: mypy (non-blocking)
+    name: mypy
     runs-on: ubuntu-latest
-    # Reports type issues without blocking merges. The codebase has untyped
-    # boundaries (psycopg row dicts, dynamic SQL helpers); strict mode is a
-    # future goal. See [tool.mypy] in pyproject.toml.
-    continue-on-error: true
+    # Blocking: src/ootils_core type-checks clean under [tool.mypy] (see
+    # pyproject.toml). The permissive-but-green baseline was reached by the
+    # mypy campaign (PRs #378/#379); this gate keeps it from regressing.
+    # Strict mode remains a future, rule-at-a-time goal.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -74,10 +80,10 @@ jobs:
       OOTILS_ENABLE_STARTUP_RECOVERY: "0"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -116,10 +122,10 @@ jobs:
       OOTILS_ENABLE_STARTUP_RECOVERY: "0"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -134,3 +140,93 @@ jobs:
         # REVIEW-2026-05 closed that gap by fixing the failures and
         # widening the scope.
         run: python -m pytest tests/integration/ -q --tb=short
+
+      - name: MRP A-vs-B parity guard (#332)
+        # ADR-020 step 1 — cross-engine drift guard on the same ephemeral
+        # Postgres as the suite above. The integration conftest DROPs every
+        # public table at module teardown, so this step re-applies migrations
+        # (OotilsDB() constructor), seeds the deterministic demo dataset, then
+        # runs the parity harness in --check mode. Thresholds documented in
+        # scripts/parity_mrp_engines.py::check_thresholds — anti-regression
+        # band, NOT a convergence target; tighten after ADR-020 steps 3-4.
+        #
+        # --max-median-drift 0.30: the 5% default was calibrated on the pilot
+        # DB (36K items, 4.1% residual). The demo seed has exactly 2 planned
+        # items, so "median" = midpoint of two drifts; first CI measurement:
+        # 22.5%, and it moves with the run's weekday within [20.8%, 23.4%]
+        # (engine B snaps buckets to Monday + applies the frozen fence per
+        # bucket; engine A anchors day-offset buckets on CURRENT_DATE). This
+        # drift is the DOCUMENTED ADR-020 residual class (pooled vs
+        # per-location planning unit, L4L-without-multiple, component
+        # independent demand dropped by B — see ADR-020 §Validation) owned by
+        # ADR-020 steps 3-4, not a regression. 0.30 keeps ~30% headroom over
+        # the weekday-worst 23.4% while still failing loudly on any return of
+        # serial over-ordering (median was 96% pre-netting-fix).
+        run: |
+          python -c "from ootils_core.db.connection import OotilsDB; OotilsDB()"
+          python scripts/seed_demo_data.py
+          python scripts/parity_mrp_engines.py --horizon-days 360 --check --max-median-drift 0.30
+
+  test-foundation:
+    name: pytest foundation (Chronos-2 real weights)
+    runs-on: ubuntu-latest
+    # OPT-IN job (ADR-024): torch CPU + Chronos-2 weights are ~1 GB+ of
+    # downloads — far too heavy to run on every push. Trigger choice:
+    # PR label 'foundation' OR manual workflow_dispatch, NOT a paths
+    # filter. Rationale: a workflow-level paths filter would gate ALL
+    # jobs (lint/test must keep running on every change), and a
+    # per-job changed-files detection step costs a checkout + diff on
+    # every single CI run just to usually skip — whereas the label/
+    # dispatch condition below is evaluated for free from the event
+    # payload, downloads nothing when not requested, and matches how
+    # the wrapper is designed (foundation.py changes are covered by
+    # the fake-pipeline unit tests in the normal 'test' job; only the
+    # real-weights path needs this job, on human demand).
+    # When it DOES run it must pass: continue-on-error stays false.
+    continue-on-error: false
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'foundation'))
+    env:
+      # No DATABASE_URL: the foundation marker lives in a pure unit file
+      # (tests/test_pyramide_foundation.py) and the session fixture in
+      # tests/conftest.py only touches Postgres when DATABASE_URL is set.
+      OOTILS_API_TOKEN: test-token-ci
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Cache HuggingFace model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          # Key = the model id: the weights only change when the default
+          # model changes (revision drift within the repo is tolerated —
+          # the run seals the actually-loaded revision in
+          # pyramide_runs.model_revision, so provenance stays honest).
+          key: hf-${{ runner.os }}-amazon-chronos-2
+
+      - name: Install dependencies (foundation extra, CPU-only torch)
+        run: |
+          pip install --upgrade pip
+          # CPU wheel first so the 'torch ~= 2.6' requirement of the
+          # [foundation] extra is already satisfied — avoids pulling the
+          # multi-GB CUDA build from PyPI.
+          pip install "torch~=2.6" --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,foundation]"
+
+      - name: Pre-download Chronos-2 weights
+        # Populates ~/.cache/huggingface (no-op on cache hit: only
+        # missing files are fetched) so the pytest step never mixes
+        # network flakiness with test failures.
+        run: |
+          python -c "from huggingface_hub import snapshot_download; snapshot_download('amazon/chronos-2')"
+
+      - name: Run foundation tests (real weights)
+        run: python -m pytest tests/ -m foundation -q --tb=short --ignore=tests/integration --ignore=tests/smoke

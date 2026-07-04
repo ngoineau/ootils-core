@@ -11,10 +11,10 @@ import logging
 from typing import Generator
 from uuid import UUID
 
-import psycopg
 from fastapi import Header, HTTPException, Query, status
 
 from ootils_core.db.connection import OotilsDB
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def _get_ootils_db() -> OotilsDB:
     return _db
 
 
-def get_db() -> Generator[psycopg.Connection, None, None]:
+def get_db() -> Generator[DictRowConnection, None, None]:
     """
     FastAPI dependency: yield a psycopg3 Connection with dict_row.
     Commits on success, rolls back on any exception.

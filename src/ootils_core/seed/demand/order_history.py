@@ -26,8 +26,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
@@ -145,7 +144,7 @@ def generate_order_history(
 
 
 def insert_order_history(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     nodes: list[HistoricOrderNode],
     batch_size: int = 50_000,
 ) -> int:

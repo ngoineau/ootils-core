@@ -10,6 +10,10 @@ It detects and surfaces; humans / interface owners remediate (the data lives in
 the source ERP and the TSV contracts). Same work ledger (agent_runs), idempotent
 supersede of the prior OPEN set, evidence trail, confidence via severity.
 
+Note (#340): dq_findings carry severity, not decision_level — findings are
+observations, not actions, so agent_governance.decision_level does not apply
+here (it maps ACTIONS for the action-bearing watchers).
+
 Rules:
   MISSING_COST          planned-PO item with no supplier unit_cost AND no item standard_cost
   NO_SUPPLIER           planned-PO item with no sourceable supplier (can't place the PO)

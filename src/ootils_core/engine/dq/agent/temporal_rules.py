@@ -14,14 +14,13 @@ import logging
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
-import psycopg
-
 from .stat_rules import AgentIssue, SEVERITY_WARNING, SEVERITY_ERROR
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
 
-def _load_batch_rows(db: psycopg.Connection, batch_id: UUID) -> list[dict]:
+def _load_batch_rows(db: DictRowConnection, batch_id: UUID) -> list[dict]:
     """Load all row contents for a batch."""
     rows = db.execute(
         "SELECT raw_content FROM ingest_rows WHERE batch_id = %s ORDER BY row_number",
@@ -39,7 +38,7 @@ def _load_batch_rows(db: psycopg.Connection, batch_id: UUID) -> list[dict]:
 
 
 def _get_previous_batch_id(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     entity_type: str,
     current_batch_id: UUID,
 ) -> UUID | None:
@@ -59,7 +58,7 @@ def _get_previous_batch_id(
     return UUID(str(row["batch_id"])) if row else None
 
 
-def _get_entity_type(db: psycopg.Connection, batch_id: UUID) -> str:
+def _get_entity_type(db: DictRowConnection, batch_id: UUID) -> str:
     row = db.execute(
         "SELECT entity_type FROM ingest_batches WHERE batch_id = %s",
         (batch_id,),
@@ -77,7 +76,7 @@ def _row_fingerprint(content: dict) -> frozenset:
 # ──────────────────────────────────────────────────────────────
 
 def _check_duplicate_batch(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     entity_type: str,
 ) -> list[AgentIssue]:
@@ -178,7 +177,7 @@ def _check_po_date_past(
 # ──────────────────────────────────────────────────────────────
 
 def _check_forecast_horizon_short(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     current_rows: list[tuple[UUID, int, dict]],
     entity_type: str,
@@ -254,7 +253,7 @@ def _check_forecast_horizon_short(
 # ──────────────────────────────────────────────────────────────
 
 def _check_mass_change(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     entity_type: str,
 ) -> list[AgentIssue]:
@@ -318,7 +317,7 @@ def _check_mass_change(
 # ──────────────────────────────────────────────────────────────
 
 def run_temporal_rules(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
 ) -> list[AgentIssue]:
     """Run all temporal rules for a batch. Returns list of AgentIssue."""

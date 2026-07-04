@@ -22,8 +22,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
@@ -100,7 +99,7 @@ def generate_customer_orders(
     return nodes
 
 
-def insert_customer_orders(conn: psycopg.Connection, nodes: list[OrderNode]) -> int:
+def insert_customer_orders(conn: DictRowConnection, nodes: list[OrderNode]) -> int:
     if not nodes:
         return 0
     ids = [n.node_id for n in nodes]

@@ -40,6 +40,56 @@ from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Decision ladder (L0-L4) — ONE deterministic action->level mapping for the
+# whole watcher fleet (chantier #340). Never hardcode 'L1' in a watcher.
+#
+# Rationale (docs/STRATEGY-autonomous-supply-chain-operations.md §5):
+#   L1  — DRAFT of something NEW (a new order, a parameter proposal, a
+#         disposition suggestion): nothing exists outside Ootils yet, the
+#         draft is freely reversible.
+#   L2  — EXPEDITE of an EXISTING order/receipt: approving it touches a real
+#         supplier/production commitment (a date already promised).
+#   L3+ — anything that would write to the ERP or mutate planning state.
+#         The watchers do NOT emit such actions today; that path is owned by
+#         the recommendation/approval state machine.
+# ---------------------------------------------------------------------------
+_ACTION_DECISION_LEVELS: dict = {
+    # shortage watcher — drafts of NEW purchase orders
+    "ORDER_NOW": "L1",
+    "ORDER_RUSH": "L1",
+    # shortage + material watchers — touches an EXISTING order/receipt
+    "EXPEDITE": "L2",
+    # lot policy watcher — parameter-change proposals (drafts)
+    "RENEGOTIATE_MOQ": "L1",
+    "REVIEW_MULTIPLE": "L1",
+    "SET_LOT_RULE": "L1",
+    # E&O watcher — disposition proposals (drafts for human review)
+    "STOP_BUY": "L1",
+    "REVIEW": "L1",
+    "HOLD": "L1",
+}
+
+
+def decision_level(action: str) -> str:
+    """Pure, deterministic mapping from a watcher action to its decision level.
+
+    Single implementation for the fleet: draft of a NEW order (ORDER_NOW /
+    ORDER_RUSH) or a parameter/disposition proposal is L1; EXPEDITE of an
+    existing order is L2; ERP-touching actions would be L3+ but are not
+    emitted by the watchers today.
+
+    Raises ValueError on an unknown action (fail-loudly — a silent default
+    level would misclassify governance risk).
+    """
+    try:
+        return _ACTION_DECISION_LEVELS[action]
+    except KeyError:
+        raise ValueError(
+            f"unknown watcher action {action!r} — add it to "
+            "_ACTION_DECISION_LEVELS in agent_governance.py (no default level)"
+        ) from None
+
 
 class _Run:
     """Handle exposed to the ``with`` block.

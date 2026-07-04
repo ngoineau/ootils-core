@@ -10,12 +10,12 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/events", tags=["events"])
@@ -94,7 +94,7 @@ def _build_propagation_engine(db):
     )
 
 
-# Must stay in sync with events.event_type CHECK constraint in migrations 002 + 006.
+# Must stay in sync with events.event_type CHECK constraint in migrations 002 + 006 + 051.
 # Any new event type requires both a DB migration (ALTER TABLE ... ADD CONSTRAINT)
 # and an addition here.
 VALID_EVENT_TYPES = {
@@ -112,6 +112,8 @@ VALID_EVENT_TYPES = {
     "test_event",
     # From migration 006 CHECK constraint extension
     "scenario_merge",
+    # From migration 051 CHECK constraint extension (recommendation governance)
+    "recommendation_transition",
 }
 
 
@@ -159,7 +161,7 @@ class EventListResponse(BaseModel):
 @router.post("", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 def create_event(
     body: EventRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> EventResponse:
@@ -244,11 +246,14 @@ def create_event(
             # The 503 tells the caller to retry; on retry, the event
             # is idempotent because event_id is unique + the engine's
             # F-014 seq-guard skips already-applied writes.
+            # Generic detail — the full exception (possibly raw psycopg text)
+            # is in the logger.error above, never echoed to the client
+            # (CLAUDE.md generic-handler doctrine). event_id is a safe path UUID.
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"propagation engine error: {type(exc).__name__}: {exc}. "
-                    "Event {event_id} recorded; retry safe."
+                    f"Propagation engine error. Event {event_id} recorded; "
+                    "retry safe."
                 ),
             ) from exc
 
@@ -262,7 +267,7 @@ def create_event(
 
 @router.get("", response_model=EventListResponse)
 def list_events(
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     limit: int = Query(default=50, ge=1, le=500, description="Max events to return"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),

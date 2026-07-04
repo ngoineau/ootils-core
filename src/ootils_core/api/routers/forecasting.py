@@ -19,16 +19,23 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Union, cast
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
+from ootils_core.forecasting.algorithms import ForecastingError
 from ootils_core.forecasting.engine import ForecastingEngine
+from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS, compute_confidence
+from ootils_core.pyramide.repository import (
+    fetch_latest_aggregate_wape,
+    get_demand_freshness,
+    get_historical_demand,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,10 @@ class ForecastGenerateRequest(BaseModel):
     method_params: Optional[dict] = Field(default=None)
     scenario_id: Optional[str] = None  # defaults to baseline
     clear_existing: bool = False
+    # Freshness SLA of the confidence score (ADR-023): demand ingested more
+    # than this many days ago is stale. A PARAMETER (pilot default 7 days),
+    # never a hard-coded business constant.
+    freshness_sla_days: int = Field(default=DEFAULT_SLA_DAYS, ge=1, le=365)
 
     @field_validator("horizon_days")
     @classmethod
@@ -56,6 +67,20 @@ class ForecastGenerateRequest(BaseModel):
         if v > 365:
             raise ValueError("horizon_days cannot exceed 365")
         return v
+
+    @model_validator(mode="after")
+    def validate_seasonal_params(self) -> "ForecastGenerateRequest":
+        # SEASONAL has no default cycle length: it depends on the data
+        # granularity (e.g. 7 daily, 12 monthly, 52 weekly) and must be chosen
+        # explicitly. Fail at validation time (422, before any DB access).
+        if self.method == "SEASONAL":
+            season_length = (self.method_params or {}).get("season_length")
+            if not isinstance(season_length, int) or isinstance(season_length, bool) or season_length < 2:
+                raise ValueError(
+                    "method SEASONAL requires method_params.season_length (integer >= 2, "
+                    "e.g. 7 daily, 12 monthly, 52 weekly)"
+                )
+        return self
 
 
 class ForecastAdjustRequest(BaseModel):
@@ -97,6 +122,10 @@ class ForecastMetadata(BaseModel):
     horizon_days: int
     granularity: str
     confidence_score: Optional[Decimal] = None  # Derived from accuracy metrics
+    # Traced components behind confidence_score (ADR-023) — accuracy /
+    # depth / freshness in [0,1], stale flag, short explanation. Optional
+    # and additive: pre-existing clients keep working unchanged.
+    confidence_components: Optional[dict] = None
 
 
 class ForecastOut(BaseModel):
@@ -162,7 +191,7 @@ class ForecastAdjustResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_item_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve item external_id → item_id UUID."""
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
@@ -171,7 +200,7 @@ def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_location_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve location external_id → location_id UUID."""
     row = db.execute(
         "SELECT location_id FROM locations WHERE external_id = %s",
@@ -180,7 +209,7 @@ def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | N
     return row["location_id"] if row else None
 
 
-def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) -> UUID:
+def _resolve_scenario_uuid(db: DictRowConnection, scenario_id_str: str | None) -> UUID:
     """Resolve scenario_id string → UUID, defaulting to baseline."""
     if scenario_id_str is None or scenario_id_str.lower() == "baseline":
         return BASELINE_SCENARIO_ID
@@ -194,71 +223,35 @@ def _resolve_scenario_uuid(db: psycopg.Connection, scenario_id_str: str | None) 
 
 
 def _get_historical_demand(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     periods: int = 90,
+    scenario_id: UUID = BASELINE_SCENARIO_ID,
 ) -> List[Decimal]:
     """
     Fetch historical demand data for an item/location.
-    Returns list of daily demand quantities (most recent last).
+    Returns list of daily demand quantities (most recent last), sparse
+    (days without demand are absent).
+
+    Delegates to the shared demand-history reader: primary source is the
+    demand_history booking facts (strict past, stream='regular',
+    inter-entity excluded); degraded fallback reads past
+    CustomerOrderDemand nodes for `scenario_id` — never ForecastDemand,
+    so forecasts cannot train on forecasts (#333). demand_history itself
+    is scenario-invariant (actuals); `scenario_id` only scopes the
+    fallback. See ootils_core.pyramide.repository.get_historical_demand.
     """
-    # Query: sum of demand events (forecasted or actual orders) per day
-    rows = db.execute(
-        """
-        SELECT 
-            time_span_start AS demand_date,
-            COALESCE(SUM(quantity), 0) AS total_qty
-        FROM nodes
-        WHERE node_type IN ('ForecastDemand', 'CustomerOrderDemand')
-          AND item_id = %s
-          AND location_id = %s
-          AND active = TRUE
-          AND time_span_start >= (CURRENT_DATE - INTERVAL '%s days')
-        GROUP BY time_span_start
-        ORDER BY time_span_start ASC
-        """,
-        (item_id, location_id, periods),
-    ).fetchall()
-
-    if not rows:
-        return []
-
-    # Convert to list of Decimal
-    return [Decimal(str(r["total_qty"])) for r in rows]
+    return get_historical_demand(
+        db=db,
+        item_id=item_id,
+        location_id=location_id,
+        lookback_days=periods,
+        scenario_id=scenario_id,
+    )
 
 
-def _compute_confidence_score(
-    historical_count: int,
-    method: str,
-    mape: Optional[Decimal] = None,
-) -> Optional[Decimal]:
-    """
-    Compute a simple confidence score (0-1) based on:
-    - Data sufficiency (historical_count)
-    - Method appropriateness
-    - MAPE if available
-    """
-    if historical_count < 7:
-        return Decimal("0.3")  # Low confidence: insufficient data
-    if historical_count < 30:
-        base_score = Decimal("0.5")
-    else:
-        base_score = Decimal("0.7")
-
-    # Adjust for MAPE if available
-    if mape is not None:
-        if mape < Decimal("10"):
-            base_score = min(base_score + Decimal("0.2"), Decimal("1.0"))
-        elif mape < Decimal("20"):
-            base_score = min(base_score + Decimal("0.1"), Decimal("1.0"))
-        elif mape > Decimal("50"):
-            base_score = max(base_score - Decimal("0.2"), Decimal("0.1"))
-
-    return base_score
-
-
-def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
+def _soft_delete_forecast(db: DictRowConnection, forecast_id: UUID) -> None:
     """
     Soft delete a forecast by deactivating its values.
     The forecast header remains for audit purposes.
@@ -301,7 +294,7 @@ def _soft_delete_forecast(db: psycopg.Connection, forecast_id: UUID) -> None:
 )
 def generate_forecast(
     body: ForecastGenerateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastOut:
     """
@@ -330,14 +323,24 @@ def generate_forecast(
 
     # 3. Fetch historical demand
     historical_periods = max(body.horizon_days, 90)  # At least as many history as horizon
-    historical_demand = _get_historical_demand(db, item_uuid, location_uuid, historical_periods)
+    # _get_historical_demand returns list[Decimal]; the ForecastingEngine
+    # params are typed list[Decimal | float | int]. Every Decimal is a valid
+    # member of that union, but list is invariant so the assignment needs an
+    # explicit widening cast (no runtime effect, no behaviour change).
+    historical_demand: list[Union[Decimal, float, int]] = cast(
+        "list[Union[Decimal, float, int]]",
+        _get_historical_demand(
+            db, item_uuid, location_uuid, historical_periods, scenario_id=scenario_uuid
+        ),
+    )
 
     if not historical_demand or len(historical_demand) < 3:
         logger.warning(
             "forecast.generate insufficient_history item=%s location=%s count=%d",
             body.item_id, body.location_id, len(historical_demand),
         )
-        # Still proceed with minimal data, but confidence will be low
+        # Proceed — the engine decides: methods that cannot fit the series
+        # raise ForecastingError, converted to an explicit 422 below.
 
     # 4. Generate forecast using ForecastingEngine
     engine = ForecastingEngine()
@@ -347,11 +350,41 @@ def generate_forecast(
             method=body.method,
             params=body.method_params or {},
         )
+    except ForecastingError:
+        # Data condition, not a server bug: the series is too short (or
+        # otherwise unusable) for the requested method. Hand-authored
+        # message — counts only, no internals (CLAUDE.md exception policy).
+        logger.warning(
+            "forecast.generate rejected item=%s location=%s: history of %d "
+            "point(s) unusable for method %s",
+            body.item_id, body.location_id, len(historical_demand), body.method,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Insufficient historical demand: {len(historical_demand)} "
+                f"data point(s) available for method {body.method}"
+            ),
+        )
     except Exception as e:
         logger.exception("forecast.generate failed item=%s location=%s: %s", body.item_id, body.location_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Forecast generation failed",
+        )
+
+    # 4b. SEASONAL opt-in: the persisted values follow the seasonal CURVE
+    # (level x indices) instead of repeating a single value. Default methods
+    # (MA, EXP_SMOOTHING, CROSTON) keep the historical flat behaviour. When
+    # the history covers < 2 full cycles, the engine falls back to a flat
+    # level and records it in forecast_result.parameters/warnings.
+    seasonal_series: Optional[List[Decimal]] = None
+    if forecast_result.parameters.get("seasonal_applied"):
+        seasonal_series = engine.forecast_series(
+            item_history=historical_demand,
+            method=body.method,
+            params=body.method_params or {},
+            periods=body.horizon_days,
         )
 
     # 5. Create forecast header
@@ -380,7 +413,7 @@ def generate_forecast(
         value_id = uuid4()
 
         # Use the forecast value (for non-daily granularity, this is a simplification)
-        quantity = forecast_result.forecast_value
+        quantity = seasonal_series[day_offset] if seasonal_series is not None else forecast_result.forecast_value
 
         db.execute(
             """
@@ -401,21 +434,57 @@ def generate_forecast(
         )
         total_quantity += quantity
 
-    # 7. Compute confidence score
-    mape = forecast_result.metrics.get("mape")
-    confidence_score = _compute_confidence_score(
+    # 7. Confidence score (ADR-023) — deterministic composition of the
+    # three explicit signals via pyramide/confidence.py (replaces the
+    # legacy step heuristic):
+    #   accuracy  : latest AGGREGATE backtest WAPE of this series from
+    #               pyramide_accuracy_metrics (rolling-origin, honest) —
+    #               never the engine's in-sample MAPE, which overstates;
+    #   depth     : days of OBSERVED demand backing the model (the sparse
+    #               series counts one entry per demand day);
+    #   freshness : demand_history ingest age at ITEM level (the ingest
+    #               pipeline loads whole extracts — a per-warehouse filter
+    #               would misread coverage gaps as pipeline death).
+    # Missing signals degrade to the module's prudent default and are
+    # named in the trace — nothing is invented.
+    freshness = get_demand_freshness(db, item_id=item_uuid)
+    wape = fetch_latest_aggregate_wape(
+        db,
+        item_id=item_uuid,
+        location_id=location_uuid,
+        scenario_id=scenario_uuid,
+    )
+    confidence = compute_confidence(
+        wape,
         len(historical_demand),
-        body.method,
-        mape,
+        freshness.ingest_age_days,
+        sla_days=body.freshness_sla_days,
     )
 
     metadata = ForecastMetadata(
         method=body.method,
-        method_params=body.method_params,
+        # Effective engine parameters carry the provenance (e.g. season_length
+        # + seasonal_applied for SEASONAL, auto-calibrated alpha/window) in the
+        # existing method_params field — no new column, no JSONB.
+        method_params=forecast_result.parameters or body.method_params,
         generated_at=date.today(),
         horizon_days=body.horizon_days,
         granularity=body.granularity,
-        confidence_score=confidence_score,
+        confidence_score=confidence.score,
+        # Additive trace (ADR-023): the score is reproducible by hand from
+        # components x documented weights; sources are named so a
+        # governance agent can audit where each signal came from.
+        confidence_components={
+            "components": dict(confidence.components),
+            "stale": confidence.stale,
+            "explanation": confidence.explanation,
+            "accuracy_source": (
+                "pyramide_accuracy_metrics" if wape is not None else None
+            ),
+            "history_depth_days": len(historical_demand),
+            "ingest_age_days": freshness.ingest_age_days,
+            "sla_days": body.freshness_sla_days,
+        },
     )
 
     logger.info(
@@ -451,19 +520,24 @@ def generate_forecast(
 )
 def get_forecast(
     forecast_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastOut:
     """
     Retrieve a forecast by ID with all values and adjustments.
     """
-    # 1. Fetch forecast header
+    # 1. Fetch forecast header.
+    # item_id IS NOT NULL: this endpoint's contract is the LEAF
+    # (item, location) forecast — aggregate hierarchy-node rows
+    # (migration 053, nullable item/location) are out of scope here and
+    # must 404 rather than break the ForecastOut model.
     row = db.execute(
         """
         SELECT forecast_id, item_id, location_id, scenario_id,
                horizon_start, horizon_end, granularity, method, created_at
         FROM forecasts
         WHERE forecast_id = %s
+          AND item_id IS NOT NULL
         """,
         (forecast_id,),
     ).fetchone()
@@ -595,7 +669,7 @@ def list_forecasts(
     granularity: Optional[str] = Query(default=None, pattern="^(daily|weekly|monthly)$"),
     method: Optional[str] = Query(default=None, pattern="^(MA|EXP_SMOOTHING|CROSTON|SEASONAL)$"),
     limit: int = Query(default=50, ge=1, le=500),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastListResponse:
     """
@@ -614,8 +688,11 @@ def list_forecasts(
             ) AS has_adjustments
         FROM forecasts f
         LEFT JOIN forecast_values fv ON fv.forecast_id = f.forecast_id
-        WHERE TRUE
+        WHERE f.item_id IS NOT NULL
     """
+    # f.item_id IS NOT NULL: leaf-forecast listing only — aggregate
+    # hierarchy-node forecasts (migration 053) have NULL item/location
+    # and would break the non-optional ForecastSummary fields.
 
     params: list = []
     conditions: list = []
@@ -726,7 +803,7 @@ def list_forecasts(
 def adjust_forecast(
     forecast_id: UUID,
     body: ForecastAdjustRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ForecastAdjustResponse:
     """
@@ -798,6 +875,10 @@ def adjust_forecast(
         """,
         (forecast_id,),
     ).fetchone()
+    if total_row is None:
+        raise RuntimeError(
+            "SUM(quantity) aggregate query returned no row for forecast total"
+        )
 
     new_total = Decimal(str(total_row["total_qty"]))
 
@@ -838,7 +919,7 @@ def adjust_forecast(
 )
 def delete_forecast(
     forecast_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> dict:
     """

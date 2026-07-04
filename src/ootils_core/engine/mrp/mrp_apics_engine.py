@@ -31,9 +31,9 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
-import psycopg
 import json
 
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.llc_calculator import LLCCalculator
 from ootils_core.engine.mrp.gross_to_net import (
     BucketRecord,
@@ -44,6 +44,7 @@ from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
 from ootils_core.engine.mrp.time_fences import TimeFenceChecker, TimeFenceZone
 from ootils_core.engine.mrp.graph_integration import GraphIntegration
+from ootils_core.engine.scenario.param_overlay import resolved_params_sql
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class MrpApicsEngine:
     offsetting by lead time, and exploding dependent demand to child items.
     """
 
-    def __init__(self, db: psycopg.Connection):
+    def __init__(self, db: DictRowConnection):
         self.db = db
         self.llc_calculator = LLCCalculator(db)
         self.gross_to_net = GrossToNetCalculator(db, BASELINE_SCENARIO_ID)
@@ -130,6 +131,17 @@ class MrpApicsEngine:
             # 1. Create MRP run record
             self._create_run_record(run_id, config)
 
+            # 1b. Regeneration contract: every APICS run rebuilds the FULL
+            # planned-supply picture for the scenario, so deactivate ALL
+            # previous PlannedSupply nodes/edges first (run_id=None → scenario
+            # scope). Without this, each re-run stacks new PlannedSupply on
+            # top of the previous run's, double-counting planned supply
+            # (issue #337). FPOs don't exist yet (chantier C2.2); when they
+            # do, firmed orders must survive this purge. Runs in the same
+            # transaction as the persist steps below: on failure the except
+            # branch rolls back, restoring the previous plan.
+            self.graph.cleanup_previous_run()
+
             # 2. Calculate or retrieve LLCs
             if config.recalculate_llc:
                 self.llc_calculator.calculate_all()
@@ -151,8 +163,16 @@ class MrpApicsEngine:
             all_item_ids = set()
             for items in items_by_llc.values():
                 all_item_ids.update(items)
+            # scenario_id=None for the baseline run: config.scenario_id
+            # defaults to BASELINE_SCENARIO_ID (never None), but the overlay
+            # resolver's "no override can match" degeneracy is keyed on a
+            # NULL %(scenario_id)s, not on the baseline sentinel UUID — same
+            # translation as loader.load_planning_data.
+            overlay_scenario_id = (
+                config.scenario_id if config.scenario_id != BASELINE_SCENARIO_ID else None
+            )
             planning_params_map = self._batch_load_planning_params(
-                all_item_ids, config.location_id
+                all_item_ids, config.location_id, overlay_scenario_id
             )
 
             # 4. Consume forecast for all LLC 0 items
@@ -278,11 +298,18 @@ class MrpApicsEngine:
             errors.append(str(e))
             elapsed_ms = (time.monotonic() - start_time) * 1000
 
-            # Mark run as failed
+            # Coherence on failure: run() does not re-raise (it returns a
+            # FAILED result), so the caller's commit-on-success path would
+            # otherwise persist the cleanup (1b) and any partial writes.
+            # Roll back to restore the previous planned-supply picture, then
+            # re-record the run as FAILED (the original run record was part
+            # of the rolled-back transaction).
             try:
+                self.db.rollback()
+                self._create_run_record(run_id, config)
                 self._complete_run_record(run_id, "FAILED", elapsed_ms, str(e))
             except Exception:
-                pass
+                logger.exception("Failed to record FAILED status for MRP run %s", run_id)
 
             return MrpRunResult(
                 run_id=run_id,
@@ -422,42 +449,89 @@ class MrpApicsEngine:
         self,
         item_ids: Set[UUID],
         location_id: Optional[UUID] = None,
+        scenario_id: Optional[UUID] = None,
     ) -> Dict[UUID, dict]:
-        """Batch load planning parameters for all items."""
+        """Batch load planning parameters for all items.
+
+        Scenario param overlay (ADR-025, chantier #347 PR2): composes on
+        resolved_params_sql() instead of reading item_planning_params
+        directly, so a scenario-scoped override on any of the 15 whitelisted
+        fields (safety stock, lead times, lot sizing, ...) is visible here.
+        scenario_id=None (baseline, the caller's current default) makes every
+        LEFT JOIN LATERAL inside the fragment match nothing, producing the
+        same rows/values as before this change.
+
+        lead_time_total_days is a GENERATED column on the base table and is
+        NOT itself in ALLOWED_PARAM_FIELDS (only its 3 components are
+        overlay-able) — recomputed here as COALESCE(component,0) summed,
+        byte-for-byte the base column's own generation expression, so a NULL
+        component yields the same total as the pre-PR2 GENERATED column read
+        instead of NULL-propagating.
+
+        order_multiple_qty is selected raw (resolved) — exactly as the
+        pre-PR2 query did. NB: this APICS reader does NOT apply the legacy
+        `COALESCE(order_multiple_qty, order_multiple)` cross-column fallback.
+        That fallback lives only in LotSizingEngine.get_planning_params()
+        (where it predates #347); adding it here would silently start
+        rounding orders to the legacy `order_multiple` on baseline for items
+        whose modern `order_multiple_qty` is NULL — a baseline change #347
+        must not make. The two MRP engines' column choice diverges by design
+        and PR2 preserves each side exactly.
+        """
         if not item_ids:
             return {}
 
         item_id_list = list(item_ids)
+        resolved_ipp_sql = resolved_params_sql("ipp")
 
         if location_id:
-            rows = self.db.execute("""
-                SELECT DISTINCT ON (item_id, COALESCE(location_id, '00000000-0000-0000-0000-000000000001'::UUID))
-                    item_id, location_id,
-                    lot_size_rule, min_order_qty, max_order_qty,
-                    economic_order_qty, order_multiple_qty, lot_size_poq_periods,
-                    safety_stock_qty, lead_time_total_days,
-                    frozen_time_fence_days, slashed_time_fence_days,
-                    forecast_consumption_strategy, consumption_window_days
-                FROM item_planning_params
-                WHERE item_id = ANY(%s)
-                  AND location_id = %s
-                  AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-                ORDER BY item_id, COALESCE(location_id, '00000000-0000-0000-0000-000000000001'::UUID), effective_from DESC
-            """, (item_id_list, location_id)).fetchall()
+            rows = self.db.execute(f"""
+                SELECT DISTINCT ON (rp.item_id, COALESCE(rp.location_id, '00000000-0000-0000-0000-000000000001'::UUID))
+                    rp.item_id, rp.location_id,
+                    rp.lot_size_rule, rp.min_order_qty, rp.max_order_qty,
+                    rp.economic_order_qty,
+                    rp.order_multiple_qty,
+                    rp.lot_size_poq_periods,
+                    rp.safety_stock_qty,
+                    (COALESCE(rp.lead_time_sourcing_days, 0)
+                        + COALESCE(rp.lead_time_manufacturing_days, 0)
+                        + COALESCE(rp.lead_time_transit_days, 0)) AS lead_time_total_days,
+                    rp.frozen_time_fence_days, rp.slashed_time_fence_days,
+                    rp.forecast_consumption_strategy, rp.consumption_window_days,
+                    base.effective_from
+                FROM ({resolved_ipp_sql}) rp
+                JOIN item_planning_params base ON base.param_id = rp.param_id
+                WHERE rp.item_id = ANY(%(item_ids)s)
+                  AND rp.location_id = %(location_id)s
+                ORDER BY rp.item_id, COALESCE(rp.location_id, '00000000-0000-0000-0000-000000000001'::UUID), base.effective_from DESC
+            """, {
+                "scenario_id": scenario_id,
+                "item_ids": item_id_list,
+                "location_id": location_id,
+            }).fetchall()
         else:
-            rows = self.db.execute("""
-                SELECT DISTINCT ON (item_id, COALESCE(location_id, '00000000-0000-0000-0000-000000000001'::UUID))
-                    item_id, location_id,
-                    lot_size_rule, min_order_qty, max_order_qty,
-                    economic_order_qty, order_multiple_qty, lot_size_poq_periods,
-                    safety_stock_qty, lead_time_total_days,
-                    frozen_time_fence_days, slashed_time_fence_days,
-                    forecast_consumption_strategy, consumption_window_days
-                FROM item_planning_params
-                WHERE item_id = ANY(%s)
-                  AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-                ORDER BY item_id, COALESCE(location_id, '00000000-0000-0000-0000-000000000001'::UUID), effective_from DESC
-            """, (item_id_list,)).fetchall()
+            rows = self.db.execute(f"""
+                SELECT DISTINCT ON (rp.item_id, COALESCE(rp.location_id, '00000000-0000-0000-0000-000000000001'::UUID))
+                    rp.item_id, rp.location_id,
+                    rp.lot_size_rule, rp.min_order_qty, rp.max_order_qty,
+                    rp.economic_order_qty,
+                    rp.order_multiple_qty,
+                    rp.lot_size_poq_periods,
+                    rp.safety_stock_qty,
+                    (COALESCE(rp.lead_time_sourcing_days, 0)
+                        + COALESCE(rp.lead_time_manufacturing_days, 0)
+                        + COALESCE(rp.lead_time_transit_days, 0)) AS lead_time_total_days,
+                    rp.frozen_time_fence_days, rp.slashed_time_fence_days,
+                    rp.forecast_consumption_strategy, rp.consumption_window_days,
+                    base.effective_from
+                FROM ({resolved_ipp_sql}) rp
+                JOIN item_planning_params base ON base.param_id = rp.param_id
+                WHERE rp.item_id = ANY(%(item_ids)s)
+                ORDER BY rp.item_id, COALESCE(rp.location_id, '00000000-0000-0000-0000-000000000001'::UUID), base.effective_from DESC
+            """, {
+                "scenario_id": scenario_id,
+                "item_ids": item_id_list,
+            }).fetchall()
 
         result: Dict[UUID, dict] = {}
         for row in rows:
@@ -507,7 +581,7 @@ class MrpApicsEngine:
         ))
 
     def _complete_run_record(
-        self, run_id: UUID, status: str, elapsed_ms: float, error_msg: str = None
+        self, run_id: UUID, status: str, elapsed_ms: float, error_msg: Optional[str] = None
     ):
         """Update the mrp_runs record with completion status."""
         # Map our status to DB enum values (lowercase)

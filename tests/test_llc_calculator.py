@@ -497,7 +497,12 @@ class TestPerformance:
         assert result.llc_map[fg] == 0
         # All components at LLC 1
         assert len(result.items_by_llc[1]) == 5000
-        assert elapsed_ms < 100, f"Wide BOM took {elapsed_ms:.1f}ms"
+        # Algorithmic-explosion guard, NOT a benchmark: pure-Python BFS on
+        # 5000 edges runs in ~10ms locally but CI runners are noisy/shared
+        # (measured 106-133ms on slow runners — flaked twice on unrelated
+        # PRs). 500ms still catches an accidental O(n^2) regression
+        # (~seconds at this size) without gambling on runner weather.
+        assert elapsed_ms < 500, f"Wide BOM took {elapsed_ms:.1f}ms"
 
 
 # ─────────────────────────────────────────────────────────────

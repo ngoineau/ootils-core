@@ -8,12 +8,13 @@ from typing import Optional
 from uuid import UUID
 from decimal import Decimal
 
-import psycopg
 from fastapi import APIRouter, Depends, Query
+from psycopg import sql
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/items", tags=["planning-params"])
@@ -39,34 +40,38 @@ class PlanningParamsResponse(BaseModel):
 def get_planning_params(
     item_id: Optional[str] = Query(default=None, description="Filter by item UUID"),
     location_id: Optional[str] = Query(default=None, description="Filter by location UUID"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PlanningParamsResponse:
     """Return the latest active planning parameters per (item, location)."""
     # Build query — get most recent params per (item_id, location_id)
     # Uses effective_to IS NULL to get active/current records (SCD2 pattern)
-    conditions = [
-        "(ipp.effective_to IS NULL OR ipp.effective_to = '9999-12-31'::DATE)"
+    conditions: list[sql.Composable] = [
+        sql.SQL("(ipp.effective_to IS NULL OR ipp.effective_to = '9999-12-31'::DATE)")
     ]
     params: list = []
 
     if item_id:
         try:
-            conditions.append("ipp.item_id = %s")
-            params.append(UUID(item_id))
+            parsed_item_id = UUID(item_id)
         except ValueError:
             pass
+        else:
+            conditions.append(sql.SQL("ipp.item_id = %s"))
+            params.append(parsed_item_id)
 
     if location_id:
         try:
-            conditions.append("ipp.location_id = %s")
-            params.append(UUID(location_id))
+            parsed_location_id = UUID(location_id)
         except ValueError:
             pass
+        else:
+            conditions.append(sql.SQL("ipp.location_id = %s"))
+            params.append(parsed_location_id)
 
-    where = " AND ".join(conditions)
-    rows = db.execute(
-        f"""
+    where = sql.SQL(" AND ").join(conditions)
+    query = sql.SQL(
+        """
         SELECT ipp.item_id,
                ipp.location_id,
                ipp.safety_stock_qty,
@@ -78,9 +83,9 @@ def get_planning_params(
         FROM item_planning_params ipp
         WHERE {where}
         ORDER BY ipp.item_id, ipp.location_id
-        """,
-        params or None,
-    ).fetchall()
+        """
+    ).format(where=where)
+    rows = db.execute(query, params or None).fetchall()
 
     result = [
         PlanningParamsOut(
