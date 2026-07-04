@@ -15,6 +15,7 @@ from ootils_core.engine.mrp.core import (
     BASELINE,
     FIRM_RECEIPT_TYPES,
     PlanningData,
+    ReceiptOrder,
     _spread_period,
 )
 from ootils_core.engine.scenario.param_overlay import resolved_params_sql
@@ -124,6 +125,23 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         d.slushy_d[it] = r[11]
         d.strat[it] = r[12]
 
+    # Reschedule dampening thresholds (#346, migration 061). These two columns
+    # are DELIBERATELY baseline-only — not in the #347 overlay whitelist (mig 061
+    # header) — so they are read straight off item_planning_params, unresolved,
+    # with the same current-SCD2-row predicate the resolver uses. Pooled per item
+    # by MAX across locations (a single per-item threshold is the intent); a
+    # missing item just falls back to the module DEFAULT_* in reschedule_signals.
+    for r in cur.execute(
+        "SELECT item_id, MAX(reschedule_min_days), MAX(reschedule_qty_tolerance_pct) "
+        "FROM item_planning_params "
+        "WHERE effective_to IS NULL OR effective_to = '9999-12-31'::DATE "
+        "GROUP BY item_id"
+    ).fetchall():
+        if r[1] is not None:
+            d.resched_min_days[r[0]] = r[1]
+        if r[2] is not None:
+            d.resched_qty_tol_pct[r[0]] = r[2]
+
     # nodes: on-hand + firm receipts in ONE scenario-scoped scan (was 2), via
     # FILTER. MIN/SUM-over-empty => NULL, skipped, so dict keys match the old
     # per-type queries exactly. Scenario-scoped (scenario MRP reads its fork).
@@ -227,12 +245,52 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         for i, (tref, qty) in enumerate(rows):
             end = rows[i + 1][0] if i + 1 < len(rows) else tref + _dt.timedelta(days=default_span)
             _spread_period(qty, tref, end, horizon_start, horizon_end, d.n_buckets, d.fc_b[item])
+    # Firm receipts loaded from ONE scan, feeding two structures (#346):
+    #   * d.sched_b — the weekly-bucket AGGREGATE the projection/cascade consumes.
+    #     GOLDEN-MASTER: only the committed order types (PO/WO/Transfer) contribute
+    #     here, exactly as before — the sched_b aggregate is STRICTLY UNCHANGED.
+    #   * d.sched_orders — the re-datable receipts keeping per-order IDENTITY
+    #     (node_id/date/qty/is_firm/node_type) so reschedule_signals can re-date
+    #     THIS order.
+    #
+    # The two structures have DIFFERENT membership on purpose:
+    #   sched_orders = committed receipts (PO/WO/Transfer — always) PLUS every
+    #                  PlannedSupply that is FIRM (is_firm=TRUE). A firm
+    #                  PlannedSupply (an FPO, migration 061) is netted as a closed
+    #                  receipt yet stays re-datable — it is the headline case of
+    #                  #346, so it MUST enter sched_orders. A NON-firm PlannedSupply
+    #                  is regenerated from scratch on every run, so re-dating it is
+    #                  meaningless: it is deliberately excluded.
+    #   sched_b      = committed receipts ONLY (the WHERE below keeps PlannedSupply
+    #                  out of the bucket aggregate so projection/golden-master do
+    #                  not shift). is_firm on a ReceiptOrder is TRUE by nature for
+    #                  the committed types (an engaged order) and the column value
+    #                  for a PlannedSupply.
     d.sched_b = defaultdict(lambda: defaultdict(float))
-    for item, tref, qty in cur.execute(
-        "SELECT item_id, time_ref, quantity FROM nodes WHERE scenario_id=%(b)s AND active "
-        "AND node_type=ANY(%(t)s) AND time_ref IS NOT NULL AND quantity IS NOT NULL",
+    d.sched_orders = defaultdict(list)
+    for node_id, item, ntype, tref, qty, is_firm in cur.execute(
+        "SELECT node_id, item_id, node_type, time_ref, quantity, is_firm FROM nodes "
+        "WHERE scenario_id=%(b)s AND active "
+        "AND (node_type=ANY(%(t)s) OR (node_type='PlannedSupply' AND is_firm)) "
+        "AND time_ref IS NOT NULL AND quantity IS NOT NULL",
         {"b": scenario, "t": FIRM_RECEIPT_TYPES}).fetchall():
-        d.sched_b[item][d.bucket(tref)] += float(qty)
+        q = float(qty)
+        if ntype in FIRM_RECEIPT_TYPES:
+            # Committed order: contributes to the bucket aggregate (golden-master)
+            # and is firm by nature (an engaged receipt).
+            d.sched_b[item][d.bucket(tref)] += q
+            order_firm = True
+        else:
+            # Firm PlannedSupply (FPO): re-datable, but deliberately NOT added to
+            # the sched_b bucket aggregate — sched_b stays byte-identical to the
+            # pre-#346 golden master (committed types only). This math core is
+            # read-only; it surfaces the FPO for reschedule identity only. FPO
+            # netting as a closed receipt is the APICS engine's concern
+            # (graph_integration / gross_to_net), not this loader.
+            order_firm = bool(is_firm)
+        d.sched_orders[item].append(ReceiptOrder(
+            node_id=str(node_id), item_id=item, receipt_date=tref, qty=q,
+            is_firm=order_firm, node_type=ntype))
 
     involved: set = set()
     for m in (d.llc, d.is_make, d.on_hand, d.safety, d.co_b, d.fc_b, d.sched_b):
