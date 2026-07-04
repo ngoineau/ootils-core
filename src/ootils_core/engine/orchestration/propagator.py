@@ -13,9 +13,8 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.constants import BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 from ootils_core.models import CalcRun, Node, Scenario
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.engine.kernel.graph.traversal import GraphTraversal
@@ -66,7 +65,7 @@ class PropagationEngine:
         self,
         event_id: UUID,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> Optional[CalcRun]:
         """
         Main entry point. Acquires advisory lock, expands dirty subgraph, propagates.
@@ -179,7 +178,7 @@ class PropagationEngine:
             self._calc_run_mgr.fail_calc_run(calc_run, str(exc), db)
             raise
 
-    def _finish_run(self, calc_run: CalcRun, scenario_id: UUID, db: psycopg.Connection) -> None:
+    def _finish_run(self, calc_run: CalcRun, scenario_id: UUID, db: DictRowConnection) -> None:
         """Load scenario and complete the calc run."""
         scenario_row = db.execute(
             "SELECT * FROM scenarios WHERE scenario_id = %s",
@@ -240,7 +239,7 @@ class PropagationEngine:
         self,
         calc_run: CalcRun,
         dirty_nodes: set[UUID],
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """
         Topological sort over dirty nodes, then compute each one in order.
@@ -419,7 +418,7 @@ class PropagationEngine:
         node_id: UUID,
         scenario_id: UUID,
         calc_run_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         nodes_cache: Optional[dict[UUID, Optional[Node]]] = None,
         edges_by_target: Optional[dict[UUID, dict[str, list]]] = None,
         safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
@@ -675,7 +674,7 @@ class PropagationEngine:
         return changed
 
     def _get_safety_stock(
-        self, node: Node, scenario_id: UUID, db: psycopg.Connection
+        self, node: Node, scenario_id: UUID, db: DictRowConnection
     ) -> Optional[Decimal]:
         """Fetch safety_stock_qty from item_planning_params for this node's
         item/location, resolved for `scenario_id` (chantier #347 PR3,

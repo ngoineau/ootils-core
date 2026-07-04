@@ -14,7 +14,6 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -29,6 +28,7 @@ from ootils_core.atp.api import (
 )
 from ootils_core.atp.ctp import CTPEngine
 from ootils_core.atp.engine import ATPEngine
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class CTPSimulateResponse(BaseModel):
 async def check_atp(
     body: ATPCheckRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ATPCheckResponse:
     """
@@ -204,7 +204,7 @@ async def check_atp(
 async def check_ctp(
     body: CTPCheckRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CTPCheckResponse:
     """
@@ -308,7 +308,7 @@ async def check_ctp(
 async def simulate_ctp(
     body: CTPSimulateRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CTPSimulateResponse:
     """

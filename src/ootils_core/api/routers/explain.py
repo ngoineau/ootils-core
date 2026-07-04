@@ -12,12 +12,12 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
 from ootils_core.engine.kernel.graph.store import GraphStore
 
@@ -45,7 +45,7 @@ class ExplainResponse(BaseModel):
 @router.get("", response_model=ExplainResponse)
 def get_explanation(
     node_id: str = Query(..., description="Target node UUID to explain"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> ExplainResponse:

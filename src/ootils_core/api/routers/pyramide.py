@@ -6,12 +6,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
 from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS
 from ootils_core.pyramide.repository import (
@@ -187,7 +187,7 @@ class PyramideSnapshotDiffOut(BaseModel):
 )
 def create_pyramide_run(
     body: PyramideRunRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunOut:
     body.method = body.method.upper()
@@ -297,7 +297,7 @@ def create_pyramide_run(
 )
 def get_pyramide_run(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunOut:
     summary = fetch_run_summary(db, run_id)
@@ -318,7 +318,7 @@ def get_pyramide_run(
 )
 def get_pyramide_run_result(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideRunResultOut:
     summary = fetch_run_summary(db, run_id)
@@ -338,7 +338,7 @@ def get_pyramide_run_result(
 )
 def commit_pyramide_run(
     run_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideCommitOut:
     try:
@@ -364,7 +364,7 @@ def commit_pyramide_run(
 )
 def list_pyramide_snapshots(
     limit: int = Query(default=100, ge=1, le=500),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideSnapshotListOut:
     snapshots = list_snapshots(db, limit=limit)
@@ -382,7 +382,7 @@ def list_pyramide_snapshots(
 def diff_pyramide_snapshots(
     snapshot_id: UUID,
     compare_to: UUID = Query(...),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> PyramideSnapshotDiffOut:
     base_values = fetch_snapshot_values(db, snapshot_id)

@@ -14,12 +14,12 @@ from datetime import date
 from typing import Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class ExplodeResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_id(db: psycopg.Connection, external_id: str) -> UUID | None:
+def _resolve_item_id(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve external_id → item_id. Returns None if not found."""
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
@@ -109,7 +109,7 @@ def _resolve_item_id(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def _get_active_bom(db: psycopg.Connection, parent_item_id: UUID) -> dict | None:
+def _get_active_bom(db: DictRowConnection, parent_item_id: UUID) -> dict | None:
     """Return the active bom_header for a given parent_item_id."""
     row = db.execute(
         """
@@ -124,7 +124,7 @@ def _get_active_bom(db: psycopg.Connection, parent_item_id: UUID) -> dict | None
     return dict(row) if row else None
 
 
-def _get_bom_lines(db: psycopg.Connection, bom_id: UUID) -> list[dict]:
+def _get_bom_lines(db: DictRowConnection, bom_id: UUID) -> list[dict]:
     """Return all active bom_lines for a given bom_id, with external_id for each component."""
     rows = db.execute(
         """
@@ -141,7 +141,7 @@ def _get_bom_lines(db: psycopg.Connection, bom_id: UUID) -> list[dict]:
 
 
 def _get_on_hand_qty(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID | None,
 ) -> float:
@@ -176,7 +176,7 @@ def _get_on_hand_qty(
 
 
 def _detect_cycle(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     parent_item_id: UUID,
     new_component_ids: list[UUID],
 ) -> bool:
@@ -230,7 +230,7 @@ def _detect_cycle(
     return False
 
 
-def _recalculate_llc(db: psycopg.Connection, affected_item_ids: list[UUID]) -> int:
+def _recalculate_llc(db: DictRowConnection, affected_item_ids: list[UUID]) -> int:
     """
     Recalculate Low-Level Code (LLC) for all components in the BOM graph.
     LLC = deepest level at which an item appears across all BOMs.
@@ -319,7 +319,7 @@ def _recalculate_llc(db: psycopg.Connection, affected_item_ids: list[UUID]) -> i
 @router.post("/ingest/bom", response_model=IngestBOMResponse, summary="Import BOM", description="Import a complete Bill of Materials for an item. Automatically computes Low-Level Codes (LLC).")
 def ingest_bom(
     body: IngestBOMRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestBOMResponse:
     """Import a complete BOM for a parent item. Upsert with cycle detection."""
@@ -456,7 +456,7 @@ def ingest_bom(
 @router.get("/bom/{parent_external_id}", response_model=BOMResponse, summary="Get BOM", description="Return the active BOM for an item with its components and LLC.")
 def get_bom(
     parent_external_id: str,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> BOMResponse:
     """Return the active BOM for a given item."""
@@ -502,7 +502,7 @@ def get_bom(
 @router.post("/bom/explode", response_model=ExplodeResponse, summary="MRP explosion", description="Compute gross and net component requirements for a given quantity (multi-level explosion, netting against available stock).")
 def explode_bom(
     body: ExplodeRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ExplodeResponse:
     """

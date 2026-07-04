@@ -12,7 +12,6 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -20,6 +19,7 @@ from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.atp.engine import ATPEngine
 from ootils_core.atp.models import ATPBucket, ATPResult
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class ATPBucketDetail(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> Optional[UUID]:
+def _resolve_item_uuid(db: DictRowConnection, external_id: str) -> Optional[UUID]:
     """Resolve item external_id → item_id UUID."""
     # Try as UUID first
     try:
@@ -88,7 +88,7 @@ def _resolve_item_uuid(db: psycopg.Connection, external_id: str) -> Optional[UUI
     return row["item_id"] if row else None
 
 
-def _resolve_location_uuid(db: psycopg.Connection, external_id: str) -> Optional[UUID]:
+def _resolve_location_uuid(db: DictRowConnection, external_id: str) -> Optional[UUID]:
     """Resolve location external_id → location_id UUID."""
     # Try as UUID first
     try:
@@ -138,7 +138,7 @@ def _extract_shortage_details(result: ATPResult) -> List[ShortageDetail]:
 async def check_atp_availability(
     body: ATPCheckRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> ATPCheckResponse:
     """

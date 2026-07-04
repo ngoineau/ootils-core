@@ -9,12 +9,12 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def get_issues(
     location_id: Optional[str] = Query(default=None, description="Filter by location ID"),
     limit: int = Query(default=200, ge=1, le=1000, description="Max results to return (1–1000)"),
     offset: int = Query(default=0, ge=0, description="Result offset for pagination"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> IssuesResponse:

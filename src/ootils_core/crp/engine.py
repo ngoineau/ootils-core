@@ -25,9 +25,8 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Any
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.crp.models import WorkCenter, Routing, Operation
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +297,7 @@ class CRPEngine:
     Performance: <500ms for 1000+ planned orders
     """
     
-    def __init__(self, db_conn: Optional[psycopg.Connection] = None):
+    def __init__(self, db_conn: Optional[DictRowConnection] = None):
         """
         Initialize the CRP engine.
         
@@ -308,12 +307,12 @@ class CRPEngine:
         self._conn = db_conn
     
     @property
-    def connection(self) -> Optional[psycopg.Connection]:
+    def connection(self) -> Optional[DictRowConnection]:
         """Get the database connection."""
         return self._conn
     
     @connection.setter
-    def connection(self, conn: psycopg.Connection):
+    def connection(self, conn: DictRowConnection):
         """Set the database connection."""
         self._conn = conn
     

@@ -15,9 +15,8 @@ import math
 from dataclasses import dataclass
 from uuid import UUID
 
-import psycopg
-
 from .stat_rules import AgentIssue
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class IssueImpact:
 
 
 def _get_item_ids_for_issue(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     row_id: UUID | None,
 ) -> list[str]:
@@ -82,7 +81,7 @@ def _get_item_ids_for_issue(
 
 
 def _get_active_shortages_for_items(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_external_ids: list[str],
 ) -> tuple[int, list[str]]:
     """
@@ -110,7 +109,7 @@ def _get_active_shortages_for_items(
 
 
 def _get_finished_goods_via_bom(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_external_ids: list[str],
 ) -> list[str]:
     """
@@ -165,7 +164,7 @@ def _get_finished_goods_via_bom(
 
 
 def score_issues(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     issues: list[AgentIssue],
 ) -> list[AgentIssue]:

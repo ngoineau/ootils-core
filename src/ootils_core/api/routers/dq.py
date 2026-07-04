@@ -14,12 +14,12 @@ import logging
 from typing import Any, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.dq.engine import run_dq
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class DQIssuesResponse(BaseModel):
 )
 def run_dq_batch(
     batch_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> DQRunResponse:
     # Verify batch exists
@@ -134,7 +134,7 @@ def list_issues(
     entity_type: Optional[str] = Query(default=None, description="Filter by entity_type (e.g. purchase_orders)"),
     limit: int = Query(default=200, ge=1, le=1000, description="Max results"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> DQIssuesResponse:
     conditions: list[str] = ["i.resolved = FALSE"]
@@ -207,7 +207,7 @@ def list_issues(
 )
 def get_batch_dq(
     batch_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> DQBatchResponse:
     batch = db.execute(
@@ -332,7 +332,7 @@ class AgentRunsResponse(BaseModel):
 )
 def run_agent_batch(
     batch_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> AgentRunResponse:
     # Verify batch exists
@@ -376,7 +376,7 @@ def run_agent_batch(
 )
 def get_agent_report(
     batch_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> AgentReportResponse:
     batch = db.execute(
@@ -478,7 +478,7 @@ def get_agent_report(
 def list_agent_runs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> AgentRunsResponse:
     total = db.execute(

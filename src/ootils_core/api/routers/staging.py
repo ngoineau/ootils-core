@@ -32,7 +32,6 @@ import logging
 from typing import Annotated, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import (
     APIRouter,
     Depends,
@@ -47,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.staging.approve import ApprovalError, approve_batch
 from ootils_core.staging.diff import DiffError, compute_diff
 from ootils_core.staging.loader import LoaderError, load_to_staging
@@ -95,7 +95,7 @@ def upload_file(
     format_hint: Annotated[Optional[str], Form(description="tsv/csv/xlsx/json — skip auto-detect")] = None,
     sheet_name: Annotated[Optional[str], Form(description="XLSX sheet override")] = None,
     delimiter: Annotated[Optional[str], Form(description="CSV delimiter override")] = None,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
 ) -> dict:
     """Upload a file into the staging zone (ADR-013 step 1 of the lifecycle)."""
 
@@ -220,7 +220,7 @@ def _extract_submitter() -> str | None:
 )
 def get_batch_diff(
     batch_id: UUID,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
 ) -> dict:
     """Preview the impact of approving this batch (ADR-013 D4).
 
@@ -300,7 +300,7 @@ class ApproveRequest(BaseModel):
 def approve(
     batch_id: UUID,
     body: ApproveRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
 ) -> dict:
     """Apply the validated batch to canonical tables (ADR-013 D3+D4).
 
@@ -377,7 +377,7 @@ class RejectRequest(BaseModel):
 def reject(
     batch_id: UUID,
     body: RejectRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
 ) -> dict:
     """Close out a batch as rejected without writing to canonical."""
     try:

@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class CapacityCheckEngine:
     
     def check_capacity(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps_node_ids: List[UUID],
         horizon_buffer_days: int = 7,
     ) -> CapacityCheckResult:
@@ -197,7 +197,7 @@ class CapacityCheckEngine:
     
     def _fetch_mps_nodes(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps_node_ids: List[UUID],
     ) -> List[Dict[str, Any]]:
         """Fetch les MPS nodes avec leurs détails."""
@@ -223,7 +223,7 @@ class CapacityCheckEngine:
     
     def _get_critical_resources(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps_nodes: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
@@ -289,7 +289,7 @@ class CapacityCheckEngine:
     
     def _get_base_resource_load(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         resource_id: UUID,
         horizon_start: date,
         horizon_end: date,
@@ -328,7 +328,7 @@ class CapacityCheckEngine:
     
     def _calculate_added_load_from_mps(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps_nodes: List[Dict[str, Any]],
         resource_id: UUID,
     ) -> Dict[date, Decimal]:
@@ -367,7 +367,7 @@ class CapacityCheckEngine:
     
     def _get_resource_capacity(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         resource_id: UUID,
         location_id: Optional[UUID],
         horizon_start: date,
@@ -538,7 +538,7 @@ class CapacityCheckEngine:
     
     def _generate_adjustment_suggestions(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         violations: List[CapacityViolation],
         mps_nodes: List[Dict[str, Any]],
     ) -> List[AdjustmentSuggestion]:
@@ -619,7 +619,7 @@ class CapacityCheckEngine:
     
     def _find_next_available_slot(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         mps: Dict[str, Any],
         resource_id: UUID,
         search_from: date,

@@ -8,10 +8,10 @@ from decimal import Decimal
 from typing import Sequence
 from uuid import UUID, uuid4
 
-import psycopg
 from psycopg.types.json import Jsonb
 
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 
 from .accuracy import AccuracyReport
 from .models import PyramideRunResult
@@ -161,7 +161,7 @@ class DemandFreshness:
 
 
 def get_demand_freshness(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID | None = None,
     warehouse_id: str | None = None,
 ) -> DemandFreshness:
@@ -223,7 +223,7 @@ FRESHNESS_GATE_AGENT_NAME = "pyramide_freshness_gate"
 
 
 def record_stale_demand_finding(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     *,
     run_id: UUID,
     scenario_id: UUID,
@@ -315,7 +315,7 @@ def record_stale_demand_finding(
     return dq_finding_id
 
 
-def resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def resolve_item_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
         (external_id,),
@@ -323,7 +323,7 @@ def resolve_item_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
     return row["item_id"] if row else None
 
 
-def resolve_location_uuid(db: psycopg.Connection, external_id: str) -> UUID | None:
+def resolve_location_uuid(db: DictRowConnection, external_id: str) -> UUID | None:
     row = db.execute(
         "SELECT location_id FROM locations WHERE external_id = %s",
         (external_id,),
@@ -367,7 +367,7 @@ _DEMAND_HISTORY_BUSINESS_PREDICATES = _DEMAND_HISTORY_STREAM_PREDICATES + """
 
 
 def get_historical_demand(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     lookback_days: int,
@@ -454,7 +454,7 @@ def get_historical_demand(
 
 
 def get_historical_demand_by_node(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     hierarchy_id: str,
     node_code: str,
     lookback_days: int,
@@ -528,7 +528,7 @@ def get_historical_demand_by_node(
 
 
 def get_historical_demand_by_item(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     lookback_days: int,
 ) -> list[Decimal]:
@@ -560,7 +560,7 @@ def get_historical_demand_by_item(
 
 
 def get_historical_demand_totals_by_items(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_ids: Sequence[UUID],
     lookback_days: int,
 ) -> dict[str, Decimal]:
@@ -652,7 +652,7 @@ def accuracy_metric_rows(
 
 
 def persist_accuracy_metrics(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     run_id: UUID,
     report: AccuracyReport,
     bias_scale: Decimal = _ONE,
@@ -691,7 +691,7 @@ def persist_accuracy_metrics(
 
 
 def fetch_accuracy_metrics(
-    db: psycopg.Connection, run_id: UUID
+    db: DictRowConnection, run_id: UUID
 ) -> list[PyramideAccuracyMetric]:
     """
     Backtest metrics of a run, aggregate row FIRST (horizon NULL), then
@@ -728,7 +728,7 @@ def fetch_accuracy_metrics(
 
 
 def fetch_latest_aggregate_wape(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     *,
     item_id: UUID,
     location_id: UUID,
@@ -770,7 +770,7 @@ def _optional_decimal(value) -> Decimal | None:
 
 
 def persist_run(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     result: PyramideRunResult,
     *,
     stale_demand: bool = False,
@@ -898,7 +898,7 @@ def persist_run(
 
 
 def persist_series_run(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     *,
     scenario_id: UUID,
     horizon_start: date,
@@ -1079,7 +1079,7 @@ def persist_series_run(
     )
 
 
-def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummary | None:
+def fetch_run_summary(db: DictRowConnection, run_id: UUID) -> PyramideRunSummary | None:
     # LEFT JOIN: aggregate runs (migration 053) have no snapshot — their
     # value_count/total come straight from the frozen forecast_values.
     row = db.execute(
@@ -1110,7 +1110,7 @@ def fetch_run_summary(db: psycopg.Connection, run_id: UUID) -> PyramideRunSummar
     return _summary_from_row(row) if row else None
 
 
-def fetch_run_values(db: psycopg.Connection, run_id: UUID) -> list[PyramideForecastValue] | None:
+def fetch_run_values(db: DictRowConnection, run_id: UUID) -> list[PyramideForecastValue] | None:
     run = db.execute(
         "SELECT forecast_id FROM pyramide_runs WHERE run_id = %s",
         (run_id,),
@@ -1138,7 +1138,7 @@ def fetch_run_values(db: psycopg.Connection, run_id: UUID) -> list[PyramideForec
     ]
 
 
-def commit_run(db: psycopg.Connection, run_id: UUID) -> PyramideCommitResult | None:
+def commit_run(db: DictRowConnection, run_id: UUID) -> PyramideCommitResult | None:
     """
     Materialize a LEAF run's frozen values as ForecastDemand graph nodes.
 
@@ -1178,7 +1178,7 @@ def commit_run(db: psycopg.Connection, run_id: UUID) -> PyramideCommitResult | N
 
 
 def list_snapshots(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID | None = None,
     location_id: UUID | None = None,
     limit: int = 100,
@@ -1208,7 +1208,7 @@ def list_snapshots(
     return [_snapshot_from_row(row) for row in rows]
 
 
-def fetch_snapshot_values(db: psycopg.Connection, snapshot_id: UUID) -> list[PyramideForecastValue] | None:
+def fetch_snapshot_values(db: DictRowConnection, snapshot_id: UUID) -> list[PyramideForecastValue] | None:
     row = db.execute(
         "SELECT forecast_id FROM pyramide_snapshots WHERE snapshot_id = %s",
         (snapshot_id,),
@@ -1286,7 +1286,7 @@ def _snapshot_from_row(row) -> PyramideSnapshotSummary:
     )
 
 
-def _commit_snapshot_to_demand_nodes(db: psycopg.Connection, summary: PyramideRunSummary) -> int:
+def _commit_snapshot_to_demand_nodes(db: DictRowConnection, summary: PyramideRunSummary) -> int:
     """
     LEAF-ONLY materialization contract: only leaf (item, location) series
     ever become ForecastDemand nodes. Aggregate series live exclusively
@@ -1402,7 +1402,7 @@ def _commit_snapshot_to_demand_nodes(db: psycopg.Connection, summary: PyramideRu
 
 
 def _ensure_projection_series_window(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     item_id: UUID,
     location_id: UUID,
     scenario_id: UUID,
@@ -1495,7 +1495,7 @@ def _ensure_projection_series_window(
 
 
 def _wire_demand_node_to_pi(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     demand_node_id: UUID,
     item_id: UUID,
     location_id: UUID,
@@ -1544,7 +1544,7 @@ def _wire_demand_node_to_pi(
 
 
 def _emit_commit_event(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     scenario_id: UUID,
     demand_node_id: UUID,
     quantity: Decimal,

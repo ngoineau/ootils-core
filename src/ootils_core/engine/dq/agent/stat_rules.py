@@ -16,7 +16,7 @@ import statistics
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
-import psycopg
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class AgentIssue:
 
 
 def _load_history(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     entity_type: str,
     current_batch_id: UUID,
     window: int = HISTORY_WINDOW,
@@ -85,7 +85,7 @@ def _load_history(
 
 
 def _load_current_rows(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
 ) -> list[tuple[UUID, int, dict]]:
     """Load (row_id, row_number, content) for all rows in the current batch."""
@@ -110,7 +110,7 @@ def _load_current_rows(
     return result
 
 
-def _get_entity_type(db: psycopg.Connection, batch_id: UUID) -> str:
+def _get_entity_type(db: DictRowConnection, batch_id: UUID) -> str:
     row = db.execute(
         "SELECT entity_type FROM ingest_batches WHERE batch_id = %s",
         (batch_id,),
@@ -333,7 +333,7 @@ def _check_price_outlier(
 # ──────────────────────────────────────────────────────────────
 
 def _check_safety_stock_zero(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
     current_rows: list[tuple[UUID, int, dict]],
 ) -> list[AgentIssue]:
@@ -440,7 +440,7 @@ def _check_negative_onhand(
 # ──────────────────────────────────────────────────────────────
 
 def run_stat_rules(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     batch_id: UUID,
 ) -> list[AgentIssue]:
     """Run all stat rules for a batch. Returns list of AgentIssue."""

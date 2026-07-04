@@ -40,8 +40,6 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
-import psycopg
-
 from ..engines import (
     ForecastComputation,
     PyramideEngineError,
@@ -76,6 +74,7 @@ from .reconcile import (
     reconcile,
 )
 from .summing import AGGREGATE, SeriesRef, SummingBlock, load_summing_blocks
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +186,7 @@ class HierarchicalRunner:
         self._engine = forecast_engine or PyramideForecastEngine()
 
     def run(
-        self, db: psycopg.Connection, config: HierarchicalRunConfig
+        self, db: DictRowConnection, config: HierarchicalRunConfig
     ) -> HierarchicalRunResult:
         method = self._validate_config(config)
         # Fail loudly BEFORE any forecast/persist work: an invalid
@@ -365,7 +364,7 @@ class HierarchicalRunner:
 
     @staticmethod
     def _load_block(
-        db: psycopg.Connection, config: HierarchicalRunConfig
+        db: DictRowConnection, config: HierarchicalRunConfig
     ) -> SummingBlock:
         blocks = load_summing_blocks(
             db,
@@ -411,7 +410,7 @@ class HierarchicalRunner:
 
     def _build_mint_inputs(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         block: SummingBlock,
         config: HierarchicalRunConfig,
         method: str,
@@ -491,7 +490,7 @@ class HierarchicalRunner:
 
     def _persist(
         self,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         block: SummingBlock,
         recon: ReconciledBlock,
         recon_refs: Sequence[tuple[int, SeriesRef]],

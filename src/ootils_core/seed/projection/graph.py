@@ -34,8 +34,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.master.items import ItemSet
 from ootils_core.seed.master.locations import LocationSet
 from ootils_core.seed.transactional.nodes import BASELINE_SCENARIO_ID
@@ -67,7 +66,7 @@ class SeededGraph:
 
 
 def seed_projection_graph(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     item_set: ItemSet,
     loc_set: LocationSet,
     horizon_days: int = 90,

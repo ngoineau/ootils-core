@@ -27,8 +27,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemRecord, ItemSet
 
@@ -166,7 +165,7 @@ def generate_boms(profile: Profile, item_set: ItemSet) -> BomSet:
     return BomSet(headers=headers, lines=lines)
 
 
-def insert_boms(conn: psycopg.Connection, bom_set: BomSet) -> tuple[int, int]:
+def insert_boms(conn: DictRowConnection, bom_set: BomSet) -> tuple[int, int]:
     """Bulk-insert headers then lines via UNNEST. Returns (n_headers, n_lines)."""
     # Headers
     h_ids = [h.bom_id for h in bom_set.headers]

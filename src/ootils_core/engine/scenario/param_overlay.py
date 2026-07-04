@@ -33,8 +33,9 @@ from decimal import Decimal, InvalidOperation
 from typing import NamedTuple, Optional
 from uuid import UUID, uuid4
 
-import psycopg
 from psycopg.errors import ForeignKeyViolation
+
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ def _validate_value(field_name: str, value: str) -> str:
         return normalized
 
 
-def _fetch_scenario(conn: psycopg.Connection, scenario_id: UUID) -> dict:
+def _fetch_scenario(conn: DictRowConnection, scenario_id: UUID) -> dict:
     """Return the scenario row or raise ParamOverlayError if it doesn't exist.
 
     Shared by set_param_override and clear_param_override so both ends of
@@ -618,7 +619,7 @@ def resolved_field_lateral_sql(field: str, base_alias: str, out_col: str) -> str
 
 
 def _assert_current_planning_params_row_exists(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     item_id: UUID,
     location_id: Optional[UUID],
 ) -> None:
@@ -681,7 +682,7 @@ def _assert_current_planning_params_row_exists(
 
 
 def set_param_override(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     scenario_id: UUID,
     item_id: UUID,
     field_name: str,
@@ -801,7 +802,7 @@ def set_param_override(
 
 
 def clear_param_override(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     scenario_id: UUID,
     item_id: UUID,
     field_name: str,
@@ -849,7 +850,7 @@ def clear_param_override(
     return deleted
 
 
-def list_param_overrides(conn: psycopg.Connection, scenario_id: UUID) -> list[dict]:
+def list_param_overrides(conn: DictRowConnection, scenario_id: UUID) -> list[dict]:
     """Return every planning-param override for a scenario, for audit display."""
     rows = conn.execute(
         """

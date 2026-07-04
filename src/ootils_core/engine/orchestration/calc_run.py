@@ -13,8 +13,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.models import CalcRun, Scenario
 
 
@@ -29,7 +28,7 @@ class CalcRunManager:
         self,
         scenario_id: UUID,
         event_ids: list[UUID],
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> Optional[CalcRun]:
         """
         Try to acquire an advisory lock for this scenario and start a calc run.
@@ -109,7 +108,7 @@ class CalcRunManager:
         self,
         run: CalcRun,
         scenario: Scenario,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """
         Mark a calc run as completed or completed_stale.
@@ -165,7 +164,7 @@ class CalcRunManager:
         self,
         run: CalcRun,
         error: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Mark a calc run as failed with an error message.
 
@@ -207,7 +206,7 @@ class CalcRunManager:
         except Exception:
             pass
 
-    def recover_pending_runs(self, db: psycopg.Connection) -> list[CalcRun]:
+    def recover_pending_runs(self, db: DictRowConnection) -> list[CalcRun]:
         """
         On startup: transition all 'running' runs to 'interrupted'.
         Return all replayable runs (pending + interrupted) so the engine can retry them.

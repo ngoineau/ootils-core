@@ -9,14 +9,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-import psycopg
-
 from .phase_transition import run_phase_transition
 from .capacity_aggregate import run_capacity_aggregate
+from ootils_core.db.types import DictRowConnection
 
 
 def run_ghost(
-    db: psycopg.Connection,
+    db: DictRowConnection,
     ghost_id: str,
     scenario_id: str,
     from_date: date,

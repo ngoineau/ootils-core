@@ -13,12 +13,12 @@ from datetime import date, timedelta
 from typing import Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ router = APIRouter(tags=["calendars"])
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_location(db: psycopg.Connection, external_id: str) -> Optional[UUID]:
+def _resolve_location(db: DictRowConnection, external_id: str) -> Optional[UUID]:
     """Return location_id for external_id, or None if not found."""
     row = db.execute(
         "SELECT location_id FROM locations WHERE external_id = %s",
@@ -120,7 +120,7 @@ class WorkingDaysResponse(BaseModel):
 @router.post("/v1/ingest/calendars", response_model=IngestCalendarsResponse, summary="Import calendar", description="Import non-working days for a location. Upsert per (location × date). Missing entry = working day by default.")
 def ingest_calendars(
     body: IngestCalendarsRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> IngestCalendarsResponse:
     """
@@ -223,7 +223,7 @@ def get_calendars(
     from_date: Optional[date] = Query(default=None),
     to_date: Optional[date] = Query(default=None),
     working_only: bool = Query(default=False),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> GetCalendarsResponse:
     """
@@ -291,7 +291,7 @@ def get_calendars(
 @router.post("/v1/calendars/working-days", response_model=WorkingDaysResponse, summary="Compute working days", description="Return the date resulting from adding N working days to a start date, respecting the location calendar.")
 def compute_working_days(
     body: WorkingDaysRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> WorkingDaysResponse:
     """

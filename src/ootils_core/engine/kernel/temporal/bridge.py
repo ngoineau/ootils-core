@@ -18,8 +18,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import Node, NodeTypeTemporalPolicy
 
@@ -130,7 +129,7 @@ class TemporalBridge:
     def get_policy(
         self,
         node_type: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> NodeTypeTemporalPolicy:
         """
         Load the NodeTypeTemporalPolicy for a node type from node_type_policies.
@@ -173,7 +172,7 @@ class TemporalBridge:
         self,
         series_id: UUID,
         target_grain: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> list[AggregatedBucket]:
         """
         Aggregate the PI nodes in a projection series to a coarser grain.
@@ -256,7 +255,7 @@ class TemporalBridge:
         series_id: UUID,
         source_grain: str,
         target_grain: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         distribution: str = "FLAT",
     ) -> list[AggregatedBucket]:
         """
@@ -362,7 +361,7 @@ class TemporalBridge:
     def _load_series_nodes(
         self,
         series_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> list[Node]:
         """Load all active PI nodes for a series, ordered by bucket_sequence."""
         store = GraphStore(db)

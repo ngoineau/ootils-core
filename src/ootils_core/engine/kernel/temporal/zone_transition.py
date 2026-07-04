@@ -19,8 +19,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.models import Node
@@ -93,7 +92,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> dict[str, bool]:
         """
         Execute the applicable zone transition(s) for a series on as_of_date.
@@ -186,7 +185,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> bool:
         """
@@ -258,7 +257,7 @@ class ZoneTransitionEngine:
         series_id: UUID,
         scenario_id: UUID,
         as_of_date: date,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> bool:
         """
@@ -332,7 +331,7 @@ class ZoneTransitionEngine:
         source_node: Node,
         scenario_id: UUID,
         series_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> list[Node]:
         """
@@ -410,7 +409,7 @@ class ZoneTransitionEngine:
         source_node: Node,
         scenario_id: UUID,
         series_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> list[Node]:
         """
@@ -491,7 +490,7 @@ class ZoneTransitionEngine:
     def _is_transition_done(
         self,
         idempotency_key: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> bool:
         """Return True if a completed transition run exists for this idempotency_key."""
         row = db.execute(
@@ -510,7 +509,7 @@ class ZoneTransitionEngine:
         job_type: str,
         transition_date: date,
         idempotency_key: str,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> UUID:
         """
         Insert a zone_transition_runs record in 'running' status.
@@ -543,7 +542,7 @@ class ZoneTransitionEngine:
         run_id: UUID,
         series_total: int,
         series_done: int,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Mark a zone_transition_runs record as completed."""
         db.execute(
@@ -561,7 +560,7 @@ class ZoneTransitionEngine:
     def _fail_transition_run(
         self,
         run_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> None:
         """Mark a zone_transition_runs record as failed."""
         db.execute(
@@ -578,7 +577,7 @@ class ZoneTransitionEngine:
     # Advisory lock helpers
     # ------------------------------------------------------------------
 
-    def _try_acquire_lock(self, db: psycopg.Connection) -> bool:
+    def _try_acquire_lock(self, db: DictRowConnection) -> bool:
         """
         Try to acquire the zone_transition global advisory lock.
         Returns True if acquired, False if already held.
@@ -589,7 +588,7 @@ class ZoneTransitionEngine:
         ).fetchone()
         return bool(row["locked"]) if row else False
 
-    def _release_lock(self, db: psycopg.Connection) -> None:
+    def _release_lock(self, db: DictRowConnection) -> None:
         """Release the zone_transition global advisory lock."""
         db.execute(
             "SELECT pg_advisory_unlock(hashtext(%s))",
@@ -606,7 +605,7 @@ def _rewire_edges(
     source_node: "Node",
     new_nodes: list["Node"],
     scenario_id: UUID,
-    db: psycopg.Connection,
+    db: DictRowConnection,
     store: "GraphStore",
 ) -> None:
     """

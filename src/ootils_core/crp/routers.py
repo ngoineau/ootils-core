@@ -13,13 +13,13 @@ from datetime import date, timedelta
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Path
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
 from ootils_core.crp.engine import CRPEngine
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class CRPOverloadsResponse(BaseModel):
 )
 async def calculate_crp(
     body: CRPCalculateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPCalculateResponse:
     """
@@ -231,7 +231,7 @@ async def calculate_crp(
 async def get_load_profile(
     work_center_id: UUID = Path(..., description="Work center UUID"),
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> LoadProfileOut:
     """
@@ -306,7 +306,7 @@ async def get_load_profile(
 async def get_overloads(
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
     work_center_ids: Optional[str] = Query(None, description="Comma-separated list of work center IDs to filter"),
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPOverloadsResponse:
     """
@@ -424,7 +424,7 @@ class CRPSuggestResolutionsResponse(BaseModel):
 )
 async def suggest_resolutions(
     body: CRPSuggestResolutionsRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPSuggestResolutionsResponse:
     """

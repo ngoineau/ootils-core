@@ -7,12 +7,12 @@ import logging
 from typing import Literal, Optional
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.manager import ScenarioManager, _ALLOWED_FIELDS
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class SimulateResponse(BaseModel):
 @router.post("", response_model=SimulateResponse, status_code=status.HTTP_201_CREATED)
 def create_simulation(
     body: SimulateRequest,
-    db: psycopg.Connection = Depends(get_db),
+    db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> SimulateResponse:
     """Create a new scenario with overrides and compute the delta vs base.

@@ -25,8 +25,7 @@ from datetime import date as _date_type
 from decimal import Decimal
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel._clock import Clock, SystemClock
 from ootils_core.engine.kernel._ids import deterministic_uuid
 
@@ -61,7 +60,7 @@ class AllocationEngine:
     def allocate(
         self,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> AllocationResult:
         """
         Run a full allocation pass for *scenario_id*.
@@ -141,7 +140,7 @@ class AllocationEngine:
     def get_demand_nodes(
         self,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
     ) -> list[Node]:
         """
         Fetch all active demand nodes for *scenario_id* and sort them by:
@@ -191,7 +190,7 @@ class AllocationEngine:
         self,
         demand_node: Node,
         scenario_id: UUID,
-        db: psycopg.Connection,
+        db: DictRowConnection,
         store: GraphStore,
     ) -> tuple[Decimal, int, int]:
         """

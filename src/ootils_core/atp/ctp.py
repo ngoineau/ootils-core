@@ -15,11 +15,10 @@ from decimal import Decimal
 from typing import List, Optional, Tuple, Dict, Any
 from uuid import UUID
 
-import psycopg
-
 from ootils_core.atp.engine import ATPEngine
 from ootils_core.atp.models import ATPResult, ATPConfig
 from ootils_core.constants import BASELINE_SCENARIO_ID
+from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ class CTPEngine:
     4. Returns combined result with capacity feasibility
     """
     
-    def __init__(self, db_conn: Optional[psycopg.Connection] = None, config: Optional[ATPConfig] = None):
+    def __init__(self, db_conn: Optional[DictRowConnection] = None, config: Optional[ATPConfig] = None):
         """
         Initialize the CTP engine.
         
@@ -119,12 +118,12 @@ class CTPEngine:
         self._atp_engine = ATPEngine(db_conn=db_conn, config=config)
     
     @property
-    def connection(self) -> Optional[psycopg.Connection]:
+    def connection(self) -> Optional[DictRowConnection]:
         """Get the database connection."""
         return self._conn
     
     @connection.setter
-    def connection(self, conn: psycopg.Connection):
+    def connection(self, conn: DictRowConnection):
         """Set the database connection."""
         self._conn = conn
         self._atp_engine.connection = conn

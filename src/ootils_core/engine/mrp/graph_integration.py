@@ -19,8 +19,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.gross_to_net import BucketRecord
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ class GraphIntegration:
       picks up downstream effects.
     """
 
-    def __init__(self, db: psycopg.Connection, scenario_id: UUID):
+    def __init__(self, db: DictRowConnection, scenario_id: UUID):
         self.db = db
         self.scenario_id = scenario_id
 

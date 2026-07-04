@@ -34,8 +34,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.seed.config import Profile
 from ootils_core.seed.master.items import ItemRecord, ItemSet
 from ootils_core.seed.master.locations import LocationRecord, LocationSet
@@ -219,7 +218,7 @@ def generate_planning_params(
 
 
 def insert_planning_params(
-    conn: psycopg.Connection,
+    conn: DictRowConnection,
     pp_set: PlanningParamSet,
 ) -> int:
     """Bulk-insert item_planning_params via UNNEST."""

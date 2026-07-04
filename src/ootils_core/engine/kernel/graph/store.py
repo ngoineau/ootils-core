@@ -12,8 +12,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-import psycopg
-
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel._clock import Clock, SystemClock
 from ootils_core.engine.kernel._ids import deterministic_uuid
 from ootils_core.models import (
@@ -33,7 +32,7 @@ class GraphStore:
     The store does NOT manage transactions — callers own commit/rollback.
     """
 
-    def __init__(self, conn: psycopg.Connection, clock: Clock | None = None) -> None:
+    def __init__(self, conn: DictRowConnection, clock: Clock | None = None) -> None:
         self._conn = conn
         self._clock = clock or SystemClock()
 
