@@ -9,6 +9,8 @@ import datetime as _dt
 import math
 from collections import defaultdict
 
+from psycopg.rows import tuple_row
+
 from ootils_core.engine.mrp.core import (
     BASELINE,
     FIRM_RECEIPT_TYPES,
@@ -32,7 +34,12 @@ def _m(cur, sql, params=None):
 
 
 def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningData:
-    cur = conn.cursor()
+    # All SQL below reads rows positionally (r[0], r[1], ...). Pin the cursor
+    # to tuple rows so this works regardless of the connection's row_factory:
+    # the mrp_core CLIs open tuple-row connections, but a scenario-aware caller
+    # (watchers, API paths per #347) hands us the app's dict_row connection,
+    # under which positional access would raise KeyError: 0.
+    cur = conn.cursor(row_factory=tuple_row)
     b = {"b": scenario}
     horizon_start = cur.execute("SELECT CURRENT_DATE").fetchone()[0]
     d = PlanningData(horizon_start=horizon_start, n_buckets=math.ceil(horizon_days / 7) + 1)
