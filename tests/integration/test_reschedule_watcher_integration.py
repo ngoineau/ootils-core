@@ -89,10 +89,10 @@ def _drafts(dsn, scenario=BASELINE):
 
 
 def _count_recos(dsn, scenario=BASELINE):
-    with psycopg.connect(dsn) as conn:
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM recommendations WHERE agent_name=%s AND scenario_id=%s",
-            (AGENT, str(scenario))).fetchone()[0]
+            (AGENT, str(scenario))).fetchone()["count"]
 
 
 # ---------------------------------------------------------------------------
@@ -128,17 +128,17 @@ def _seed_common(conn, today):
         "INSERT INTO locations (name, location_type, external_id) "
         "VALUES (%s, %s, %s) RETURNING location_id",
         ("Resched Plant", "plant", "LOC-RS"),
-    ).fetchone()[0]
+    ).fetchone()["location_id"]
     sup_id = conn.execute(
         "INSERT INTO suppliers (external_id, name, reliability_score, status) "
         "VALUES (%s, %s, %s, %s) RETURNING supplier_id",
         ("SUP-RS", "Resched Supplier", 0.95, "active"),
-    ).fetchone()[0]
+    ).fetchone()["supplier_id"]
     item_id = conn.execute(
         "INSERT INTO items (external_id, name, item_type, standard_cost, cost_currency) "
         "VALUES (%s, %s, %s, %s, %s) RETURNING item_id",
         ("ITM", "Reschedule Item", "component", 40.0, "EUR"),
-    ).fetchone()[0]
+    ).fetchone()["item_id"]
     conn.execute(
         "INSERT INTO item_planning_params "
         "(item_id, location_id, is_make, lead_time_sourcing_days, "
@@ -192,8 +192,8 @@ def test_emits_one_governed_draft_for_misdated_receipt(migrated_db):
     RESCHEDULE_OUT in `recommendations`, carrying the target node, both dates and
     the mapping-derived level. Never mrp_action_messages."""
     dsn = migrated_db
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        today = conn.execute("SELECT CURRENT_DATE").fetchone()["current_date"]
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn, today)
         # Demand of 100 at week 20; on-hand 0 => need bucket 20. Receipt lands at
@@ -203,7 +203,7 @@ def test_emits_one_governed_draft_for_misdated_receipt(migrated_db):
         _receipt(conn, BASELINE, item_id, loc_id, today, 4, 100)
         node_id = conn.execute(
             "SELECT node_id FROM nodes WHERE node_type='PurchaseOrderSupply' "
-            "AND scenario_id=%s", (BASELINE,)).fetchone()[0]
+            "AND scenario_id=%s", (BASELINE,)).fetchone()["node_id"]
 
     assert _run(dsn) == 0
     rows = _drafts(dsn)
@@ -222,13 +222,16 @@ def test_emits_one_governed_draft_for_misdated_receipt(migrated_db):
 
     # It must NOT have leaked into the legacy action-message table (governed
     # channel is `recommendations`, per the watcher docstring / architect call).
-    with psycopg.connect(dsn) as conn:
+    # NB: migration 021 names the column `message_type` (CHECK IN
+    # 'EXPEDITE','DEFER','CANCEL','RELEASE','RESCHEDULE') — there is no `action`
+    # column on mrp_action_messages.
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
         exists = conn.execute(
-            "SELECT to_regclass('public.mrp_action_messages')").fetchone()[0]
+            "SELECT to_regclass('public.mrp_action_messages')").fetchone()["to_regclass"]
         if exists is not None:
             n = conn.execute(
                 "SELECT COUNT(*) FROM mrp_action_messages "
-                "WHERE action LIKE 'RESCHEDULE%%'").fetchone()[0]
+                "WHERE message_type IN ('RESCHEDULE', 'DEFER', 'CANCEL')").fetchone()["count"]
             assert n == 0, "reschedule watcher must not write mrp_action_messages"
 
 
@@ -242,8 +245,8 @@ def test_rerun_on_unchanged_plan_inserts_zero_new_rows(migrated_db):
     same plan re-derives the SAME deterministic ids; ON CONFLICT DO NOTHING
     makes the second run a no-op. Row count before run 2 == after run 2."""
     dsn = migrated_db
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        today = conn.execute("SELECT CURRENT_DATE").fetchone()["current_date"]
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn, today)
         _onhand(conn, BASELINE, item_id, loc_id, today, 0)
@@ -341,8 +344,8 @@ def test_surplus_receipt_yields_cancel_at_l3(migrated_db):
     (not on the edge), is entirely surplus -> action=CANCEL at decision_level
     L3 (the first watcher-emitted L3), proposed_date NULL."""
     dsn = migrated_db
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        today = conn.execute("SELECT CURRENT_DATE").fetchone()["current_date"]
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn, today)
         # No demand at all; receipt of 50 at week 10 (70 days out, far inside the
@@ -374,20 +377,20 @@ def test_watcher_never_writes_shortages(migrated_db):
     is read-only against it — the shortages row count is unchanged across a run
     that DOES emit reschedule recommendations."""
     dsn = migrated_db
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        today = conn.execute("SELECT CURRENT_DATE").fetchone()["current_date"]
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn, today)
         _onhand(conn, BASELINE, item_id, loc_id, today, 0)
         _demand(conn, BASELINE, item_id, loc_id, today, 20, 100)
         _receipt(conn, BASELINE, item_id, loc_id, today, 4, 100)
-        before = conn.execute("SELECT COUNT(*) FROM shortages").fetchone()[0]
+        before = conn.execute("SELECT COUNT(*) FROM shortages").fetchone()["count"]
 
     assert _run(dsn) == 0
     assert _drafts(dsn), "run must actually emit a reschedule reco (else the test proves nothing)"
 
-    with psycopg.connect(dsn) as conn:
-        after = conn.execute("SELECT COUNT(*) FROM shortages").fetchone()[0]
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
+        after = conn.execute("SELECT COUNT(*) FROM shortages").fetchone()["count"]
     assert after == before == 0, "reschedule watcher must never touch `shortages` (ADR-021)"
 
 
@@ -402,8 +405,8 @@ def test_resolved_draft_is_expired_scoped_to_agent_and_scenario(migrated_db):
     the expiration must touch ONLY this agent's DRAFTs in this scenario (a
     foreign agent's DRAFT on the same scenario is left alone)."""
     dsn = migrated_db
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        today = conn.execute("SELECT CURRENT_DATE").fetchone()["current_date"]
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn, today)
         _onhand(conn, BASELINE, item_id, loc_id, today, 0)
@@ -411,7 +414,7 @@ def test_resolved_draft_is_expired_scoped_to_agent_and_scenario(migrated_db):
         _receipt(conn, BASELINE, item_id, loc_id, today, 4, 100)
         po_node = conn.execute(
             "SELECT node_id FROM nodes WHERE node_type='PurchaseOrderSupply' "
-            "AND scenario_id=%s", (BASELINE,)).fetchone()[0]
+            "AND scenario_id=%s", (BASELINE,)).fetchone()["node_id"]
 
     assert _run(dsn) == 0
     run1_drafts = _drafts(dsn)
@@ -421,11 +424,11 @@ def test_resolved_draft_is_expired_scoped_to_agent_and_scenario(migrated_db):
     # Seed a FOREIGN agent's DRAFT on the same scenario: the expiration must not
     # touch it (scoped to agent_name + scenario_id). Reuse the run1 agent_run_id
     # FK target so the row is valid.
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
         foreign_run = conn.execute(
             "INSERT INTO agent_runs (agent_name, scenario_id, status) "
             "VALUES ('other_watcher', %s, 'COMPLETED') RETURNING agent_run_id",
-            (BASELINE,)).fetchone()[0]
+            (BASELINE,)).fetchone()["agent_run_id"]
         conn.execute(
             "INSERT INTO recommendations "
             "(agent_name, agent_run_id, scenario_id, item_id, item_external_id, "
