@@ -23,6 +23,8 @@ from typing import List, Optional, Tuple
 
 import psycopg
 
+from ootils_core.engine.scenario.param_overlay import resolved_params_sql
+
 logger = logging.getLogger(__name__)
 
 
@@ -437,7 +439,7 @@ class LotSizingEngine:
                 )
 
     def get_planning_params(
-        self, item_id, location_id=None
+        self, item_id, location_id=None, scenario_id=None
     ) -> dict:
         """
         Load planning params for an item/location from DB.
@@ -446,35 +448,73 @@ class LotSizingEngine:
         - order_multiple → order_multiple_qty
         - reorder_point_qty (for MIN_MAX)
         - economic_order_qty, lot_size_poq_periods (added by migration 021)
+
+        Scenario param overlay (ADR-025, chantier #347 PR2): composes on
+        resolved_params_sql() so a scenario-scoped override on any of the 15
+        whitelisted fields is visible here. scenario_id=None (default,
+        matching every current call — this method has no production caller
+        yet; see TODO(#347-PR4) below) resolves to baseline-identical values.
+
+        order_multiple_qty legacy fallback: COALESCE(rp.order_multiple_qty,
+        base.order_multiple) is a legacy COLUMN fallback (pre-021 column
+        without the `_qty` suffix, never added to the overlay whitelist —
+        migration 060 decision), not a second scenario resolution. This
+        fallback predates #347 in this method and is kept verbatim for
+        baseline parity. It is deliberately NOT mirrored into
+        mrp_apics_engine._batch_load_planning_params (whose pre-PR2 query
+        selected order_multiple_qty raw) — the two engines' column choice
+        diverges by design.
+
+        reorder_point_qty, planning_horizon_days: not in ALLOWED_PARAM_FIELDS
+        (reorder_point_qty would change graph topology, out of scope for a
+        purely parametric overlay per ADR-025; planning_horizon_days is
+        simply not part of the V1 whitelist) — read straight off the base
+        row, unresolved, same as every other non-whitelisted column in this
+        module's siblings.
+
+        lead_time_total_days: GENERATED column on the base table, not itself
+        whitelisted (only its 3 components are) — recomputed as
+        COALESCE(component,0) summed, byte-for-byte the base column's own
+        generation expression (a NULL component must not NULL the total).
+
+        TODO(#347-PR4): this method has no caller today (calculate_lot_size
+        is what mrp_apics_engine.py actually wires) — scenario_id is threaded
+        for when a caller appears, not because one exists yet.
         """
-        loc_filter = "AND location_id = %s" if location_id else ""
-        params: list = [item_id]
+        resolved_ipp_sql = resolved_params_sql("ipp")
+        loc_filter = "AND rp.location_id = %(location_id)s" if location_id else ""
+        query_params: dict = {
+            "scenario_id": scenario_id,
+            "item_id": item_id,
+        }
         if location_id:
-            params.append(location_id)
+            query_params["location_id"] = location_id
 
         row = self.db.execute(f"""
             SELECT
-                lot_size_rule,
-                min_order_qty,
-                max_order_qty,
-                reorder_point_qty,
-                safety_stock_qty,
-                COALESCE(order_multiple_qty, order_multiple) AS order_multiple,
-                lead_time_total_days,
-                frozen_time_fence_days,
-                slashed_time_fence_days,
-                forecast_consumption_strategy,
-                consumption_window_days,
-                economic_order_qty,
-                lot_size_poq_periods,
-                planning_horizon_days
-            FROM item_planning_params
-            WHERE item_id = %s
+                rp.lot_size_rule,
+                rp.min_order_qty,
+                rp.max_order_qty,
+                base.reorder_point_qty,
+                rp.safety_stock_qty,
+                COALESCE(rp.order_multiple_qty, base.order_multiple) AS order_multiple,
+                (COALESCE(rp.lead_time_sourcing_days, 0)
+                    + COALESCE(rp.lead_time_manufacturing_days, 0)
+                    + COALESCE(rp.lead_time_transit_days, 0)) AS lead_time_total_days,
+                rp.frozen_time_fence_days,
+                rp.slashed_time_fence_days,
+                rp.forecast_consumption_strategy,
+                rp.consumption_window_days,
+                rp.economic_order_qty,
+                rp.lot_size_poq_periods,
+                base.planning_horizon_days
+            FROM ({resolved_ipp_sql}) rp
+            JOIN item_planning_params base ON base.param_id = rp.param_id
+            WHERE rp.item_id = %(item_id)s
               {loc_filter}
-              AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-            ORDER BY effective_from DESC
+            ORDER BY base.effective_from DESC
             LIMIT 1
-        """, params).fetchone()
+        """, query_params).fetchone()
 
         if row:
             return {

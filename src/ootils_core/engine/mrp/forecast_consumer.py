@@ -30,7 +30,15 @@ from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
+from ootils_core.engine.scenario.param_overlay import resolved_params_sql
+
 logger = logging.getLogger(__name__)
+
+# Mirrors mrp_apics_engine.BASELINE_SCENARIO_ID (not imported directly: that
+# module imports ForecastConsumer, so importing back would cycle). Used only
+# to translate the baseline sentinel UUID into the None the overlay resolver
+# expects for "no override can ever match" — see _get_consumption_params.
+BASELINE_SCENARIO_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 # ─── Strategy Enum ───────────────────────────────────────────────────────────
@@ -569,21 +577,41 @@ class ForecastConsumer:
     def _get_consumption_params(
         self, item_id: UUID, location_id: Optional[UUID]
     ) -> dict:
-        """Get forecast consumption parameters for an item/location."""
-        loc_and = "AND location_id = %s" if location_id else ""
-        params: list = [item_id]
+        """Get forecast consumption parameters for an item/location.
+
+        Scenario param overlay (ADR-025, chantier #347 PR2): composes on
+        resolved_params_sql() so a scenario-scoped override on
+        forecast_consumption_strategy / consumption_window_days is visible
+        here. Threaded via self.scenario_id — already set on every
+        ForecastConsumer instance (baseline default at construction,
+        overwritten to config.scenario_id by MrpApicsEngine.run() before
+        consume_all() is called) — so baseline callers resolve to the
+        overlay's scenario_id=None degeneracy (self.scenario_id is a UUID,
+        never None; the BASELINE_SCENARIO_ID -> None translation happens
+        here, mirroring loader.py / mrp_apics_engine.py's identical
+        baseline-sentinel handling for the same resolver contract).
+        """
+        overlay_scenario_id = (
+            self.scenario_id if self.scenario_id != BASELINE_SCENARIO_ID else None
+        )
+        resolved_ipp_sql = resolved_params_sql("ipp")
+        loc_and = "AND rp.location_id = %(location_id)s" if location_id else ""
+        query_params: dict = {
+            "scenario_id": overlay_scenario_id,
+            "item_id": item_id,
+        }
         if location_id:
-            params.append(location_id)
+            query_params["location_id"] = location_id
 
         row = self.db.execute(f"""
-            SELECT forecast_consumption_strategy, consumption_window_days
-            FROM item_planning_params
-            WHERE item_id = %s
+            SELECT rp.forecast_consumption_strategy, rp.consumption_window_days
+            FROM ({resolved_ipp_sql}) rp
+            JOIN item_planning_params base ON base.param_id = rp.param_id
+            WHERE rp.item_id = %(item_id)s
               {loc_and}
-              AND (effective_to IS NULL OR effective_to = '9999-12-31'::DATE)
-            ORDER BY effective_from DESC
+            ORDER BY base.effective_from DESC
             LIMIT 1
-        """, params).fetchone()
+        """, query_params).fetchone()
 
         if row:
             return {
