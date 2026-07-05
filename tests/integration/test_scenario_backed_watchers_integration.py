@@ -221,6 +221,18 @@ def test_shortage_watcher_recos_are_scenario_backed(seeded_sim_db):
     assert fg_exp["simulated"] is True
     assert fg_exp["override"]["field_name"] == "time_ref"
 
+    # fix/counterfactual-delta-keying: the delta is keyed by business coordinate
+    # (item, location, shortage_date), not the fork's regenerated pi_node_id, so
+    # a shortage UNCHANGED between baseline and fork is reported in NEITHER list
+    # (pre-fix it was double-reported as BOTH new and resolved). Expediting an
+    # existing receipt earlier can only raise or hold projected inventory, so it
+    # never introduces a NEW shortage -> new_shortages is 0. Whether it fully
+    # clears a baseline shortage (resolved>=1) depends on the seeded receipt/need
+    # gap, so we don't assert resolved here — that invariant lives in the unit
+    # tests + the param-overlay identical-fork integration test.
+    assert fg_exp["delta"] is not None
+    assert fg_exp["delta"]["new_shortages"] == 0
+
     fg_new = _sim_block(by_ext["FG-NEW"])
     assert by_ext["FG-NEW"]["action"] == "ORDER_NOW"
     assert fg_new["simulated"] is False

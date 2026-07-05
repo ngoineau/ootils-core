@@ -169,6 +169,7 @@ def _fork_propagate_delta(
     """
     from ootils_core.api.routers.events import _build_propagation_engine
     from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
+    from ootils_core.engine.kernel.shortage import match_shortage_delta
     from ootils_core.engine.kernel.shortage.detector import ShortageDetector
     from ootils_core.engine.orchestration.calc_run import CalcRunManager
 
@@ -177,9 +178,7 @@ def _fork_propagate_delta(
     calc_run = None
     calc_run_finished = False
     try:
-        baseline_shortages = {
-            str(s.pi_node_id): s for s in detector.get_active_shortages(base_id, db)
-        }
+        baseline_shortages = detector.get_active_shortages(base_id, db)
 
         trigger_event_id = uuid4()
         # source='engine': the events CHECK (migration 002) allows
@@ -217,30 +216,20 @@ def _fork_propagate_delta(
         result["calc_run_id"] = str(calc_run.calc_run_id)
         result["nodes_recalculated"] = calc_run.nodes_recalculated or 0
 
-        # KNOWN LIMITATION (pre-existing, shared with api/routers/simulate.py;
-        # tracked separately — do NOT rely on new/resolved for per-node credit):
-        # the delta set-differences by RAW pi_node_id, but a fork deep-copies
-        # nodes with FRESH UUIDs (ScenarioManager regenerates node_id), so a
-        # fork PI never shares an id with its baseline counterpart. Result:
-        # new_shortages lists ALL fork shortages and resolved_shortages ALL
-        # baseline shortages whenever the baseline already had any — over-
-        # reporting both. `net_shortage_change` (the count delta) stays correct,
-        # and it is what governs recommendation direction. Fixing this properly
-        # means keying by (item_id, location_id, shortage_date) across BOTH this
-        # helper and simulate.py, with the #340 watcher tests in scope.
+        # Match fork vs baseline shortages by BUSINESS key
+        # (item_id, location_id, shortage_date), NOT raw pi_node_id: the fork
+        # deep-copies nodes with fresh UUIDs, so baseline and fork ids are
+        # disjoint by construction (match_shortage_delta docstring). This makes
+        # new/resolved honest for the watcher evidence trail (#340) — a fork
+        # identical to the baseline yields new=[] and resolved=[].
         scen_shortages = detector.get_active_shortages(scenario_id, db)
-        scen_ids = {str(s.pi_node_id) for s in scen_shortages}
-        base_ids = set(baseline_shortages)
-        new_ids = scen_ids - base_ids
-        resolved_ids = base_ids - scen_ids
+        new_shortages, resolved_shortages = match_shortage_delta(
+            baseline_shortages, scen_shortages
+        )
         result["delta"] = {
-            "new_shortages": [
-                _shortage_as_dict(s) for s in scen_shortages if str(s.pi_node_id) in new_ids
-            ],
-            "resolved_shortages": [
-                _shortage_as_dict(baseline_shortages[i]) for i in resolved_ids
-            ],
-            "net_shortage_change": len(new_ids) - len(resolved_ids),
+            "new_shortages": [_shortage_as_dict(s) for s in new_shortages],
+            "resolved_shortages": [_shortage_as_dict(s) for s in resolved_shortages],
+            "net_shortage_change": len(scen_shortages) - len(baseline_shortages),
         }
         result["propagation_status"] = "ok"
         result["delta_computed"] = True

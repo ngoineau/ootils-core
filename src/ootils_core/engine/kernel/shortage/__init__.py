@@ -4,6 +4,10 @@ shortage — Shortage detection kernel for Sprint M4.
 Detects inventory shortages from ProjectedInventory nodes with closing_stock < 0,
 computes severity scores, and persists ShortageRecord rows.
 """
+from ootils_core.engine.kernel.shortage.delta import (
+    match_shortage_delta,
+    shortage_key,
+)
 from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 
-__all__ = ["ShortageDetector"]
+__all__ = ["ShortageDetector", "match_shortage_delta", "shortage_key"]
