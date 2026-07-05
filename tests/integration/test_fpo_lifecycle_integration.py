@@ -203,7 +203,9 @@ def test_firm_endpoint_sets_flag_emits_event_and_validates(app_client):
     """POST/DELETE /v1/nodes/{id}/firm flips is_firm, emits one
     node_firm_changed event per call, and rejects a non-PlannedSupply (422) and
     a missing node (404). Auth is required (401 without a bearer token)."""
-    auth = {"Authorization": "Bearer test-token"}
+    # Use the EFFECTIVE token the app was configured with (CI may set its own;
+    # os.environ.setdefault in the app_client fixture only fills a default).
+    auth = {"Authorization": f"Bearer {os.environ['OOTILS_API_TOKEN']}"}
     with psycopg.connect(TEST_DB_URL, autocommit=True, row_factory=dict_row) as conn:
         _reset_graph(conn)
         loc_id, item_id = _seed_common(conn)
