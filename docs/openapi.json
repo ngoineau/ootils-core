@@ -1064,6 +1064,123 @@
         }
       }
     },
+    "/v1/nodes/{node_id}/firm": {
+      "post": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Firm Node",
+        "description": "Firm a PlannedSupply into a Firm Planned Order (is_firm=TRUE, #346).\n\nA firmed PlannedSupply survives the next MRP full-regeneration purge and\nis netted as a closed/committed receipt by both MRP engines — it is no\nlonger re-planned, but stays re-datable by a RESCHEDULE_IN/OUT message.",
+        "operationId": "firm_node_v1_nodes__node_id__firm_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirmResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Unfirm Node",
+        "description": "Un-firm a Firm Planned Order back into an ordinary PlannedSupply\n(is_firm=FALSE, #346).\n\nThe order becomes re-generatable again: the next MRP full-regeneration\npurge will deactivate it and, if its demand is still open, replace it.\n\n`actor` is a query parameter (not a body) — DELETE requests in this\nrepo don't carry a body (see param_overrides.py's\nclear_param_override_endpoint).",
+        "operationId": "unfirm_node_v1_nodes__node_id__firm_delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "title": "Actor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirmResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/ingest/items": {
       "post": {
         "tags": [
@@ -3696,6 +3813,190 @@
         }
       }
     },
+    "/v1/scenarios/{scenario_id}/param-overrides": {
+      "post": {
+        "tags": [
+          "param-overrides"
+        ],
+        "summary": "Set Param Override Endpoint",
+        "description": "Set (upsert) a scenario-scoped planning-param overlay override.\n\nL0 simulation-only write — no Decision Ladder gate, never promoted onto\nbaseline (ADR-025 §5). Refused on the baseline scenario, on a\nnon-whitelisted field, on an out-of-bounds value, or on an item/location\nwith no current planning-params row — all via ParamOverlayError -> 422.",
+        "operationId": "set_param_override_endpoint_v1_scenarios__scenario_id__param_overrides_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Scenario Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParamOverrideIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParamOverrideOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "param-overrides"
+        ],
+        "summary": "List Param Overrides Endpoint",
+        "description": "List every planning-param overlay override for a scenario.\n\nA baseline scenario_id (or any scenario with no overrides) returns 200\nwith an empty list — a baseline can never carry an override\n(set_param_override refuses it), so this is a legitimate empty result,\nnot an error.",
+        "operationId": "list_param_overrides_endpoint_v1_scenarios__scenario_id__param_overrides_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Scenario Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParamOverridesListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scenarios/{scenario_id}/param-overrides/{field_name}": {
+      "delete": {
+        "tags": [
+          "param-overrides"
+        ],
+        "summary": "Clear Param Override Endpoint",
+        "description": "Clear a scenario-scoped planning-param overlay override.\n\nIdempotent: a missing override is a no-op (still 204) — only an unknown\nfield_name or an unknown scenario_id raises (422). No baseline special\ncase: clearing on baseline is simply the no-op path (baseline can never\nhold an override).",
+        "operationId": "clear_param_override_endpoint_v1_scenarios__scenario_id__param_overrides__field_name__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Scenario Id"
+            }
+          },
+          {
+            "name": "field_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Field Name"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "location_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Location Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/calc/run": {
       "post": {
         "tags": [
@@ -5474,15 +5775,56 @@
         "summary": "Calculate CRP",
         "description": "Perform Capacity Requirements Planning calculation.\n\nExplodes planned orders into operations via routings, computes load per work center per day using backward scheduling, and detects overloads (infinite loading).",
         "operationId": "calculate_crp_v1_crp_calculate_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CRPCalculateRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -5505,12 +5847,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/v1/crp/load-profile/{work_center_id}": {
@@ -5552,6 +5889,40 @@
               "title": "Horizon Days"
             },
             "description": "Planning horizon in days"
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
           }
         ],
         "responses": {
@@ -5623,6 +5994,40 @@
               "title": "Work Center Ids"
             },
             "description": "Comma-separated list of work center IDs to filter"
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
           }
         ],
         "responses": {
@@ -5657,15 +6062,56 @@
         "summary": "Suggest Resolutions for Overloads",
         "description": "Analyze detected overloads and suggest order date shifts to resolve them.\n\nStrategy: For each overload, identifies planned orders contributing to the overload and suggests shifting them to the next available capacity slot.",
         "operationId": "suggest_resolutions_v1_crp_suggest_resolutions_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CRPSuggestResolutionsRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -5688,12 +6134,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     }
   },
@@ -6830,23 +7271,12 @@
             ],
             "title": "Work Center Ids",
             "description": "Optional list of work center IDs to include"
-          },
-          "scenario_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scenario Id",
-            "description": "Optional scenario ID to filter planned orders"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "CRPCalculateRequest",
-        "description": "Request for CRP calculation."
+        "description": "Request for CRP calculation.\n\nscenario_id is NOT a body field: it is resolved from the ``scenario_id`` query\nparam or the ``X-Scenario-ID`` header (see resolve_scenario_id), consistent with\nATP/RCCP. Defaults to baseline."
       },
       "CRPCalculateResponse": {
         "properties": {
@@ -8962,6 +9392,73 @@
           "components_with_shortage"
         ],
         "title": "ExplodeResponse"
+      },
+      "FirmRequest": {
+        "properties": {
+          "actor": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Actor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "actor"
+        ],
+        "title": "FirmRequest",
+        "description": "Body of POST /v1/nodes/{node_id}/firm.\n\nIdentity of the actor. The current auth layer doesn't extract subjects\nfrom the bearer token (single shared token, see api/auth.py), so callers\npass it explicitly for now — same carve-out as staging.py's\napproved_by/rejected_by."
+      },
+      "FirmResponse": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Node Id"
+          },
+          "is_firm": {
+            "type": "boolean",
+            "title": "Is Firm"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "node_id",
+          "is_firm",
+          "scenario_id",
+          "item_id",
+          "location_id"
+        ],
+        "title": "FirmResponse"
       },
       "ForecastAdjustRequest": {
         "properties": {
@@ -11513,6 +12010,137 @@
           "new_value"
         ],
         "title": "OverrideIn"
+      },
+      "ParamOverrideIn": {
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Item Id"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "field_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Field Name"
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Value"
+          },
+          "applied_by": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Applied By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_id",
+          "field_name",
+          "value",
+          "applied_by"
+        ],
+        "title": "ParamOverrideIn",
+        "description": "Body of POST .../param-overrides — one scenario-scoped field override."
+      },
+      "ParamOverrideOut": {
+        "properties": {
+          "override_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Override Id"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Item Id"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "field_name": {
+            "type": "string",
+            "title": "Field Name"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "applied_at": {
+            "type": "string",
+            "title": "Applied At"
+          },
+          "applied_by": {
+            "type": "string",
+            "title": "Applied By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "override_id",
+          "scenario_id",
+          "item_id",
+          "field_name",
+          "value",
+          "applied_at",
+          "applied_by"
+        ],
+        "title": "ParamOverrideOut"
+      },
+      "ParamOverridesListResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/ParamOverrideOut"
+            },
+            "type": "array",
+            "title": "Overrides"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "overrides",
+          "total"
+        ],
+        "title": "ParamOverridesListResponse"
       },
       "PeggingNode": {
         "properties": {

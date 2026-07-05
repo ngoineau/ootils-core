@@ -14,10 +14,10 @@ from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ootils_core.api.auth import require_auth
-from ootils_core.api.dependencies import get_db
+from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.crp.engine import CRPEngine
 from ootils_core.db.types import DictRowConnection
 
@@ -31,10 +31,22 @@ router = APIRouter(prefix="/v1/crp", tags=["crp"])
 # ─────────────────────────────────────────────────────────────
 
 class CRPCalculateRequest(BaseModel):
-    """Request for CRP calculation."""
+    """Request for CRP calculation.
+
+    scenario_id is NOT a body field: it is resolved from the ``scenario_id`` query
+    param or the ``X-Scenario-ID`` header (see resolve_scenario_id), consistent with
+    ATP/RCCP. Defaults to baseline.
+    """
+    # extra="forbid": scenario_id used to be a body field and moved to
+    # query/header. Without this, an old client (or one following a stale
+    # openapi.json) POSTing scenario_id in the body would have it silently
+    # dropped by Pydantic's default extra="ignore" — landing on baseline with
+    # a 200 OK, the exact silent-fallback bug this module was fixed to avoid.
+    # A stray body field must fail loudly (422), not disappear.
+    model_config = ConfigDict(extra="forbid")
+
     horizon_days: int = Field(default=90, ge=1, le=365, description="Planning horizon in days")
     work_center_ids: Optional[List[str]] = Field(None, description="Optional list of work center IDs to include")
-    scenario_id: Optional[str] = Field(None, description="Optional scenario ID to filter planned orders")
 
 
 class LoadBucketOut(BaseModel):
@@ -106,16 +118,17 @@ class CRPOverloadsResponse(BaseModel):
 )
 async def calculate_crp(
     body: CRPCalculateRequest,
+    scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPCalculateResponse:
     """
     Calculate CRP load profiles and detect overloads.
-    
+
     - **horizon_days**: Planning horizon in days (default: 90, max: 365)
     - **work_center_ids**: Optional list of work center IDs to include (default: all active)
-    - **scenario_id**: Optional scenario ID to filter planned orders
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **calculation_id**: Unique identifier for this calculation
     - **horizon_start/end**: Date range of the planning horizon
@@ -139,25 +152,14 @@ async def calculate_crp(
                     detail=f"Invalid work center ID format: {wc_id}",
                 )
     
-    # Convert scenario ID from string to UUID
-    scenario_uuid: Optional[UUID] = None
-    if body.scenario_id:
-        try:
-            scenario_uuid = UUID(body.scenario_id)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid scenario ID format: {body.scenario_id}",
-            )
-    
     # Initialize CRP engine and calculate
     engine = CRPEngine(db_conn=db)
-    
+
     try:
         result = engine.calculate(
             horizon_days=body.horizon_days,
             work_centers=work_center_uuids,
-            scenario_id=scenario_uuid,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("CRP calculation failed: %s", e)
@@ -231,15 +233,17 @@ async def calculate_crp(
 async def get_load_profile(
     work_center_id: UUID = Path(..., description="Work center UUID"),
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
+    scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> LoadProfileOut:
     """
     Get load profile for a specific work center.
-    
+
     - **work_center_id**: UUID of the work center
     - **horizon_days**: Planning horizon in days (default: 90)
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **work_center_id**: UUID of the work center
     - **work_center_code**: Human-readable code
@@ -249,11 +253,12 @@ async def get_load_profile(
     - **overload_count**: Number of days with overloads
     """
     engine = CRPEngine(db_conn=db)
-    
+
     try:
         profile = engine.get_load_profile(
             work_center_id=work_center_id,
             horizon_days=horizon_days,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("Failed to get load profile: %s", e)
@@ -306,15 +311,17 @@ async def get_load_profile(
 async def get_overloads(
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
     work_center_ids: Optional[str] = Query(None, description="Comma-separated list of work center IDs to filter"),
+    scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPOverloadsResponse:
     """
     List all detected overloads.
-    
+
     - **horizon_days**: Planning horizon in days (default: 90)
     - **work_center_ids**: Optional comma-separated list of work center IDs to filter
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **horizon_start/end**: Date range of the planning horizon
     - **total_overloads**: Total number of overloads
@@ -343,6 +350,7 @@ async def get_overloads(
         overloads = engine.get_overloads(
             horizon_days=horizon_days,
             work_centers=work_center_uuids,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("Failed to get overloads: %s", e)
@@ -424,16 +432,18 @@ class CRPSuggestResolutionsResponse(BaseModel):
 )
 async def suggest_resolutions(
     body: CRPSuggestResolutionsRequest,
+    scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
     _token: str = Depends(require_auth),
 ) -> CRPSuggestResolutionsResponse:
     """
     Suggest resolutions for CRP overloads.
-    
+
     - **horizon_days**: Planning horizon in days (default: 90)
     - **work_center_ids**: Optional list of work center IDs to analyze
     - **max_shift_days**: Maximum days to suggest shifting (default: 14)
-    
+    - **scenario_id**: Scenario to read from (query param or X-Scenario-ID header; default: baseline)
+
     Returns:
     - **horizon_start/end**: Date range of the planning horizon
     - **total_suggestions**: Number of resolution suggestions
@@ -459,6 +469,7 @@ async def suggest_resolutions(
             horizon_days=body.horizon_days,
             work_centers=work_center_uuids,
             max_shift_days=body.max_shift_days,
+            scenario_id=scenario_id,
         )
     except Exception as e:
         logger.exception("Failed to suggest resolutions: %s", e)

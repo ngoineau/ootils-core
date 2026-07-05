@@ -1,17 +1,24 @@
 # Scalability Analysis — Ootils Core
 
-> **Status:** Current system is validated for demo and pilot scale. SMB (500 items) requires Tier 1 fixes. Mid-market (5K+ items) requires architectural investment.
+> **Status:** Demo and pilot scale are validated interactively. **Batch** planning is measured as viable up to the mid-market lower edge (SMB annual ≈ 182 K nodes in ~38 s, **post-tune**; 2 000 items × 365 d ≈ 730 K nodes in ~3.8 min, **post-Tier-2 but pre-tune** — a post-tune run would be faster) after the Tier 1 + Tier 2 fixes below — all on a **2-core VM** (`scripts/bench_propagation.py`, 2026-05-23). Two caveats before reading the table: those numbers are **batch** wall-clock, not proof of **interactive** latency; and the Tier 3 SQL-window spike that would push further is a prototype, **not merged** (see "What the spike does NOT cover"). Enterprise (5K+ items) still requires architectural investment.
 
 ---
 
 ## Volume projections
 
+The **PI Nodes** column is the full-network projection (all buckets × locations).
+The **measured** propagation figures below (§ "Measured perf landscape") run on a
+narrower annual slice — e.g. SMB is benched at 500 items × 365 d ≈ 182 K nodes,
+not the ~600 K full-network figure — so read the two columns as different axes.
+All measurements are on a **2-core VM**; nothing here is proven at interactive
+latency, and the Tier 3 SQL-window path is **not merged**.
+
 | Size | Items | Locations | PI Nodes | Edges | Status |
 |------|-------|-----------|----------|-------|--------|
-| Demo | 2 | 2 | ~400 | ~800 | ✅ OK |
-| Pilot (50 items) | 50 | 5 | ~30K | ~75K | ✅ OK with latency |
-| SMB (500 items) | 500 | 10 | ~600K | ~1.5M | ⚠️ **CRITICAL — Tier 1 required** |
-| Mid-market (5K items) | 5,000 | 50 | ~50M | ~150M | 🚫 **IMPOSSIBLE — Tier 2 required** |
+| Demo | 2 | 2 | ~400 | ~800 | ✅ OK (interactive) |
+| Pilot (50 items) | 50 | 5 | ~30K | ~75K | ✅ OK (interactive, with latency) |
+| SMB (500 items) | 500 | 10 | ~600K | ~1.5M | ✅ **Viable in batch** (measured: 182 K nodes / ~38 s, post-Tier-2 + post-tune) · ⚠️ interactive unproven |
+| Mid-market (5K items) | 5,000 | 50 | ~50M | ~150M | ⚠️ **Batch-viable only up to ~2 000 items** (measured: 730 K nodes / ~3.8 min, post-Tier-2 pre-tune — not yet re-benched post-tune); 5 K items **over a 2-year horizon** ≈ 3.6 M nodes / ~19 min is **extrapolated**, needs Tier 3 (unmerged) |
 | Enterprise (50K items) | 50,000 | 200 | ~3B | ~10B | 🚫 Not feasible without architectural overhaul |
 
 ---

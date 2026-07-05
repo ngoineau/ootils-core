@@ -184,10 +184,13 @@ def test_phase1_forecast_mps_crp_atp_rest_e2e(api_client, auth, seeded_db):
         )
         conn.commit()
 
+    # scenario_id is not a CRPCalculateRequest body field (query param /
+    # X-Scenario-ID header only; the model now forbids unknown body keys) —
+    # this test runs on baseline, the default.
     crp_resp = api_client.post(
         "/v1/crp/calculate",
         headers=auth,
-        json={"horizon_days": 30, "scenario_id": BASELINE_SCENARIO_ID},
+        json={"horizon_days": 30},
     )
     assert crp_resp.status_code == 200, crp_resp.text
     crp = crp_resp.json()

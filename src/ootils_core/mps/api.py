@@ -997,7 +997,11 @@ async def promote_to_mrp(
     if body.run_crp and not body.dry_run:
         try:
             from ootils_core.crp.engine import CRPEngine
-            
+
+            # promote_to_mrp writes planned_supply on baseline (the INSERT does not
+            # carry the MPS scenario_id), so CRP reads baseline — reading the MPS
+            # fork here would find zero promoted orders. CRP now always scenario-
+            # scopes its planned-order read; baseline is the explicit default.
             crp_engine = CRPEngine(db_conn=db)
             crp_result = crp_engine.calculate(horizon_days=body.crp_horizon_days)
             
