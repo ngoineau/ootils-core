@@ -247,25 +247,28 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
             _spread_period(qty, tref, end, horizon_start, horizon_end, d.n_buckets, d.fc_b[item])
     # Firm receipts loaded from ONE scan, feeding two structures (#346):
     #   * d.sched_b — the weekly-bucket AGGREGATE the projection/cascade consumes.
-    #     GOLDEN-MASTER: only the committed order types (PO/WO/Transfer) contribute
-    #     here, exactly as before — the sched_b aggregate is STRICTLY UNCHANGED.
     #   * d.sched_orders — the re-datable receipts keeping per-order IDENTITY
     #     (node_id/date/qty/is_firm/node_type) so reschedule_signals can re-date
     #     THIS order.
     #
-    # The two structures have DIFFERENT membership on purpose:
-    #   sched_orders = committed receipts (PO/WO/Transfer — always) PLUS every
-    #                  PlannedSupply that is FIRM (is_firm=TRUE). A firm
-    #                  PlannedSupply (an FPO, migration 061) is netted as a closed
-    #                  receipt yet stays re-datable — it is the headline case of
-    #                  #346, so it MUST enter sched_orders. A NON-firm PlannedSupply
-    #                  is regenerated from scratch on every run, so re-dating it is
-    #                  meaningless: it is deliberately excluded.
-    #   sched_b      = committed receipts ONLY (the WHERE below keeps PlannedSupply
-    #                  out of the bucket aggregate so projection/golden-master do
-    #                  not shift). is_firm on a ReceiptOrder is TRUE by nature for
-    #                  the committed types (an engaged order) and the column value
-    #                  for a PlannedSupply.
+    # Both structures now share the SAME membership: committed receipts
+    # (PO/WO/Transfer — always) PLUS every PlannedSupply that is FIRM
+    # (is_firm=TRUE). A firm PlannedSupply (an FPO, migration 061) is
+    # engaged/closed supply — it survives the APICS full-regen purge
+    # (graph_integration.cleanup_previous_run) and is netted there as a
+    # scheduled receipt (gross_to_net._get_scheduled_receipts_map). This
+    # loader's sched_b must count it too: a single netting source of truth
+    # across both MRP engines (PR-C, #346) — if the math core dropped the
+    # FPO from its bucket aggregate while the APICS engine counted it, the
+    # two engines would disagree on whether the FPO's demand is covered.
+    # A NON-firm PlannedSupply is regenerated from scratch on every run, so
+    # it is excluded from both structures (re-dating it is meaningless and
+    # it must not be double-counted as supply).
+    #
+    # GOLDEN-MASTER SAFETY: the seed dataset backing test_mrp_core_golden.py
+    # has zero is_firm=TRUE rows, so this branch adds no row and sched_b
+    # stays byte-identical for that fixture. Only a scenario that actually
+    # firms a PlannedSupply changes sched_b's contents.
     d.sched_b = defaultdict(lambda: defaultdict(float))
     d.sched_orders = defaultdict(list)
     for node_id, item, ntype, tref, qty, is_firm in cur.execute(
@@ -276,18 +279,16 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         {"b": scenario, "t": FIRM_RECEIPT_TYPES}).fetchall():
         q = float(qty)
         if ntype in FIRM_RECEIPT_TYPES:
-            # Committed order: contributes to the bucket aggregate (golden-master)
-            # and is firm by nature (an engaged receipt).
-            d.sched_b[item][d.bucket(tref)] += q
+            # Committed order: contributes to the bucket aggregate and is
+            # firm by nature (an engaged receipt).
             order_firm = True
         else:
-            # Firm PlannedSupply (FPO): re-datable, but deliberately NOT added to
-            # the sched_b bucket aggregate — sched_b stays byte-identical to the
-            # pre-#346 golden master (committed types only). This math core is
-            # read-only; it surfaces the FPO for reschedule identity only. FPO
-            # netting as a closed receipt is the APICS engine's concern
-            # (graph_integration / gross_to_net), not this loader.
+            # Firm PlannedSupply (FPO): re-datable AND netted as engaged
+            # supply, same treatment as a committed order (see block
+            # comment above). ntype == 'PlannedSupply' and is_firm is TRUE
+            # by construction of the WHERE clause reaching this branch.
             order_firm = bool(is_firm)
+        d.sched_b[item][d.bucket(tref)] += q
         d.sched_orders[item].append(ReceiptOrder(
             node_id=str(node_id), item_id=item, receipt_date=tref, qty=q,
             is_firm=order_firm, node_type=ntype))

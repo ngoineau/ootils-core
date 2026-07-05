@@ -4,13 +4,13 @@ GET /v1/graph — Return the planning graph for an item/location.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
@@ -289,3 +289,164 @@ def list_nodes(
     )
 
     return NodeListResponse(nodes=nodes, total=total)
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/nodes/{node_id}/firm, DELETE /v1/nodes/{node_id}/firm — FPO lifecycle
+#
+# Firm Planned Order (FPO, migration 061 nodes.is_firm, #346): firming a
+# PlannedSupply excludes it from the MRP full-regeneration purge
+# (engine/mrp/graph_integration.py:cleanup_previous_run) and nets it as a
+# CLOSED/committed receipt in both MRP engines (gross_to_net.py /
+# engine/mrp/loader.py), so it stops being re-planned. Un-firming reverts it
+# to an ordinary re-generatable planned order.
+#
+# Decision Ladder: firming/un-firming is a deliberate planner (or governed
+# agent) act on a single order, not an irreversible commitment (it can be
+# reversed by DELETE) — no approval gate for V1, audited via `events` is
+# sufficient. Revisit if firm/unfirm ever needs L2+ governance.
+# ---------------------------------------------------------------------------
+
+class FirmRequest(BaseModel):
+    """Body of POST /v1/nodes/{node_id}/firm.
+
+    Identity of the actor. The current auth layer doesn't extract subjects
+    from the bearer token (single shared token, see api/auth.py), so callers
+    pass it explicitly for now — same carve-out as staging.py's
+    approved_by/rejected_by.
+    """
+    actor: str = Field(..., min_length=1, max_length=200)
+
+
+class FirmResponse(BaseModel):
+    node_id: UUID
+    is_firm: bool
+    scenario_id: UUID
+    item_id: Optional[UUID]
+    location_id: Optional[UUID]
+
+
+def _set_node_firm(
+    db: DictRowConnection,
+    node_id: UUID,
+    target_is_firm: bool,
+    actor: str,
+) -> FirmResponse:
+    """Shared implementation for firm/unfirm — validates the node, applies
+    the flag, and emits the audit event. Raises HTTPException on validation
+    failure."""
+    row = db.execute(
+        """
+        SELECT node_id, node_type, scenario_id, item_id, location_id, is_firm
+        FROM nodes
+        WHERE node_id = %s AND active = TRUE
+        """,
+        (node_id,),
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Node {node_id} not found (or inactive)",
+        )
+
+    if row["node_type"] != "PlannedSupply":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Node {node_id} is a '{row['node_type']}', not a "
+                "'PlannedSupply' — only a PlannedSupply can be firmed/unfirmed "
+                "into a Firm Planned Order (#346)."
+            ),
+        )
+
+    previous_is_firm = bool(row["is_firm"])
+    scenario_id = UUID(str(row["scenario_id"]))
+
+    db.execute(
+        "UPDATE nodes SET is_firm = %s, updated_at = NOW() WHERE node_id = %s",
+        (target_is_firm, node_id),
+    )
+
+    # Streamable + auditable principle: emit an event so agents/operators
+    # can subscribe to FPO lifecycle changes instead of polling. No-op flips
+    # (already in the target state) still emit — the caller's intent and
+    # actor are worth recording even if the flag didn't change.
+    event_id = uuid4()
+    now = datetime.now(timezone.utc)
+    db.execute(
+        """
+        INSERT INTO events (
+            event_id, event_type, scenario_id,
+            trigger_node_id, field_changed, old_text, new_text,
+            processed, source, user_ref, created_at
+        ) VALUES (
+            %s, 'node_firm_changed', %s,
+            %s, 'is_firm', %s, %s,
+            TRUE, 'api', %s, %s
+        )
+        """,
+        (
+            event_id,
+            scenario_id,
+            node_id,
+            str(previous_is_firm).lower(),
+            str(target_is_firm).lower(),
+            actor,
+            now,
+        ),
+    )
+
+    logger.info(
+        "node.firm_changed node_id=%s scenario=%s %s->%s actor=%s event_id=%s",
+        node_id,
+        scenario_id,
+        previous_is_firm,
+        target_is_firm,
+        actor,
+        event_id,
+    )
+
+    return FirmResponse(
+        node_id=node_id,
+        is_firm=target_is_firm,
+        scenario_id=scenario_id,
+        item_id=UUID(str(row["item_id"])) if row["item_id"] else None,
+        location_id=UUID(str(row["location_id"])) if row["location_id"] else None,
+    )
+
+
+@nodes_router.post("/{node_id}/firm", response_model=FirmResponse)
+def firm_node(
+    node_id: UUID,
+    body: FirmRequest,
+    db: DictRowConnection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> FirmResponse:
+    """Firm a PlannedSupply into a Firm Planned Order (is_firm=TRUE, #346).
+
+    A firmed PlannedSupply survives the next MRP full-regeneration purge and
+    is netted as a closed/committed receipt by both MRP engines — it is no
+    longer re-planned, but stays re-datable by a RESCHEDULE_IN/OUT message.
+    """
+    return _set_node_firm(db, node_id, target_is_firm=True, actor=body.actor)
+
+
+@nodes_router.delete("/{node_id}/firm", response_model=FirmResponse)
+def unfirm_node(
+    node_id: UUID,
+    actor: str = Query(..., min_length=1, max_length=200),
+    db: DictRowConnection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> FirmResponse:
+    """Un-firm a Firm Planned Order back into an ordinary PlannedSupply
+    (is_firm=FALSE, #346).
+
+    The order becomes re-generatable again: the next MRP full-regeneration
+    purge will deactivate it and, if its demand is still open, replace it.
+
+    `actor` is a query parameter (not a body) — DELETE requests in this
+    repo don't carry a body (see param_overrides.py's
+    clear_param_override_endpoint).
+    """
+    return _set_node_firm(db, node_id, target_is_firm=False, actor=actor)

@@ -383,7 +383,14 @@ class GrossToNetCalculator:
         Get confirmed scheduled receipts (PO, WO, transfers) per period.
 
         These are supply nodes that are already committed — purchase orders,
-        work orders, and transfers with confirmed dates.
+        work orders, and transfers with confirmed dates. A firm PlannedSupply
+        (FPO, migration 061 ``nodes.is_firm``, #346) is included here too: it
+        survives the full-regen purge (``graph_integration.cleanup_previous_run``)
+        as planner/agent-owned closed supply, so it MUST be counted as a
+        scheduled receipt — otherwise the run sees its demand as uncovered
+        and generates a second PlannedSupply for the same requirement
+        (double-planning). Purge exclusion and netting are read together;
+        neither is correct alone (see the cleanup_previous_run docstring).
         """
         loc_filter = "AND location_id = %s" if location_id else ""
         params: list = [item_id, self.scenario_id]
@@ -393,7 +400,10 @@ class GrossToNetCalculator:
         rows = self.db.execute(f"""
             SELECT time_ref, quantity
             FROM nodes
-            WHERE node_type IN ('PurchaseOrderSupply', 'WorkOrderSupply', 'TransferSupply')
+            WHERE (
+                node_type IN ('PurchaseOrderSupply', 'WorkOrderSupply', 'TransferSupply')
+                OR (node_type = 'PlannedSupply' AND is_firm)
+              )
               AND item_id = %s
               AND scenario_id = %s
               {loc_filter}
