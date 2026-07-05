@@ -14,6 +14,7 @@ from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.manager import ScenarioManager, _ALLOWED_FIELDS
+from ootils_core.models import ShortageRecord
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/simulate", tags=["simulate"])
@@ -48,6 +49,17 @@ class ShortageChange(BaseModel):
     shortage_date: Optional[str] = None
     shortage_qty: Optional[float] = None
     severity_score: Optional[float] = None
+
+
+def _to_change(s: ShortageRecord) -> ShortageChange:
+    return ShortageChange(
+        node_id=s.pi_node_id,
+        item_id=s.item_id,
+        location_id=s.location_id,
+        shortage_date=str(s.shortage_date) if s.shortage_date else None,
+        shortage_qty=float(s.shortage_qty),
+        severity_score=float(s.severity_score),
+    )
 
 
 class SimulateDelta(BaseModel):
@@ -161,6 +173,7 @@ def create_simulation(
 
     # Propagation + delta computation
     from ootils_core.api.routers.events import _build_propagation_engine
+    from ootils_core.engine.kernel.shortage import match_shortage_delta
     from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 
     calc_run_id = None
@@ -176,10 +189,7 @@ def create_simulation(
         try:
             # Get baseline shortages before propagation
             detector = ShortageDetector()
-            baseline_shortages = {
-                str(s.pi_node_id): s
-                for s in detector.get_active_shortages(base_id, db)
-            }
+            baseline_shortages = detector.get_active_shortages(base_id, db)
 
             # Create a trigger event for full recompute
             from uuid import uuid4
@@ -228,38 +238,23 @@ def create_simulation(
                 calc_run_id = calc_run.calc_run_id
                 nodes_recalculated = calc_run.nodes_recalculated or 0
 
-                # Compute delta
-                new_shortages = detector.get_active_shortages(scenario.scenario_id, db)
-                scenario_shortage_ids = {str(s.pi_node_id) for s in new_shortages}
-                baseline_shortage_ids = set(baseline_shortages.keys())
-
-                new_ids = scenario_shortage_ids - baseline_shortage_ids
-                resolved_ids = baseline_shortage_ids - scenario_shortage_ids
-
+                # Compute delta by BUSINESS key (item_id, location_id,
+                # shortage_date), NOT raw pi_node_id: a fork deep-copies nodes
+                # with fresh UUIDs so baseline and fork ids never overlap (see
+                # match_shortage_delta). A fork identical to the baseline
+                # therefore yields new=[] and resolved=[].
+                scenario_shortages = detector.get_active_shortages(
+                    scenario.scenario_id, db
+                )
+                new_records, resolved_records = match_shortage_delta(
+                    baseline_shortages, scenario_shortages
+                )
                 delta = SimulateDelta(
-                    new_shortages=[
-                        ShortageChange(
-                            node_id=s.pi_node_id,
-                            item_id=s.item_id,
-                            location_id=s.location_id,
-                            shortage_date=str(s.shortage_date) if s.shortage_date else None,
-                            shortage_qty=float(s.shortage_qty),
-                            severity_score=float(s.severity_score),
-                        )
-                        for s in new_shortages if str(s.pi_node_id) in new_ids
-                    ],
-                    resolved_shortages=[
-                        ShortageChange(
-                            node_id=baseline_shortages[sid].pi_node_id,
-                            item_id=baseline_shortages[sid].item_id,
-                            location_id=baseline_shortages[sid].location_id,
-                            shortage_date=str(baseline_shortages[sid].shortage_date) if baseline_shortages[sid].shortage_date else None,
-                            shortage_qty=float(baseline_shortages[sid].shortage_qty),
-                            severity_score=float(baseline_shortages[sid].severity_score),
-                        )
-                        for sid in resolved_ids
-                    ],
-                    net_shortage_change=len(new_ids) - len(resolved_ids),
+                    new_shortages=[_to_change(s) for s in new_records],
+                    resolved_shortages=[_to_change(s) for s in resolved_records],
+                    net_shortage_change=(
+                        len(scenario_shortages) - len(baseline_shortages)
+                    ),
                 )
                 propagation_status = "ok"
                 delta_computed = True

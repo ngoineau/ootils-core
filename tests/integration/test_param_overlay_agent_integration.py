@@ -438,6 +438,47 @@ def test_simulate_param_overrides_delta_moves_with_override(db):
     assert result["delta"]["net_shortage_change"] >= 1
 
 
+def test_identical_fork_yields_empty_new_and_resolved_even_with_baseline_shortage(db):
+    """fix/counterfactual-delta-keying — THE invariant.
+
+    Seed a baseline that ALREADY has a shortage (safety_stock_qty=999 on a
+    closing_stock=0 bucket -> below_safety_stock), then apply an override that
+    sets safety_stock_qty to that SAME value: the fork is functionally identical
+    to the baseline. The fork's shortage carries a FRESH pi_node_id (deep-copy),
+    so the old raw-node-id set-difference reported it as BOTH new AND resolved.
+    Keyed by (item, location, shortage_date) it matches its baseline
+    counterpart -> new=[] and resolved=[]. net_shortage_change is 0.
+    """
+    item_id = _seed_item(db)
+    location_id = _seed_location(db)
+    # Baseline itself is short: SS=999 on a closing=0 bucket.
+    _seed_planning_params(db, item_id, location_id, safety_stock_qty=999)
+    _seed_pi_bucket(db, scenario_id=BASELINE_UUID, item_id=item_id, location_id=location_id)
+    db.commit()
+
+    result = simulate_param_overrides(
+        db,
+        # Same value the baseline already resolves to -> a no-op override that
+        # still forks + propagates, so the delta path runs against a real
+        # baseline shortage.
+        [{"item_id": str(item_id), "location_id": str(location_id),
+          "field_name": "safety_stock_qty", "value": "999"}],
+        scenario_name=f"what-if-identical-{uuid4().hex[:8]}",
+        base_scenario_id=BASELINE,
+        applied_by="agent:test",
+    )
+
+    assert result["propagation_status"] == "ok"
+    assert result["delta_computed"] is True
+    assert result["delta"]["new_shortages"] == [], (
+        "an identical fork must report NO new shortages (pre-fix: reported all)"
+    )
+    assert result["delta"]["resolved_shortages"] == [], (
+        "an identical fork must report NO resolved shortages (pre-fix: reported all)"
+    )
+    assert result["delta"]["net_shortage_change"] == 0
+
+
 def test_simulate_param_overrides_rejected_override_carries_no_delta(db):
     """An override rejected by ParamOverlayError (illegal value) is recorded in
     failed_overrides with the typed message; with no applied override the run
