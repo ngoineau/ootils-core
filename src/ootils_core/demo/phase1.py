@@ -178,10 +178,12 @@ def _execute_phase1_demo(database_url: str, token: str) -> dict:
             conn.execute("UPDATE planned_supply SET status = 'RELEASED' WHERE source_id = %s", (mps_id,))
             conn.commit()
 
+        # scenario_id is not a CRPCalculateRequest body field (it resolves from
+        # the query param / X-Scenario-ID header, and the model now forbids
+        # unknown body keys) — the demo runs on baseline, the default.
         crp = _post(client, "/v1/crp/calculate", auth, {
             "horizon_days": 30,
             "work_center_ids": [str(work_center_id)],
-            "scenario_id": BASELINE_SCENARIO_ID,
         })
 
         atp = _post(client, "/v1/atp/check", auth, {

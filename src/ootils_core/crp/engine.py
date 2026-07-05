@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Any
 from uuid import UUID
 
+from ootils_core.constants import BASELINE_SCENARIO_ID
 from ootils_core.crp.models import WorkCenter, Routing, Operation
 from ootils_core.db.types import DictRowConnection
 
@@ -320,19 +321,21 @@ class CRPEngine:
         self,
         horizon_days: int = 90,
         work_centers: Optional[List[UUID]] = None,
-        scenario_id: Optional[UUID] = None,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> CRPResult:
         """
         Perform CRP calculation.
-        
+
         Args:
             horizon_days: Number of days to plan ahead (default: 90)
             work_centers: Optional list of work center IDs to include (default: all active)
-            scenario_id: Optional scenario ID to filter planned orders
-        
+            scenario_id: Scenario to read planned orders from (default: baseline).
+                A fork that wrote planned supply must not contaminate the baseline
+                load; every planned-order read is filtered by this scenario.
+
         Returns:
             CRPResult with load profiles and overloads
-        
+
         Raises:
             ValueError: If no database connection is set
             RuntimeError: If calculation fails
@@ -350,9 +353,9 @@ class CRPEngine:
         horizon_end = horizon_start + timedelta(days=horizon_days)
         
         logger.info(
-            "CRP calculation started: horizon=%s to %s (%s days), work_centers=%s",
+            "CRP calculation started: horizon=%s to %s (%s days), work_centers=%s, scenario=%s",
             horizon_start, horizon_end, horizon_days,
-            len(work_centers) if work_centers else "all"
+            len(work_centers) if work_centers else "all", scenario_id,
         )
         
         result = CRPResult(calculation_id, horizon_start, horizon_end)
@@ -551,16 +554,17 @@ class CRPEngine:
         self,
         start_date: date,
         end_date: date,
-        scenario_id: Optional[UUID] = None,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> List[Dict[str, Any]]:
         """
         Fetch planned orders from MRP/MPS.
-        
+
         Args:
             start_date: Start of horizon
             end_date: End of horizon
-            scenario_id: Optional scenario filter
-        
+            scenario_id: Scenario to read from (default: baseline). Always applied —
+                a baseline read must never see a fork's planned supply (and vice-versa).
+
         Returns:
             List of planned orders with item_id, due_date, quantity
         """
@@ -570,38 +574,25 @@ class CRPEngine:
             raise ValueError("Database connection not set")
 
         with self._conn.cursor() as cur:
-            if scenario_id:
-                cur.execute("""
-                    SELECT 
-                        planned_supply_id,
-                        item_id,
-                        location_id,
-                        quantity,
-                        due_date,
-                        status
-                    FROM planned_supply
-                    WHERE due_date >= %s
-                      AND due_date < %s
-                      AND scenario_id = %s
-                      AND status IN ('RELEASED', 'APPROVED', 'PLANNED')
-                    ORDER BY due_date
-                """, (start_date, end_date, scenario_id))
-            else:
-                cur.execute("""
-                    SELECT 
-                        planned_supply_id,
-                        item_id,
-                        location_id,
-                        quantity,
-                        due_date,
-                        status
-                    FROM planned_supply
-                    WHERE due_date >= %s
-                      AND due_date < %s
-                      AND status IN ('RELEASED', 'APPROVED', 'PLANNED')
-                    ORDER BY due_date
-                """, (start_date, end_date))
-            
+            # Scenario isolation: planned_supply is scenario-scoped (migration 030),
+            # so the load is read from exactly one scenario. `scenario_id` defaults
+            # to baseline but is never omitted from the predicate.
+            cur.execute("""
+                SELECT
+                    planned_supply_id,
+                    item_id,
+                    location_id,
+                    quantity,
+                    due_date,
+                    status
+                FROM planned_supply
+                WHERE due_date >= %s
+                  AND due_date < %s
+                  AND scenario_id = %s
+                  AND status IN ('RELEASED', 'APPROVED', 'PLANNED')
+                ORDER BY due_date
+            """, (start_date, end_date, scenario_id))
+
             for row in cur.fetchall():
                 ps_id, item_id, loc_id, qty, due_date, status = _row_values(
                     row,
@@ -722,36 +713,48 @@ class CRPEngine:
         self,
         work_center_id: UUID,
         horizon_days: int = 90,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> Optional[LoadProfile]:
         """
         Get load profile for a specific work center.
-        
+
         Args:
             work_center_id: The work center to get profile for
             horizon_days: Number of days in the horizon
-        
+            scenario_id: Scenario to read planned orders from (default: baseline)
+
         Returns:
             LoadProfile for the work center, or None if not found
         """
-        result = self.calculate(horizon_days=horizon_days, work_centers=[work_center_id])
+        result = self.calculate(
+            horizon_days=horizon_days,
+            work_centers=[work_center_id],
+            scenario_id=scenario_id,
+        )
         return result.load_profiles.get(work_center_id)
-    
+
     def get_overloads(
         self,
         horizon_days: int = 90,
         work_centers: Optional[List[UUID]] = None,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> List[Overload]:
         """
         Get all overloads in the planning horizon.
-        
+
         Args:
             horizon_days: Number of days in the horizon
             work_centers: Optional list of work centers to check
-        
+            scenario_id: Scenario to read planned orders from (default: baseline)
+
         Returns:
             List of Overload objects
         """
-        result = self.calculate(horizon_days=horizon_days, work_centers=work_centers)
+        result = self.calculate(
+            horizon_days=horizon_days,
+            work_centers=work_centers,
+            scenario_id=scenario_id,
+        )
         return result.overloads
     
     def suggest_resolutions(
@@ -759,18 +762,20 @@ class CRPEngine:
         horizon_days: int = 90,
         work_centers: Optional[List[UUID]] = None,
         max_shift_days: int = 14,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> List[Dict[str, Any]]:
         """
         Suggest resolutions for detected overloads by shifting order dates.
-        
+
         Strategy: For each overload, find planned orders contributing to that day
         and suggest shifting them to the next available capacity slot.
-        
+
         Args:
             horizon_days: Planning horizon in days
             work_centers: Optional list of work centers to analyze
             max_shift_days: Maximum days to suggest shifting (default: 14)
-        
+            scenario_id: Scenario to read planned orders from (default: baseline)
+
         Returns:
             List of resolution suggestions with:
             - work_center_id, work_center_code
@@ -780,22 +785,26 @@ class CRPEngine:
         """
         if self._conn is None:
             raise ValueError("Database connection not set")
-        
+
         # First get all overloads
-        overloads = self.get_overloads(horizon_days=horizon_days, work_centers=work_centers)
-        
+        overloads = self.get_overloads(
+            horizon_days=horizon_days,
+            work_centers=work_centers,
+            scenario_id=scenario_id,
+        )
+
         if not overloads:
             return []
-        
+
         suggestions: List[Dict[str, Any]] = []
         horizon_start = date.today()
         horizon_end = horizon_start + timedelta(days=horizon_days)
-        
+
         # Group overloads by work center and date for efficient processing
         overload_map: Dict[Tuple[UUID, date], Overload] = {}
         for ol in overloads:
             overload_map[(ol.work_center_id, ol.overload_date)] = ol
-        
+
         # For each overloaded work center, find contributing orders
         for (wc_id, ol_date), overload in overload_map.items():
             suggestion = self._suggest_resolution_for_overload(
@@ -805,12 +814,13 @@ class CRPEngine:
                 horizon_start=horizon_start,
                 horizon_end=horizon_end,
                 max_shift_days=max_shift_days,
+                scenario_id=scenario_id,
             )
             if suggestion:
                 suggestions.append(suggestion)
-        
+
         return suggestions
-    
+
     def _suggest_resolution_for_overload(
         self,
         work_center_id: UUID,
@@ -819,6 +829,7 @@ class CRPEngine:
         horizon_start: date,
         horizon_end: date,
         max_shift_days: int,
+        scenario_id: UUID = BASELINE_SCENARIO_ID,
     ) -> Optional[Dict[str, Any]]:
         """
         Suggest resolution for a single overload by finding orders to shift.
@@ -838,6 +849,10 @@ class CRPEngine:
             # The alias `wc` and the SQL column alias `work_center_code`
             # are kept so downstream Python (suggestion dict keys) is
             # untouched.
+            # Scenario isolation: `planned_supply` is scenario-scoped — the join
+            # is filtered on ps.scenario_id so a fork's orders never leak into a
+            # baseline resolution (the master-data legs — items/routings/resources
+            # — are not scenario-scoped and are joined unfiltered).
             cur.execute("""
                 SELECT
                     ps.planned_supply_id,
@@ -859,9 +874,10 @@ class CRPEngine:
                 WHERE ps.due_date >= %s
                   AND ps.due_date <= %s
                   AND wc.resource_id = %s
+                  AND ps.scenario_id = %s
                   AND ps.status IN ('RELEASED', 'APPROVED', 'PLANNED')
                 ORDER BY ps.due_date DESC, op.sequence DESC
-            """, (horizon_start, horizon_end, work_center_id))
+            """, (horizon_start, horizon_end, work_center_id, scenario_id))
             
             rows = cur.fetchall()
         
