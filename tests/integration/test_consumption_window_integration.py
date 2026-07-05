@@ -40,12 +40,12 @@ pytestmark = requires_db
 BASELINE = "00000000-0000-0000-0000-000000000001"
 
 
-def _seed_node(conn, node_type, item_id, location_id, qty, tref):
+def _seed_node(conn, scenario_id, node_type, item_id, location_id, qty, tref):
     conn.execute(
         "INSERT INTO nodes (node_type, scenario_id, item_id, location_id, "
         " quantity, time_grain, time_ref, active) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)",
-        (node_type, BASELINE, item_id, location_id, qty, "exact_date", tref),
+        (node_type, scenario_id, item_id, location_id, qty, "exact_date", tref),
     )
 
 
@@ -91,10 +91,17 @@ def test_fork_override_widens_window_and_nets_early_buy(conn):
     scenario_id = _seed_scenario(conn)
     today = conn.execute("SELECT CURRENT_DATE AS d").fetchone()["d"]
 
-    _seed_node(conn, "CustomerOrderDemand", item_id, location_id, 100,
-               today + _dt.timedelta(days=7))
-    _seed_node(conn, "ForecastDemand", item_id, location_id, 120,
-               today + _dt.timedelta(days=35))
+    # Seed the SAME demand on BOTH baseline and the fork. The loader is strictly
+    # scenario-scoped (nodes ... WHERE scenario_id=scenario, no baseline fallback),
+    # so a fork needs its own node copies just as a real deep-copy fork would —
+    # baseline and fork then differ ONLY by the overlaid consumption_window_days.
+    # (Same pattern as the #347 propagation reader tests, which seed a PI bucket
+    # on baseline AND on the fork separately.)
+    for scen in (BASELINE, str(scenario_id)):
+        _seed_node(conn, scen, "CustomerOrderDemand", item_id, location_id, 100,
+                   today + _dt.timedelta(days=7))
+        _seed_node(conn, scen, "ForecastDemand", item_id, location_id, 120,
+                   today + _dt.timedelta(days=35))
     conn.commit()
 
     # Fork override: window 35 days => 5 buckets, enough to bridge the gap.
