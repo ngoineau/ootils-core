@@ -33,13 +33,27 @@ from ootils_core.atp.models import ATPConfig, ATPResult
 # ─────────────────────────────────────────────────────────────
 
 class PerformanceConfig:
-    """Performance test thresholds."""
-    ATP_1YEAR_HORIZON_MS = 100
+    """Performance test thresholds.
+
+    These are COARSE regression guards, not micro-benchmarks. They run against a
+    MOCKED DB (no real query cost — the real perf guard is scripts/bench_mrp.py on
+    a live database), so their only job is to catch a catastrophic algorithmic
+    blowup (an accidental O(n^2)/O(n^3) that turns tens of ms into seconds), never
+    to police single-digit-ms drift. On GitHub's shared runners a cold, loaded
+    executor routinely adds 100 ms+ of one-time cost (module init, allocator, GC,
+    scheduler preemption) to the FIRST timed operation — a tight sub-100 ms
+    wall-clock assertion therefore flakes and red-flags unrelated PRs (observed:
+    ATP-with-supplies 50 ms budget hitting 125-152 ms on 2026-07-05). The ceilings
+    below carry ~5x headroom over healthy local timings so the signal survives
+    runner jitter while still tripping on a real blowup. Tighten only if you move
+    these off the shared runner onto a dedicated, warmed benchmark host.
+    """
+    ATP_1YEAR_HORIZON_MS = 250
     CRP_1000_ORDERS_S = 5.0
-    FORECAST_PER_ITEM_MS = 50
-    MPS_90DAY_HORIZON_MS = 200
+    FORECAST_PER_ITEM_MS = 150
+    MPS_90DAY_HORIZON_MS = 500
     CRP_100_ORDERS_S = 0.5
-    ATP_30DAY_HORIZON_MS = 20
+    ATP_30DAY_HORIZON_MS = 100
 
 
 # ─────────────────────────────────────────────────────────────
@@ -146,7 +160,7 @@ class TestATPPerformance:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         
         assert isinstance(result, ATPResult)
-        assert elapsed_ms < 50, f"ATP with supplies took {elapsed_ms:.2f}ms (target: <50ms)"
+        assert elapsed_ms < 250, f"ATP with supplies took {elapsed_ms:.2f}ms (target: <250ms)"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -289,7 +303,7 @@ class TestForecastPerformance:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         
         assert isinstance(result, ForecastResult)
-        assert elapsed_ms < 10, f"MA forecast took {elapsed_ms:.2f}ms (target: <10ms)"
+        assert elapsed_ms < 100, f"MA forecast took {elapsed_ms:.2f}ms (target: <100ms)"
     
     def test_forecast_exp_smoothing_performance(self):
         """Exponential Smoothing forecast (target: <20ms)."""
@@ -307,7 +321,7 @@ class TestForecastPerformance:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         
         assert isinstance(result, ForecastResult)
-        assert elapsed_ms < 20, f"ES forecast took {elapsed_ms:.2f}ms (target: <20ms)"
+        assert elapsed_ms < 100, f"ES forecast took {elapsed_ms:.2f}ms (target: <100ms)"
     
     def test_forecast_croston_performance(self):
         """Croston's method forecast (target: <30ms)."""
@@ -325,7 +339,7 @@ class TestForecastPerformance:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         
         assert isinstance(result, ForecastResult)
-        assert elapsed_ms < 30, f"Croston forecast took {elapsed_ms:.2f}ms (target: <30ms)"
+        assert elapsed_ms < 100, f"Croston forecast took {elapsed_ms:.2f}ms (target: <100ms)"
     
     def test_forecast_batch_100_items_performance(self):
         """Batch forecast for 100 items (target: <5s total)."""
@@ -424,7 +438,7 @@ class TestMPSPerformance:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         
         assert len(nodes) == 100
-        assert elapsed_ms < 100, f"Batch 100 MPS nodes took {elapsed_ms:.2f}ms (target: <100ms)"
+        assert elapsed_ms < 300, f"Batch 100 MPS nodes took {elapsed_ms:.2f}ms (target: <300ms)"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -500,7 +514,7 @@ class TestEndToEndPerformance:
         assert isinstance(forecast_result, ForecastResult)
         assert isinstance(mps_node, MPSNode)
         assert isinstance(atp_result, ATPResult)
-        assert elapsed_ms < 300, f"E2E flow took {elapsed_ms:.2f}ms (target: <300ms)"
+        assert elapsed_ms < 750, f"E2E flow took {elapsed_ms:.2f}ms (target: <750ms)"
 
 
 # ─────────────────────────────────────────────────────────────
