@@ -222,9 +222,10 @@ def test_firm_endpoint_sets_flag_emits_event_and_validates(app_client):
     assert r.status_code == 200, r.text
     assert r.json()["is_firm"] is True
 
-    # Un-firm it.
-    r = app_client.request("DELETE", f"/v1/nodes/{ps_id}/firm",
-                           json={"actor": "planner"}, headers=auth)
+    # Un-firm it. DELETE carries `actor` as a QUERY param (repo convention —
+    # DELETE requests have no body), unlike POST which takes a FirmRequest body.
+    r = app_client.delete(f"/v1/nodes/{ps_id}/firm",
+                          params={"actor": "planner"}, headers=auth)
     assert r.status_code == 200, r.text
     assert r.json()["is_firm"] is False
 
