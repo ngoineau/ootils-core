@@ -109,7 +109,7 @@ def _today(conn):
 
 
 @requires_db
-def test_firm_planned_supply_survives_regeneration_purge():
+def test_firm_planned_supply_survives_regeneration_purge(migrated_db):
     """cleanup_previous_run(None) deactivates every NON-firm PlannedSupply for
     the scenario (full-regen contract) but leaves is_firm=TRUE ones active — the
     exclusion that lets a Firm Planned Order persist across MRP runs."""
@@ -137,7 +137,7 @@ def test_firm_planned_supply_survives_regeneration_purge():
 
 
 @requires_db
-def test_firm_planned_supply_is_netted_in_math_core_no_false_shortage():
+def test_firm_planned_supply_is_netted_in_math_core_no_false_shortage(migrated_db):
     """loader.sched_b must count a firm PlannedSupply as a committed receipt, so
     demand it covers produces NO shortage — the netting half of the purge/netting
     coupling (without it, a survived-but-unnetted FPO would double-plan)."""
@@ -176,10 +176,11 @@ def test_firm_planned_supply_is_netted_in_math_core_no_false_shortage():
 
 
 @pytest.fixture
-def app_client():
+def app_client(migrated_db):
     """A TestClient over a fresh app, get_db bound to the migrated test DB.
 
-    Self-contained (no demo seed) — the tests below seed their own node.
+    Depends on migrated_db so the schema exists; self-contained (no demo seed)
+    — the tests below seed their own node.
     """
     os.environ.setdefault("OOTILS_API_TOKEN", "test-token")
     from fastapi.testclient import TestClient
@@ -253,7 +254,7 @@ def test_firm_endpoint_sets_flag_emits_event_and_validates(app_client):
 
 
 @requires_db
-def test_firm_planned_supply_is_still_reschedulable():
+def test_firm_planned_supply_is_still_reschedulable(migrated_db):
     """A firm PlannedSupply that is mis-dated relative to its need is still seen
     by the reschedule watcher (it is in sched_orders) and yields a governed
     RESCHEDULE DRAFT — an FPO is not frozen, only regen-shielded."""
