@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -46,7 +47,9 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
+from ootils_core.engine.kernel.shortage.detector import ShortageDetector
 from ootils_core.engine.scenario.param_overlay import resolved_params_sql
+from ootils_core.models import Node
 from ootils_core.tools.agent_tools import simulate_param_overrides
 
 from .conftest import requires_db
@@ -213,6 +216,46 @@ def _seed_pi_bucket(conn, *, scenario_id, item_id, location_id) -> UUID:
          date.today(), date.today() + timedelta(days=7), series_id),
     )
     return node_id
+
+
+def _persist_baseline_shortage(conn, *, node_id, item_id, location_id) -> None:
+    """Persist the baseline's OWN below-safety-stock shortage into the `shortages`
+    table, exactly as a real baseline calc_run would.
+
+    ``_seed_pi_bucket`` writes the PI node with ``has_shortage=FALSE`` and nothing
+    runs detection on the baseline, so ``get_active_shortages(BASELINE)`` returns
+    []. The counter-factual delta then has NO baseline row to match the identical
+    fork's freshly-recomputed shortage against, and a genuinely-identical fork
+    would look all-new. Persist the baseline shortage here (same closing=0/SS=999
+    bucket, so ``shortage_date = time_span_start = today`` — identical to what the
+    deep-copied fork bucket recomputes) so ``match_shortage_delta`` has a real
+    baseline counterpart. Mirrors the proven persist pattern in
+    test_m4_shortage_integration.py (raw calc_run + ShortageDetector.detect/persist).
+    """
+    calc_run_id = uuid4()
+    conn.execute(
+        "INSERT INTO calc_runs (calc_run_id, scenario_id, status, is_full_recompute) "
+        "VALUES (%s, %s, 'completed', TRUE)",
+        (calc_run_id, BASELINE_UUID),
+    )
+    detector = ShortageDetector()
+    pi_obj = Node(
+        node_id=node_id,
+        node_type="ProjectedInventory",
+        scenario_id=BASELINE_UUID,
+        item_id=item_id,
+        location_id=location_id,
+        closing_stock=Decimal("0"),
+        time_span_start=date.today(),
+        time_span_end=date.today() + timedelta(days=7),
+        has_shortage=False,
+        shortage_qty=Decimal("0"),
+    )
+    record = detector.detect_with_params(
+        pi_obj, calc_run_id, BASELINE_UUID, conn, safety_stock_qty=Decimal("999")
+    )
+    assert record is not None, "baseline seed must itself be short (SS=999 > closing=0)"
+    detector.persist(record, conn)
 
 
 def _resolve_one(conn, scenario_id, item_id, location_id) -> dict:
@@ -453,7 +496,15 @@ def test_identical_fork_yields_empty_new_and_resolved_even_with_baseline_shortag
     location_id = _seed_location(db)
     # Baseline itself is short: SS=999 on a closing=0 bucket.
     _seed_planning_params(db, item_id, location_id, safety_stock_qty=999)
-    _seed_pi_bucket(db, scenario_id=BASELINE_UUID, item_id=item_id, location_id=location_id)
+    baseline_pi = _seed_pi_bucket(
+        db, scenario_id=BASELINE_UUID, item_id=item_id, location_id=location_id
+    )
+    # Persist the baseline's OWN shortage so the delta has a real baseline row to
+    # match the identical fork's freshly-recomputed shortage against (without this
+    # the shortages table has no baseline row and the fork looks all-new).
+    _persist_baseline_shortage(
+        db, node_id=baseline_pi, item_id=item_id, location_id=location_id
+    )
     db.commit()
 
     result = simulate_param_overrides(
