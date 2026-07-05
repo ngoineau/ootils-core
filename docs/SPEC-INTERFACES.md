@@ -14,8 +14,8 @@
 | Direction | Familles | Modes de consommation dominants |
 |-----------|----------|---------------------------------|
 | **Inbound** (le monde pousse vers Ootils) | Ingest (`/v1/ingest/*`), Events (`/v1/events`), Scenarios (`/v1/simulate`), DQ/Calc triggers | REST JSON sync ; `[PROPOSED]` SFTP batch TSV ; `[PROPOSED]` webhook ERP |
-| **Outbound** (Ootils émet / expose) | Graph reads (`/v1/graph`, `/v1/nodes`), Projection, Issues, Explain, BOM, RCCP, Ghosts, Scenarios (GET), DQ reports | REST JSON sync ; `[PROPOSED]` export TSV ; `[PROPOSED]` webhooks signés |
-| **Tooling (agent-facing)** | Sous-ensemble curaté d'endpoints + `[PROPOSED]` serveur MCP + `[PROPOSED]` SSE explain | JSON-RPC (MCP) ; SSE ; REST |
+| **Outbound** (Ootils émet / expose) | Graph reads (`/v1/graph`, `/v1/nodes`), Projection, Issues, Explain, BOM, RCCP, Ghosts, Scenarios (GET), DQ reports, **Stream des changements (`/v1/stream`, SSE)** | REST JSON sync ; SSE (stream) ; `[PROPOSED]` export TSV ; `[PROPOSED]` webhooks signés |
+| **Tooling (agent-facing)** | Sous-ensemble curaté d'endpoints + **stream SSE des changements (`/v1/stream`)** + `[PROPOSED]` serveur MCP + `[PROPOSED]` SSE explain | JSON-RPC (MCP) ; SSE ; REST |
 
 ### 1.2 Trois modes de consommation
 
@@ -23,7 +23,7 @@
 |----------|---------------------|----------------------|
 | **Intégrateur humain** (ops, data engineer) | POST JSON via curl / scripts / client API ; upload TSV manuel via UI = `[PROPOSED]` | SFTP drop + `[PROPOSED]` dashboard de runs d'import + templates TSV versionnés |
 | **Connecteur ERP** (SAP/Dynamics/WMS) | REST JSON sync, un endpoint par entité | Webhook ERP→Ootils `[PROPOSED]` + outbound webhook recommandations signé HMAC `[PROPOSED]` |
-| **Agent IA** | API REST directe + Bearer token partagé | `[PROPOSED]` MCP server + streaming explain SSE + determinism contract documenté |
+| **Agent IA** | API REST directe + Bearer token partagé + **stream SSE des changements (`/v1/stream`, cf. §5.2)** | `[PROPOSED]` MCP server + `[PROPOSED]` streaming explain SSE + determinism contract documenté |
 
 ### 1.3 Principes structurants
 
@@ -432,12 +432,66 @@ Objectif : exposer un **sous-ensemble minimal et sémantique** des endpoints exi
 
 **Invariant agent-safe** : les tools `read` sont **side-effect-free** ; les tools `write` retournent toujours un identifiant opaque pour que l'agent puisse référencer l'action dans ses logs, sans jamais avoir à deviner un UUID.
 
-### 5.2 `[PROPOSED]` Streaming explain (SSE)
+### 5.2 Streaming des changements (SSE) — `GET /v1/stream` **[LIVRÉ]**
 
-L'actuel `GET /v1/explain` est synchrone : il construit l'ensemble du `causal_path` puis renvoie un JSON unique (`explain.py:39`). Pour des agents qui veulent raisonner dès que la première étape est disponible (chain-of-thought progressif) :
+> Statut : **implémenté** (chantier #391, PR1 — `api/routers/stream.py`). Concrétise le principe North Star *Streamable* : un agent s'abonne aux deltas au lieu de poller `GET /v1/events`. Décision d'architecture : `docs/ADR-027-streamchanges-sse.md`.
+
+Flux **Server-Sent Events** read-only du tail de la table `events`, scopé à un scénario. La vérité rejouable est un SELECT keyset sur `events.stream_seq` (BIGINT IDENTITY, migration 063) ; `LISTEN`/`NOTIFY` (canal `ootils_events`) sert de simple réveil, assumé lossy — un NOTIFY manqué coûte de la latence, jamais de la justesse (le drain de (re)connexion rattrape).
 
 ```
-GET /v1/explain/stream?node_id=<uuid>
+GET /v1/stream?scenario_id=<uuid|baseline>&types=<csv?>&cursor=<seq?>&once=<bool?>
+Accept: text/event-stream
+Authorization: Bearer <token>
+
+id: 4041
+event: recommendation_transition
+data: {"stream_seq":4041,"event_id":"e5a1c2d0-1111-4a2b-9c3d-000000000041","event_type":"recommendation_transition","scenario_id":"00000000-0000-0000-0000-000000000001","field_changed":"status","old_text":"DRAFT","new_text":"APPROVED","user_ref":"planner:alice","created_at":"2026-07-05T09:12:04.117000+00:00"}
+
+event: ping
+data: {}
+
+id: 4042
+event: supply_date_changed
+data: {"stream_seq":4042,"event_id":"a71f9e88-2222-4c3d-8b1e-000000000042","event_type":"supply_date_changed","scenario_id":"00000000-0000-0000-0000-000000000001","trigger_node_id":"3f2b6a10-3333-4d4e-9a2f-0000000000fa","old_date":"2026-08-01","new_date":"2026-07-25","created_at":"2026-07-05T09:12:19.880000+00:00"}
+```
+
+**Paramètres :**
+- `scenario_id` (query ou header `X-Scenario-ID`, défaut `baseline`) — résolu par le resolver partagé sans pool (`resolve_scenario_id`). Chaque flux lit **un seul** scénario.
+- `types` — CSV optionnel de valeurs `event_type` à inclure ; dé-dupliqué, ordre préservé. Un type inconnu ne matche rien (pas de 422) — comportement forward-compatible : un client peut s'abonner à un type que ce build précède, et le recevra une fois la base l'apprend.
+- `cursor` — reprendre **après** ce `stream_seq` (validé `ge=0`). `cursor=0` = rejouer tout l'historique du scénario ; omis = diffuser à partir de maintenant (le curseur est amorcé au `MAX(stream_seq)` courant du scénario).
+- `once` (bool, défaut `false`) — mode **catch-up borné** : pas de `LISTEN`, drain complet depuis le curseur jusqu'à épuisement du keyset puis **fermeture de la réponse** (pas de heartbeat, pas d'attente ouverte). Voir « Mode `once` » ci-dessous.
+
+**Précédence de reprise** : `?cursor=` explicite > header `Last-Event-ID` > *maintenant*. Un `Last-Event-ID` malformé/négatif est ignoré (traité comme absent), jamais 4xx — un navigateur qui reconnecte contrôle ce header, un mauvais doit dégrader vers « depuis maintenant », pas casser la reconnexion.
+
+**Format des frames** (spec SSE) :
+- `id: <stream_seq>` — fixe le `Last-Event-ID` du client (pilote la reprise). Présent sur chaque frame de donnée.
+- `event: <event_type>` — nomme le type pour `EventSource.addEventListener(type, …)`.
+- `data: <json>` — corps compact : `stream_seq` + colonnes métier non-NULL de la ligne `events` (les NULL sont omis ; absent ⇔ null). Les colonnes de bookkeeping (`processed`, `processed_at`) ne sont **jamais** émises. `Decimal` sérialisé en `str` (précision quantité exacte sur le fil) ; `created_at` sérialisé par `datetime.isoformat()` — format réel émis, avec offset explicite `+00:00` (jamais `Z`) et microsecondes sur 6 chiffres quand non-nulles (ex. `"2026-07-05T09:12:04.117000+00:00"`), pas un format tronqué millisecondes.
+- Heartbeat `event: ping` / `data: {}` **sans ligne `id:`** (n'avance pas le curseur client) — anti-reap proxy + filet de re-drain du NOTIFY lossy. Cadence : un ping est émis dès qu'**environ 15 s se sont écoulées sans qu'AUCUNE frame** (donnée ou ping précédent) n'ait été envoyée, mesuré sur une horloge monotone indépendante de la source de réveil — **pas** un intervalle fixe entre deux `NOTIFY` reçus. Le canal `LISTEN`/`NOTIFY` est **global** (partagé par tous les scénarios) : un flux abonné à un scénario calme peut être réveillé par le `NOTIFY` d'un *autre* scénario, redrainer à vide, et boucler — si la cadence était naïvement réarmée à chaque réveil (plutôt qu'ancrée sur l'horodatage de la dernière frame réellement émise), ces réveils étrangers repousseraient indéfiniment le ping. Absent en mode `once`.
+
+**Mode `once` (catch-up borné) :** `?once=true` désactive `LISTEN` et le heartbeat ; l'endpoint drape le keyset depuis `cursor` jusqu'à épuisement (pagination interne `LIMIT 500` transparente) puis ferme la réponse normalement (fin de flux SSE, pas d'erreur). C'est le mode de consommation naturel d'un watcher cron qui veut un « rattrape tout depuis mon dernier curseur » borné, sans connexion tenue ouverte entre deux runs — et c'est aussi ce qui rend l'endpoint testable en `TestClient` synchrone (un `TestClient` bufferise la réponse entière avant de rendre la main ; un flux `once=false` sans fin ne rendrait jamais la main dans ce harnais).
+
+**Codes de réponse** :
+- `200` `text/event-stream` (headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`).
+- `503` si kill-switch `OOTILS_STREAM_ENABLED` falsy, ou si le budget `OOTILS_STREAM_MAX_CONN` (défaut 32 flux concurrents) est saturé — les deux vérifiés **avant tout accès DB**.
+- `401` sans Bearer valide (auth comme tout `/v1/*`).
+
+**Sémantique** : livraison **at-least-once**. Sur la couture d'une reconnexion, un client peut re-recevoir une frame déjà vue ; l'idempotence est le travail du consommateur (bon marché ici : UUID de recommandations déterministes). L'exactly-once n'est pas offert (impossible en SSE).
+
+**Caveats du curseur** (cf. migration 063 + ADR-027) : `stream_seq` est monotone mais **pas gap-free** — un rollback brûle une valeur et laisse un trou ; le consommer avec `>` uniquement, jamais comme un compte ni `last+1`. Le backfill IDENTITY des lignes **historiques** ne suit pas nécessairement `created_at` : seuls les events post-migration ont un `stream_seq` aligné sur l'ordre d'insertion.
+
+**Budget de connexion — bail idempotente, pas un simple `finally`** (cf. ADR-027 pour le mécanisme complet) : le slot `OOTILS_STREAM_MAX_CONN` réservé pour un flux est libéré par une bail (`_SlotLease`) dont `release()` ne s'exécute qu'une fois, armée sur **deux** chemins indépendants — le `finally` du générateur (chemin normal, flux itéré au moins une fois) et un `weakref.finalize` posé sur l'objet générateur *avant* de le donner à `StreamingResponse` (chemin de secours : un client qui coupe la connexion avant la première itération abandonne le générateur sans jamais exécuter son corps ni son `finally` — Starlette n'appelle pas non plus `aclose()` sur ce chemin — donc seule la collecte GC de l'objet abandonné libère le slot). Un simple `finally` seul **fuit** sur ce cas ; documenté comme un piège gravé, pas une astuce à retirer.
+
+**Hors périmètre V1** (cf. ADR-027) : le stream des UPDATE `processed` (bookkeeping), WebSocket, la back-pressure au-delà de ~1M events, le stream des nodes/edges bruts. La PR2 de #391 ajoutera l'émission des events aujourd'hui manquants (`calc_run_finished`, `shortage_detected`) et le mode `--subscribe` opt-in des watchers.
+
+#### 5.2bis `[PROPOSED / NON IMPLÉMENTÉ]` Streaming explain progressif (SSE)
+
+> **Non livré.** L'endpoint `GET /v1/explain/stream` décrit ci-dessous **n'existe pas** dans le runtime : `stream.py` (#391) diffuse le tail de `events`, pas la construction pas-à-pas d'un `causal_path`. `GET /v1/explain` reste **synchrone** — il construit l'ensemble du `causal_path` puis renvoie un JSON unique (`explain.py:39`). Cette sous-section est une **cible**, conservée comme piste pour un besoin distinct (raisonnement chain-of-thought progressif d'un agent) ; ne pas la lire comme implémentée.
+
+Pour des agents qui voudraient raisonner dès que la première étape de l'explication est disponible :
+
+```
+GET /v1/explain/stream?node_id=<uuid>          # [PROPOSED] — non implémenté
 Accept: text/event-stream
 
 event: step
@@ -450,7 +504,7 @@ event: done
 data: {"explanation_id": "e5a…", "root_cause_node_id": "po-PO991"}
 ```
 
-Contrat :
+Contrat visé :
 - `event: step` pour chaque élément du `causal_path` au fil de la construction.
 - `event: done` avec les métadonnées finales.
 - `event: error` avec `{error_code, message}` en cas d'échec partiel ; la connexion est fermée.

@@ -17,7 +17,7 @@ Every design and implementation decision must be evaluated against this lens:
 - **Forkable / scenario-first** — every state-changing capability must work inside a scenario fork so agents can test counter-factuals without touching baseline. No feature is "agent-ready" if it only works on baseline.
 - **Deterministic core, stochastic edge** — LLMs/agents never own core calculations. Engine is deterministic; agents propose, govern, approve. Reproducibility is non-negotiable.
 - **Queryable from a scenario** — every read path (`GetNode`, `QueryShortages`, etc.) must accept a `scenario_id`. Agents read from forks, not just baseline.
-- **Streamable** — agents subscribe to deltas (`StreamChanges`), they don't poll. New capabilities should emit change events.
+- **Streamable** — agents subscribe to deltas, they don't poll. Concrete rule (ADR-027, #391): every state-changing capability emits a typed event into the `events` table (migrations 002/006/051), which feeds `GET /v1/stream` (SSE). Agents subscribe via `/v1/stream?cursor=<stream_seq>`; a change that does not write an `events` row is invisible to the stream.
 - **Explainable** — every calculation must be traceable. Recommendations without evidence are rejected by governance agents.
 - **Auditable** — every write (by agent or human) is logged with input, output, scenario_id, calc_run_id, policy result. Audit is a feature, not telemetry.
 - **Confidence-aware** — outputs that agents consume (forecasts, anomalies, recommendations) must carry a confidence score and a data-freshness flag. Stale data or low DQ blocks autonomous actions.
@@ -30,7 +30,7 @@ Every design and implementation decision must be evaluated against this lens:
 - A write that bypasses the recommendation/approval state machine for L3+ actions.
 - A forecast / score / metric without a confidence or freshness signal.
 - An LLM call inside a deterministic calculation path.
-- A new feature without StreamChanges emission, without audit log, without explanation trace.
+- A state-changing feature that writes no typed `events` row (invisible to `/v1/stream`), without audit log, without explanation trace.
 
 **Wedge V1** : "Autonomous shortage control tower with scenario-backed recommendations." Every near-term feature is judged by whether it advances this wedge.
 
@@ -95,7 +95,7 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 ### Storage
 - PostgreSQL 16 via `psycopg[binary]` 3.x — **not** SQLite (ADR-005 proposes SQLite but the project has moved past the proof stage).
 - UUID PKs, `TIMESTAMPTZ` UTC, **no JSONB** for business data. The "JSONB carve-out" pattern: diagnostic / forensic payloads with unbounded shape are the only acceptable JSONB sites, and each must carry a top-of-file comment block explaining the rationale (see `db/migrations/012_dq_agent.sql`, `021_mrp_lot_sizing_params.sql`, `031_demo_runs.sql`). Today's carve-out list: `dq_agent_runs.summary`, `mrp_runs.errors`, `mrp_runs.warnings`, `demo_runs.artifact`. Every other column uses typed columns. 32 numbered SQL migrations under `src/ootils_core/db/migrations/`.
-- Migrations auto-apply on `OotilsDB()` construction (i.e. at API startup), serialized by a PG advisory lock (`_LOCK_KEY = 8_037_421_901`), tracked in `schema_migrations`. A migration that fails with an "already exists"-family error is recorded as applied rather than re-run — so new migrations must be idempotent in that sense.
+- Migrations auto-apply on `OotilsDB()` construction (i.e. at API startup), serialized by a PG advisory lock (`_LOCK_KEY = 8_037_421_901`), tracked in `schema_migrations`. Each migration runs in **its own transaction** (`conn.transaction()`, `db/connection.py:181-197`); on **any** error the runner logs it, the transaction rolls back, and the exception **propagates** — the migration is **NOT** recorded as applied, and the process **crashes at boot**. The runner does *not* swallow "already exists"-family errors. Consequence: defensive idempotence (`IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP … IF EXISTS`) is a **necessity**, not a nicety. The whole file is one transaction, so a statement failing mid-file rolls back the earlier ones too; but a fixed migration re-attempted at the next boot still re-runs every statement from scratch, and each must be a clean no-op on objects a prior partial run may have created. See migration 063's header block for the canonical defensive-idempotence pattern.
 - `events` are conceptually insert-only for the **payload**, but mutable for **bookkeeping metadata** (`processed` flag, `updated_at`). Sites that update `processed = TRUE` in the orchestration layer (`engine/orchestration/propagator.py`, `engine/orchestration/calc_run.py`) are by design — they advance the event lifecycle without rewriting the event. ADR-005 D2's "insert-only" applies to the payload, not the flag.
 
 ### Auth
