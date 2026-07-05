@@ -371,34 +371,48 @@ class GraphIntegration:
         Regeneration contract (run_id=None): an APICS run regenerates the
         complete planned-supply picture for the scenario, so the purge scope
         is node_type='PlannedSupply' + scenario_id — deliberately wider than
-        the run's item/location filter. Firm Planned Orders (FPO) do not
-        exist yet (chantier C2.2); once they do, firmed supply must be
-        excluded from this purge.
+        the run's item/location filter. Firm Planned Orders (FPO, migration
+        061 ``nodes.is_firm``, chantier #346) are EXCLUDED from this purge:
+        a firmed PlannedSupply is planner/agent-owned closed supply, not
+        re-generatable, so it must survive full regeneration (both the node
+        and its edges) exactly like a committed PO/WO/Transfer would. This
+        exclusion is only half of the FPO contract — the other half is
+        netting the surviving FPO as engaged supply so the next run doesn't
+        re-plan the same demand (see ``gross_to_net._get_scheduled_receipts_map``
+        and ``mrp.loader`` sched_b); the two must be read together.
+
+        The run_id branch purges by ``mrp_run_id`` (a specific prior run's
+        artefacts, any node type) rather than by node_type — an FPO can in
+        principle carry an ``mrp_run_id`` from the run that first created it,
+        so the same ``NOT is_firm`` guard applies there too.
         """
         if run_id:
-            # Deactivate edges referencing nodes from this run
+            # Deactivate edges referencing nodes from this run (firm nodes,
+            # and therefore their edges, survive — see docstring).
             self.db.execute(
                 """
                 UPDATE edges SET active = FALSE
                 WHERE active = TRUE
                   AND (from_node_id IN (
-                    SELECT node_id FROM nodes WHERE mrp_run_id = %s
+                    SELECT node_id FROM nodes WHERE mrp_run_id = %s AND NOT is_firm
                 ) OR to_node_id IN (
-                    SELECT node_id FROM nodes WHERE mrp_run_id = %s
+                    SELECT node_id FROM nodes WHERE mrp_run_id = %s AND NOT is_firm
                 ))
                 """,
                 (run_id, run_id),
             )
-            # Deactivate nodes from this run
+            # Deactivate nodes from this run, excluding firmed supply.
             self.db.execute(
                 """
                 UPDATE nodes SET active = FALSE, updated_at = NOW()
-                WHERE mrp_run_id = %s AND active = TRUE
+                WHERE mrp_run_id = %s AND active = TRUE AND NOT is_firm
                 """,
                 (run_id,),
             )
         else:
-            # Deactivate all PlannedSupply nodes for scenario
+            # Deactivate all PlannedSupply nodes for scenario, excluding
+            # firmed supply (FPO) — a firm PlannedSupply is not
+            # regenerated, so it must survive full-regen purge.
             self.db.execute(
                 """
                 UPDATE edges SET active = FALSE
@@ -407,10 +421,12 @@ class GraphIntegration:
                     SELECT node_id FROM nodes
                     WHERE node_type = 'PlannedSupply'
                     AND scenario_id = %s
+                    AND NOT is_firm
                 ) OR to_node_id IN (
                     SELECT node_id FROM nodes
                     WHERE node_type = 'PlannedSupply'
                     AND scenario_id = %s
+                    AND NOT is_firm
                 ))
                 """,
                 (self.scenario_id, self.scenario_id),
@@ -421,12 +437,13 @@ class GraphIntegration:
                 WHERE node_type = 'PlannedSupply'
                 AND scenario_id = %s
                 AND active = TRUE
+                AND NOT is_firm
                 """,
                 (self.scenario_id,),
             )
         logger.info(
             "cleanup_previous_run: deactivated previous %s "
-            "(scenario %s, run_id=%s)",
+            "(scenario %s, run_id=%s, firm supply excluded)",
             "run artefacts (all node types)" if run_id else "PlannedSupply nodes",
             self.scenario_id, run_id,
         )

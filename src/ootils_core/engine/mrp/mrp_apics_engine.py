@@ -136,10 +136,13 @@ class MrpApicsEngine:
             # previous PlannedSupply nodes/edges first (run_id=None → scenario
             # scope). Without this, each re-run stacks new PlannedSupply on
             # top of the previous run's, double-counting planned supply
-            # (issue #337). FPOs don't exist yet (chantier C2.2); when they
-            # do, firmed orders must survive this purge. Runs in the same
-            # transaction as the persist steps below: on failure the except
-            # branch rolls back, restoring the previous plan.
+            # (issue #337). Firm Planned Orders (FPO, migration 061, #346)
+            # are excluded from this purge (cleanup_previous_run) AND netted
+            # as engaged scheduled receipts by gross_to_net below — the two
+            # go together, or a surviving FPO would double-plan its own
+            # demand. Runs in the same transaction as the persist steps
+            # below: on failure the except branch rolls back, restoring the
+            # previous plan.
             self.graph.cleanup_previous_run()
 
             # 2. Calculate or retrieve LLCs

@@ -202,3 +202,73 @@ def test_apics_rerun_purge_is_scenario_scoped(api_client, auth, demand_item_loca
     )
     stats = _active_planned_supply_stats(BASELINE_SCENARIO_ID)
     assert _active_count_for_run(run_b_id) == stats["count"]
+
+
+def _firm_all_planned_supply(scenario_id: UUID) -> int:
+    """Firm every active PlannedSupply for the scenario; returns how many."""
+    with psycopg.connect(TEST_DB_URL, autocommit=True, row_factory=dict_row) as conn:
+        cur = conn.execute(
+            "UPDATE nodes SET is_firm = TRUE "
+            "WHERE node_type = 'PlannedSupply' AND scenario_id = %s AND active = TRUE",
+            (scenario_id,),
+        )
+        return cur.rowcount
+
+
+@requires_db
+def test_apics_rerun_keeps_firm_planned_orders_and_does_not_double_plan(
+    api_client, auth, demand_item_location  # noqa: F811
+):
+    """#346 PR-C coupling — the invariant that justifies the whole PR.
+
+    Firming a run's PlannedSupply into Firm Planned Orders must make them BOTH
+    (a) survive the next regeneration purge (unlike the non-firm case, where
+    run 1's nodes are fully deactivated) AND (b) be netted as committed supply,
+    so the re-run does NOT double-plan the demand they already cover. Purge
+    exclusion WITHOUT netting would double-plan; this proves the two together.
+    """
+    payload = {
+        "item_id": demand_item_location["item_id"],
+        "location_id": demand_item_location["location_id"],
+        "apics_mode": True,
+        "horizon_days": 90,
+        "bucket_grain": "week",
+        "forecast_strategy": "MAX",
+    }
+
+    # --- Run 1: plan the demand ---
+    resp1 = api_client.post("/v1/mrp/run", json=payload, headers=auth)
+    assert resp1.status_code == 200, resp1.text
+    assert resp1.json()["status"] == "COMPLETED", resp1.json()["errors"]
+    run1_id = UUID(resp1.json()["run_id"])
+    stats1 = _active_planned_supply_stats(BASELINE_SCENARIO_ID)
+    assert stats1["count"] > 0, "run 1 must plan supply (else the test is vacuous)"
+
+    # Firm every PlannedSupply run 1 produced -> they become FPOs.
+    n_firmed = _firm_all_planned_supply(BASELINE_SCENARIO_ID)
+    assert n_firmed == stats1["count"]
+
+    # --- Run 2: identical parameters ---
+    resp2 = api_client.post("/v1/mrp/run", json=payload, headers=auth)
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["status"] == "COMPLETED", resp2.json()["errors"]
+
+    # (a) The firmed run-1 PlannedSupply SURVIVED the regeneration purge.
+    with psycopg.connect(TEST_DB_URL, row_factory=dict_row) as conn:
+        survived = conn.execute(
+            "SELECT COUNT(*) AS c FROM nodes WHERE mrp_run_id = %s "
+            "AND node_type = 'PlannedSupply' AND is_firm = TRUE AND active = TRUE",
+            (run1_id,),
+        ).fetchone()["c"]
+    assert survived == n_firmed, (
+        f"firmed run-1 PlannedSupply must survive the re-run: "
+        f"{n_firmed} firmed, {survived} still active"
+    )
+
+    # (b) No double-planning: the firmed supply is netted, so run 2 adds no new
+    #     supply for the already-covered demand — total active qty must not grow.
+    stats2 = _active_planned_supply_stats(BASELINE_SCENARIO_ID)
+    assert stats2["total_qty"] == stats1["total_qty"], (
+        f"double-planning across the FPO re-run: active PlannedSupply qty grew "
+        f"{stats1['total_qty']} -> {stats2['total_qty']}"
+    )
