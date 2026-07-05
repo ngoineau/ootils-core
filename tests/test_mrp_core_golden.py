@@ -116,6 +116,35 @@ def test_consume_demand_max_only_and_demand_time_fence():
     assert g["X2"] == {0: 10.0, 3: 50.0}
 
 
+def test_consume_demand_window_zero_is_per_bucket_max_golden_invariant():
+    """GOLDEN INVARIANT (#349): with no consumption window seeded (consume_window
+    empty => 0 per item) the primitive MUST be byte-identical to per-bucket
+    max(orders, forecast) — the pre-window semantics the golden dataset relies
+    on. This locks that the window is a strict extension, inert at window=0."""
+    d = build_pd(
+        co_b={"X1": {2: 100}, "X2": {0: 10, 3: 10}},
+        fc_b={"X1": {2: 60, 4: 80}, "X2": {0: 50, 3: 50}},
+        frozen_d={"X2": 14},
+        # consume_window intentionally left empty => window 0 for every item.
+    )
+    g = core.consume_demand(d)
+    assert g["X1"] == {2: 100.0, 4: 80.0}
+    assert g["X2"] == {0: 10.0, 3: 50.0}
+
+
+def test_consume_demand_window_closes_early_buy_displaced_double_count():
+    """The window fix (#349), locked in the golden file: a firm booking 100 in
+    bucket 3 and its forecast 120 in the neighbouring bucket 4 net to 120 with a
+    covering window, NOT 220. window=0 on the SAME data double-counts to 220 —
+    proving the window is what closes the Early-Buy trap, not a golden change."""
+    o = {3: 100.0}
+    f = {4: 120.0}
+    d_win = build_pd(co_b={"Y": o}, fc_b={"Y": f}, consume_window={"Y": 2})
+    d_zero = build_pd(co_b={"Y": o}, fc_b={"Y": f})
+    assert sum(core.consume_demand(d_win)["Y"].values()) == pytest.approx(120.0)
+    assert sum(core.consume_demand(d_zero)["Y"].values()) == pytest.approx(220.0)
+
+
 # ───────────────────────── time-phased cascade ─────────────────────────
 
 def test_run_timephased_bom_cascade_leadtime_lotsize():

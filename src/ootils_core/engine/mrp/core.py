@@ -173,6 +173,15 @@ class PlanningData:
     co_b: dict = field(default_factory=dict)
     fc_b: dict = field(default_factory=dict)
     sched_b: dict = field(default_factory=dict)
+    # Per-item forecast-consumption WINDOW in weekly buckets (#349). Missing key
+    # => 0 => strict per-bucket max(orders, forecast) (the golden-master
+    # semantics — the loader seeds nothing for the golden fixture). A positive
+    # value lets a bucket's orders consume forecast in NEIGHBOURING buckets
+    # (backward then forward, APICS standard) up to that many buckets away —
+    # closing the Early-Buy double-count that pure per-bucket max leaves open
+    # when a firm booking and its forecast land one bucketisation-noise bucket
+    # apart. See consume_demand.
+    consume_window: dict = field(default_factory=dict)
     # Per-item list of closed/firm receipts WITH identity (#346). Parallel to
     # sched_b (the bucket aggregate kept for projection); reschedule uses this.
     sched_orders: dict = field(default_factory=dict)
@@ -193,19 +202,132 @@ class PlanningData:
         return max(0, math.ceil(float(lt) / 7))
 
 
-def consume_demand(d: PlanningData) -> dict:
+def _window_offsets(window_buckets: int) -> list[int]:
+    """Deterministic APICS backward-before-forward search order for a
+    consumption window: 0, -1, +1, -2, +2, ... out to `window_buckets`.
+
+    A bucket's orders consume forecast in their OWN bucket first (offset 0),
+    then exhaust neighbouring forecast moving OUTWARD, always trying the
+    backward (earlier) neighbour before the forward (later) one at the same
+    distance. The fixed order is what makes the cross-consumption deterministic
+    regardless of iteration order over items/buckets.
+    """
+    offsets = [0]
+    for step in range(1, window_buckets + 1):
+        offsets.append(-step)
+        offsets.append(step)
+    return offsets
+
+
+def _consume_windowed(
+    orders: dict[int, float],
+    forecast: dict[int, float],
+    dtf_weeks: int,
+    window_buckets: int,
+    out: dict[int, float],
+    trace: list | None,
+    item: str,
+) -> None:
+    """max_only consumption WITH an inter-bucket window (#349), mass-safe.
+
+    Semantics (APICS standard, backward-before-forward):
+      * Each bucket's orders consume the forecast of their own bucket, then
+        exhaust the still-unconsumed forecast of neighbouring buckets, moving
+        outward (see _window_offsets) up to `window_buckets` away.
+      * A bucket's net demand = its OWN orders (concrete, always stand) PLUS the
+        forecast that bucket still holds UNCONSUMED after every bucket's orders
+        have run. The consumed forecast is REPLACED by the concrete orders that
+        consumed it (that is what avoids the double count) — the net is never
+        orders + their-own-forecast summed. With window_buckets == 0 orders
+        only reach their own bucket, so this reduces EXACTLY to per-bucket
+        max(orders, forecast): o + max(0, f - o) == max(o, f).
+
+    Demand-time-fence: inside the fence (t < dtf_weeks) a bucket carries orders
+    ONLY (forecast is not yet trusted), so fenced buckets neither offer their
+    forecast to be consumed nor let their orders reach out for neighbouring
+    forecast — they are excluded from the window mechanics entirely and emit
+    their raw order qty. Beyond the fence the window applies.
+
+    `remaining_fc` tracks forecast not yet consumed by ANY bucket's orders, so
+    two bookings can never double-consume the same forecast unit.
+    """
+    buckets = set(orders) | set(forecast)
+    remaining_fc: dict[int, float] = {}
+    fenced: set[int] = set()
+    for t in buckets:
+        if t < dtf_weeks:
+            fenced.add(t)
+            continue
+        f = forecast.get(t, 0.0)
+        if f:
+            remaining_fc[t] = f
+
+    # Orders consume forecast, backward-before-forward, in a deterministic
+    # bucket order (ascending) so ties in overlapping windows resolve stably.
+    for t in sorted(orders):
+        o = orders.get(t, 0.0)
+        if t in fenced or o <= 0:
+            continue
+        left = o
+        for off in _window_offsets(window_buckets):
+            if left <= 0:
+                break
+            nb = t + off
+            avail = remaining_fc.get(nb, 0.0)
+            if avail <= 0:
+                continue
+            take = min(left, avail)
+            remaining_fc[nb] = avail - take
+            left -= take
+            if trace is not None and take > 0:
+                trace.append((item, t, nb, take))
+
+    # Net demand per bucket = own orders (concrete, always kept) + forecast that
+    # bucket still holds unconsumed. The forecast consumed by any bucket's
+    # orders is replaced by those concrete orders, so nothing is double-counted.
+    for t in buckets:
+        if t in fenced:
+            v = orders.get(t, 0.0)
+        else:
+            v = orders.get(t, 0.0) + remaining_fc.get(t, 0.0)
+        if v:
+            out[t] = v
+
+
+def consume_demand(d: PlanningData, trace: list | None = None) -> dict:
     """Independent demand per item per bucket AFTER forecast consumption + demand
     time fence. Inside the demand time fence (frozen): customer orders only.
     Beyond: strategy (max_only = max(orders, forecast); never the sum).
+
+    forecast-consumption WINDOW (#349): for the default `max_only` strategy an
+    item may carry a per-item window (`d.consume_window`, in weekly buckets;
+    missing => 0). A positive window lets a bucket's orders consume forecast in
+    NEIGHBOURING buckets (backward then forward, APICS standard) so a firm
+    Early-Buy booking and its forecast that land one bucketisation-noise bucket
+    apart are netted once instead of double-counted. window == 0 reduces
+    EXACTLY to per-bucket max(orders, forecast) — the golden-master semantics.
+    `forecast_only` / `orders_only` ignore the window (no cross-consumption).
+
+    If `trace` is a list, per-move inter-bucket consumption tuples
+    (item, from_bucket, to_bucket, qty) are appended (explainability).
+
     Returns {item: {bucket: qty}}.
     """
     gross: defaultdict[str, defaultdict[int, float]] = defaultdict(lambda: defaultdict(float))
     for item in set(d.co_b) | set(d.fc_b):
         dtf_weeks = math.ceil(float(d.frozen_d.get(item, 0) or 0) / 7)
         s = (d.strat.get(item) or "max_only").lower()
-        for t in set(d.co_b.get(item, {})) | set(d.fc_b.get(item, {})):
-            o = d.co_b.get(item, {}).get(t, 0.0)
-            f = d.fc_b.get(item, {}).get(t, 0.0)
+        orders = d.co_b.get(item, {})
+        forecast = d.fc_b.get(item, {})
+        window_buckets = int(d.consume_window.get(item, 0) or 0)
+        if s == "max_only" and window_buckets > 0:
+            _consume_windowed(
+                orders, forecast, dtf_weeks, window_buckets, gross[item], trace, item
+            )
+            continue
+        for t in set(orders) | set(forecast):
+            o = orders.get(t, 0.0)
+            f = forecast.get(t, 0.0)
             if t < dtf_weeks:
                 v = o
             elif s == "forecast_only":

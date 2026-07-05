@@ -104,7 +104,8 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
             MAX(rp.min_order_qty),
             MAX(rp.frozen_time_fence_days),
             MAX(rp.slashed_time_fence_days),
-            MIN(rp.forecast_consumption_strategy)
+            MIN(rp.forecast_consumption_strategy),
+            MAX(rp.consumption_window_days)
         FROM ({resolved_ipp_sql}) rp
         JOIN item_planning_params base ON base.param_id = rp.param_id
         GROUP BY rp.item_id
@@ -124,6 +125,16 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
         d.frozen_d[it] = r[10]
         d.slushy_d[it] = r[11]
         d.strat[it] = r[12]
+        # consumption window (#349): DB stores DAYS (mig 021, DEFAULT 7). The
+        # core consumes WEEKLY buckets, so convert days -> buckets by rounding
+        # to nearest week (0j->0, 7j->1, 30j->4). Pooled by MAX across
+        # locations like the time fences — a single per-item window is the
+        # intent; the resolver has already overlaid any scenario override
+        # BEFORE this pooling (same contract as the other whitelisted fields).
+        # A NULL (item has no window column value) rounds to 0 => strict
+        # per-bucket max, the golden-master semantics.
+        window_days = r[13]
+        d.consume_window[it] = round(float(window_days) / 7) if window_days is not None else 0
 
     # Reschedule dampening thresholds (#346, migration 061). These two columns
     # are DELIBERATELY baseline-only — not in the #347 overlay whitelist (mig 061
