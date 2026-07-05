@@ -15,3 +15,9 @@ from typing import Any
 import psycopg
 
 DictRowConnection = psycopg.Connection[dict[str, Any]]
+
+# Async counterpart, used by the SSE stream (api/routers/stream.py), which owns
+# a dedicated async connection OUTSIDE the sync pool (see SCALABILITY.md
+# breaking point #6: a long-lived stream on a sync pool connection would starve
+# the bounded threadpool).
+AsyncDictRowConnection = psycopg.AsyncConnection[dict[str, Any]]
