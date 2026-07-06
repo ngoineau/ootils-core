@@ -206,6 +206,10 @@ def build_client(dsn: str) -> Any:
     already applied by the OotilsDB(dsn) in step 0 before this is called."""
     from fastapi.testclient import TestClient
 
+    # NOTE: the get_db override below only covers ROUTE handlers. The auth
+    # layer's minted-token lookup needs DATABASE_URL in the env, which main()
+    # sets BEFORE the first ootils_core import (see the comment there) — by
+    # the time this function runs it is too late to set it.
     from ootils_core.api.app import create_app
     from ootils_core.api.dependencies import get_db
     from ootils_core.db.connection import OotilsDB
@@ -467,11 +471,35 @@ def step2_forecast(ctx: DemoContext) -> StepResult:
     present. SKIP honestly if no series is exploitable."""
     series = _discover_forecast_series(ctx.dsn)
     if series is None:
+        # Distinguish "empty demand_history" from the pilot-data onboarding gap
+        # observed on ootils_pilote_test: demand_history.warehouse_id carries
+        # ERP numeric DC codes ('87', '286', ...) that were never mapped to
+        # locations.external_id (alpha codes 'DAL', 'CAN', ...) — so the
+        # migration-047 join yields zero rows even over millions of bookings.
+        # Mapping those codes is a data-onboarding decision for the pilot
+        # (🎯 see DEMO-RUNBOOK caveats), not something this demo fabricates.
+        with _connect(ctx.dsn) as conn:
+            diag = conn.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT dh.warehouse_id) AS warehouses,
+                       COUNT(DISTINCT dh.warehouse_id)
+                         FILTER (WHERE l.location_id IS NOT NULL) AS mapped
+                FROM demand_history dh
+                LEFT JOIN locations l ON l.external_id = dh.warehouse_id
+                """
+            ).fetchone()
+        if int(diag["total"]) > 0 and int(diag["mapped"]) == 0:
+            detail = (
+                f"demand_history has {int(diag['total']):,} rows but NONE of its "
+                f"{int(diag['warehouses'])} warehouse_id codes map to "
+                "locations.external_id — pilot data-onboarding gap (map the ERP "
+                "DC codes to the locations registry; see runbook caveats)"
+            )
+        else:
+            detail = "no booking-based demand_history series to forecast"
         return StepResult(
-            number=2,
-            title="Forecast + FVA",
-            status=SKIP,
-            detail="no booking-based demand_history series to forecast",
+            number=2, title="Forecast + FVA", status=SKIP, detail=detail,
         )
     item_ext, loc_ext, n_rows = series
     ctx.forecast_item, ctx.forecast_location = item_ext, loc_ext
@@ -969,6 +997,40 @@ def _discover_shortage_coord(dsn: str) -> Optional[dict[str, Any]]:
     }
 
 
+def _discover_any_pi_coord(dsn: str) -> Optional[dict[str, Any]]:
+    """Fallback what-if coordinate when baseline has NO active shortage: any
+    (item, location) that carries a baseline ProjectedInventory node (so the
+    fork's node-override recompute has something to bite on). Deterministic
+    pick (most PI buckets first). Read-only. Same return shape as
+    _discover_shortage_coord."""
+    with _connect(dsn) as conn:
+        row = conn.execute(
+            """
+            SELECT n.item_id, i.external_id AS item_ext,
+                   n.location_id, l.external_id AS loc_ext,
+                   COUNT(*) AS n_buckets
+            FROM nodes n
+            JOIN items i ON i.item_id = n.item_id
+            JOIN locations l ON l.location_id = n.location_id
+            WHERE n.node_type = 'ProjectedInventory'
+              AND n.scenario_id = %s AND n.active
+              AND n.item_id IS NOT NULL AND n.location_id IS NOT NULL
+            GROUP BY n.item_id, i.external_id, n.location_id, l.external_id
+            ORDER BY n_buckets DESC, i.external_id, l.external_id
+            LIMIT 1
+            """,
+            (BASELINE_SCENARIO_ID,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "item_id": str(row["item_id"]),
+        "item_ext": str(row["item_ext"]),
+        "location_id": str(row["location_id"]),
+        "loc_ext": str(row["loc_ext"]),
+    }
+
+
 def _pick_pi_node_for_fork(dsn: str, item_id: str, location_id: Optional[str]) -> Optional[str]:
     """A baseline ProjectedInventory node id to hang a simulate override on —
     the node override path that /v1/simulate recomputes a shortage delta from.
@@ -1002,28 +1064,47 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
           REST (L0, never promoted onto baseline).
     Then ARCHIVE the fork (status='archived', never DELETE).
 
-    SKIP when there is no active-shortage coordinate to fork (e.g. a base with
-    no seeded shortage)."""
+    Coordinate: the worst active shortage when the base has one; otherwise
+    fall back to any ProjectedInventory coordinate and tighten (opening_stock
+    to 0) instead of relax. SKIP only when the base has no PI node at all."""
     coord = _discover_shortage_coord(ctx.dsn)
+    relax = True  # shortage coord -> RELAX stock (resolve); fallback -> TIGHTEN
     if coord is None:
-        return StepResult(
-            number=7,
-            title="Forkable what-if",
-            status=SKIP,
-            detail="no active-shortage coordinate on baseline to fork",
-        )
-    print(f"  Shortage coord : item={coord['item_ext']} "
-          f"location={coord['loc_ext']}")
+        # No active shortage on baseline (e.g. no recent calc run on the pilot
+        # base). Fall back to ANY ProjectedInventory coordinate and run the
+        # counter-factual in the OTHER direction: opening_stock=0 ("what if we
+        # had less stock?") — an equally honest fork whose delta shows NEW
+        # shortages instead of resolved ones. Only SKIP when the base has no
+        # PI node at all to fork.
+        coord = _discover_any_pi_coord(ctx.dsn)
+        relax = False
+        if coord is None:
+            return StepResult(
+                number=7,
+                title="Forkable what-if",
+                status=SKIP,
+                detail=(
+                    "no active-shortage coordinate AND no ProjectedInventory "
+                    "node on baseline to fork"
+                ),
+            )
+        print("  No active shortage on baseline — falling back to a PI "
+              "coordinate, tightening instead of relaxing")
+    print(f"  What-if coord  : item={coord['item_ext']} "
+          f"location={coord['loc_ext']} "
+          f"(direction: {'relax stock' if relax else 'tighten stock to 0'})")
 
     pi_node = _pick_pi_node_for_fork(ctx.dsn, coord["item_id"], coord["location_id"])
     fork_name = f"demo-e2e-whatif-{_dt.datetime.now(_dt.timezone.utc):%Y%m%dT%H%M%SZ}"
 
     overrides = []
     if pi_node is not None:
-        # Relax the opening balance so the recompute should resolve shortages
-        # at this coordinate — a visible, honest delta.
+        # Shortage coordinate: relax the opening balance so the recompute
+        # resolves shortages. Fallback coordinate: tighten it to zero so the
+        # recompute provokes shortages. Either way the delta is honest.
+        new_value = "100000" if relax else "0"
         overrides.append(
-            {"node_id": pi_node, "field_name": "opening_stock", "new_value": "100000"}
+            {"node_id": pi_node, "field_name": "opening_stock", "new_value": new_value}
         )
 
     sim = ctx.client.post(
@@ -1093,8 +1174,10 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
         title="Forkable what-if",
         status=PASS,
         detail=(
-            f"fork {fork_id[:8]} delta new={n_new}/resolved={n_resolved}, "
-            f"overlay={'set' if overlay_ok else 'n/a'}, archived={archived}"
+            f"fork {fork_id[:8]} delta new={n_new}/resolved={n_resolved}"
+            # 0/0 with a failed recompute is NOT "no change" — say so loudly.
+            + ("" if sim_body["delta_computed"] else " (DELTA NOT COMPUTED)")
+            + f", overlay={'set' if overlay_ok else 'n/a'}, archived={archived}"
         ),
         data={
             "fork_id": fork_id,
@@ -1361,6 +1444,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if guard_error is not None:
         print(f"ERROR: {guard_error}", file=sys.stderr)
         return 2
+
+    # MUST happen before the FIRST ootils_core import (step 0 imports OotilsDB):
+    # db/connection.py freezes DEFAULT_DATABASE_URL at module import, and the
+    # auth layer's minted-token lookup (resolve_principal -> _get_ootils_db)
+    # builds a SINGLETON OotilsDB() from that frozen default — it never goes
+    # through the get_db override. Without this, every minted-token request
+    # 503s "Authentication backend unavailable" against a default localhost DB
+    # (the exact failure of the first pilot run).
+    os.environ["DATABASE_URL"] = args.dsn
 
     _banner("OOTILS WEDGE RUNBOOK (#408) — autonomous shortage control tower")
     print(f"  Target : {mask_dsn(args.dsn)}")
