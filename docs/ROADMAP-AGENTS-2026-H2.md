@@ -89,10 +89,10 @@
 **Livrables** : (a) basculer TOUS les routers d'écriture (`mrp`, `ingest`, `calc`, `param_overrides`, `simulate`, `graph`, `mps`, `drp`…) vers `require_scope` — inventaire exhaustif par grep, aucun oublié ; (b) appliquer `rate_per_min` par token (middleware au checkout du Principal) ; (c) endpoints issue/revoke de tokens (gouvernés admin) ; (d) `/metrics` ; (e) **écrire ADR-029** (avec H0).
 **Acceptation** : test d'intégration — token scope read tente un write sur chaque famille de routes → 403 systématique ; token agent dépasse son rate → 429.
 
-### SUP-1 — Fermer #415 : la fenêtre de consommation dans le moteur APICS — P0
-**Constat confirmé** : `forecast_consumer.py:194-239` est strictement par-bucket ; `window_days` lu puis ignoré (:606-621). **L'endpoint REST `POST /v1/mrp/run` sur-planifie l'Early Buy — deux moteurs, deux chiffres, un pilote expert le verra.**
-**Livrables** : porter la fenêtre backward/forward du math core dans `forecast_consumer.py` + test de parité math core ↔ APICS sur le cas Early-Buy + vérifier `gross_to_net` (netting FPO ADR-026) en aval.
-**Acceptation** : golden partagé ; parité sur le cas Early-Buy exacte ; le résidu de parité global (~4 % médian, ADR-020) re-mesuré et documenté.
+### SUP-1 — #423 : ADR-020 PAS 4, une seule maths MRP — P0 (décision pilote 2026-07-06, absorbe #415)
+**Constat confirmé + arbitrage pilote** : le moteur APICS (`POST /v1/mrp/run`) **réimplémente la maths** du cœur au lieu de l'appeler — chaque amélioration du cœur (fenêtre de consommation #349) laisse l'API en retard (« deux moteurs, deux chiffres »), résidu de parité ~4 % médian, garde-fou CI en xfail qui documente la dérive au lieu de l'empêcher. Fermer #415 seul soignerait un symptôme en laissant la machine à divergences en place.
+**Livrables (3 PR, détail dans #423)** : (1) arbitrages sémantiques tranchés dans le cœur (frozen fence 🎯, demande indépendante des composants, pièces de rechange, L4L/order_multiple) ; (2) délégation — l'APICS appelle le cœur et ne garde que la matérialisation graphe (`graph_integration`), **parité xfail → VERT DUR** ; (3) forkabilité réelle — l'on-hand APICS est en `BASELINE` codé en dur (risque nommé par l'ADR-020 : « les scénarios mentiraient ») → scénariser lecture+écriture via le loader du cœur, ferme une violation North Star silencieuse.
+**Acceptation** : parité math core ↔ APICS en vert dur CI (Early Buy inclus — ferme #415) ; `POST /v1/mrp/run` scénarisé bout-en-bout ; la maths MRP n'existe plus qu'à UN endroit ; goldens du cœur inchangés.
 
 ### DEM-1 — Câbler le routage tête/traîne + première exception demande — P0
 **Constat confirmé** : `route()`/`classify()`/`SeriesFeatures` (577 lignes testées) ne sont appelés QUE par les tests ; le `HierarchicalRunner` consomme un mapping que rien ne peuple. La réponse au mur d'échelle du DESIGN est une bibliothèque inerte.
