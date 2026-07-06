@@ -32,6 +32,12 @@ class CalcRunResponse(BaseModel):
     message: str
 
 
+# governance PR2: not applicable — #392 security-review audit (PR1):
+# propagation is deterministic recalculation (ADR-003), not a decision;
+# it re-derives ProjectedInventory/shortage state from events already
+# committed to the graph, it does not introduce new baseline facts. Left
+# require_auth-only; outside the L3 apply-to-baseline class this chantier
+# targets.
 @router.post("/run", response_model=CalcRunResponse)
 def trigger_calc_run(
     body: CalcRunRequest,

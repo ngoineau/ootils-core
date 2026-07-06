@@ -790,6 +790,13 @@ class ApproveMPSResponse(BaseModel):
     notes: Optional[str]
 
 
+# governance PR2: recommend:approve or a dedicated mps:approve scope —
+# deferred. #392 security-review audit (PR1): this transitions an MPS node
+# DRAFT/REVIEWED -> APPROVED, gating entry into /promote-to-mrp below. It does
+# NOT itself write canonical master data (unlike staging/approve.py, which is
+# gated in this same PR1) — the write-to-baseline happens one step later, at
+# promote-to-mrp. Scoped as require_auth-only for now; not a silent gap, an
+# explicitly deferred one, tracked alongside promote-to-mrp below.
 @router.post(
     "/{mps_id}/approve",
     response_model=ApproveMPSResponse,
@@ -925,6 +932,17 @@ class PromoteToMRPResponse(BaseModel):
     crp_peak_load_date: Optional[date] = Field(None, description="Date of peak load (if CRP triggered)")
 
 
+# governance PR2: recommend:approve or a dedicated mps:approve scope +
+# Decision Ladder human gate — deferred. #392 security-review audit (PR1):
+# this DOES write to baseline (creates PlannedSupply nodes on the baseline
+# scenario — see the CRP-integration comment below confirming
+# "promote_to_mrp writes planned_supply on baseline") and flips the MPS node
+# to the terminal RELEASED status, an apply-to-baseline action in the same
+# family as staging/approve.py (gated in this PR1) and scenarios/promote
+# (gated in PR1's prior pass). Left require_auth-only here deliberately:
+# closing it needs the same scope+human-gate stacking pattern already
+# applied to staging/scenarios/recommendations, tracked as PR2 follow-up
+# rather than folded silently into this pass.
 @router.post(
     "/{mps_id}/promote-to-mrp",
     response_model=PromoteToMRPResponse,

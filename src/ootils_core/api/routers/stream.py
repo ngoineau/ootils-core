@@ -60,7 +60,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from starlette.responses import StreamingResponse
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import resolve_scenario_id
 from ootils_core.db.connection import DEFAULT_DATABASE_URL
 from ootils_core.db.types import AsyncDictRowConnection
@@ -533,15 +533,16 @@ async def stream_events(
         "since my last cursor' call.",
     ),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> StreamingResponse:
     """Server-Sent Events feed of the ``events`` table for one scenario.
 
     ``scenario_id`` resolves via the shared pool-free resolver (query param or
-    ``X-Scenario-ID`` header; default baseline). Auth is required like every
-    other ``/v1/*`` endpoint. The kill switch and the concurrency budget are
-    checked HERE, before opening any connection, so a disabled or saturated
-    stream service answers 503 without touching the DB.
+    ``X-Scenario-ID`` header; default baseline). Auth requires the ``read``
+    scope (#392) like every other agent-consumable read path. The kill switch
+    and the concurrency budget are checked HERE, before opening any connection,
+    so a disabled or saturated stream service answers 503 without touching the
+    DB.
     """
     if not _stream_enabled():
         raise HTTPException(
