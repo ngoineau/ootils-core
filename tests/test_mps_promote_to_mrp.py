@@ -12,8 +12,19 @@ from unittest.mock import MagicMock
 
 import psycopg
 
+from ootils_core.constants import BASELINE_SCENARIO_ID
 from ootils_core.mps.engine import AggregateDemandEngine, PromoteToMRPResult
 from ootils_core.mps.models import MPSStatus
+
+
+def _find_planned_supply_insert(db):
+    """Return the (sql, params) of the INSERT INTO planned_supply call, or None."""
+    for call in db.execute.call_args_list:
+        sql = call.args[0] if call.args else ""
+        if "INSERT INTO planned_supply" in sql:
+            params = call.args[1] if len(call.args) > 1 else ()
+            return sql, params
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -245,6 +256,89 @@ class TestPromoteToMRPEngineMethod:
         assert result.transaction_id.startswith("TXN-")
         assert result.summary["mps_id"] == str(mps_id)
         assert result.summary["item_id"] == str(item_id)
+
+    def test_promote_from_fork_writes_planned_supply_on_fork_scenario(self):
+        """#398: a fork MPS must promote onto its OWN scenario, never baseline.
+
+        Regression guard for the North Star anti-pattern "a fork that writes
+        baseline". We inspect the INSERT INTO planned_supply parameter tuple and
+        assert the scenario_id is the fork's, not the migration-030 DEFAULT.
+        """
+        engine = AggregateDemandEngine()
+
+        mps_id = uuid4()
+        item_id = uuid4()
+        location_id = uuid4()
+        fork_scenario_id = uuid4()  # a fork, distinct from baseline
+
+        mps_row = {
+            "mps_id": mps_id,
+            "item_id": item_id,
+            "location_id": location_id,
+            "scenario_id": fork_scenario_id,
+            "planned_quantity": Decimal("200"),
+            "time_bucket_start": date(2026, 4, 6),
+            "time_bucket_end": date(2026, 4, 12),
+            "status": MPSStatus.APPROVED.value,
+        }
+
+        db = _make_mock_db([mps_row, None])
+
+        result = engine.promote_to_mrp(
+            db=db,
+            mps_id=mps_id,
+            explode_components=False,
+            user_id="test_user",
+        )
+
+        found = _find_planned_supply_insert(db)
+        assert found is not None, "INSERT INTO planned_supply was not issued"
+        sql, params = found
+        # Column list must now include scenario_id.
+        assert "scenario_id" in sql
+        # The scenario_id bound in the INSERT must be the fork's, not baseline.
+        assert fork_scenario_id in params
+        assert BASELINE_SCENARIO_ID not in params
+        # And the result summary echoes the fork scenario for traceability.
+        assert result.summary["scenario_id"] == str(fork_scenario_id)
+
+    def test_promote_from_baseline_writes_planned_supply_on_baseline(self):
+        """#398: promoting a baseline MPS stays on baseline — behaviour unchanged.
+
+        The fix must be transparent for the nominal (no-fork) production case:
+        scenario_id of the run == baseline ⇒ INSERT carries baseline explicitly.
+        """
+        engine = AggregateDemandEngine()
+
+        mps_id = uuid4()
+        item_id = uuid4()
+        location_id = uuid4()
+
+        mps_row = {
+            "mps_id": mps_id,
+            "item_id": item_id,
+            "location_id": location_id,
+            "scenario_id": BASELINE_SCENARIO_ID,
+            "planned_quantity": Decimal("120"),
+            "time_bucket_start": date(2026, 4, 6),
+            "time_bucket_end": date(2026, 4, 12),
+            "status": MPSStatus.APPROVED.value,
+        }
+
+        db = _make_mock_db([mps_row, None])
+
+        result = engine.promote_to_mrp(
+            db=db,
+            mps_id=mps_id,
+            explode_components=False,
+            user_id="test_user",
+        )
+
+        found = _find_planned_supply_insert(db)
+        assert found is not None, "INSERT INTO planned_supply was not issued"
+        _, params = found
+        assert BASELINE_SCENARIO_ID in params
+        assert result.summary["scenario_id"] == str(BASELINE_SCENARIO_ID)
 
 
 # ─────────────────────────────────────────────────────────────

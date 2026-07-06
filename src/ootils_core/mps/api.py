@@ -934,15 +934,16 @@ class PromoteToMRPResponse(BaseModel):
 
 # governance PR2: recommend:approve or a dedicated mps:approve scope +
 # Decision Ladder human gate — deferred. #392 security-review audit (PR1):
-# this DOES write to baseline (creates PlannedSupply nodes on the baseline
-# scenario — see the CRP-integration comment below confirming
-# "promote_to_mrp writes planned_supply on baseline") and flips the MPS node
-# to the terminal RELEASED status, an apply-to-baseline action in the same
-# family as staging/approve.py (gated in this PR1) and scenarios/promote
-# (gated in PR1's prior pass). Left require_auth-only here deliberately:
-# closing it needs the same scope+human-gate stacking pattern already
-# applied to staging/scenarios/recommendations, tracked as PR2 follow-up
-# rather than folded silently into this pass.
+# this DOES write planned_supply (creates a scheduled receipt on the MPS
+# node's own scenario — since #398, no longer forced onto baseline) and flips
+# the MPS node to the terminal RELEASED status, an apply-to-plan action in the
+# same family as staging/approve.py (gated in this PR1) and scenarios/promote
+# (gated in PR1's prior pass). A promotion of a baseline MPS still writes
+# baseline; a fork MPS writes its fork, so the governance gate matters equally
+# on both. Left require_auth-only here deliberately: closing it needs the same
+# scope+human-gate stacking pattern already applied to
+# staging/scenarios/recommendations, tracked as PR2 follow-up rather than
+# folded silently into this pass.
 @router.post(
     "/{mps_id}/promote-to-mrp",
     response_model=PromoteToMRPResponse,
@@ -1016,12 +1017,16 @@ async def promote_to_mrp(
         try:
             from ootils_core.crp.engine import CRPEngine
 
-            # promote_to_mrp writes planned_supply on baseline (the INSERT does not
-            # carry the MPS scenario_id), so CRP reads baseline — reading the MPS
-            # fork here would find zero promoted orders. CRP now always scenario-
-            # scopes its planned-order read; baseline is the explicit default.
+            # #398: promote_to_mrp now writes planned_supply on the MPS node's own
+            # scenario, so CRP must read that SAME scenario — otherwise a fork
+            # promotion would create orders CRP can't see. CRP scenario-scopes its
+            # planned-order read (baseline is the default); we pass the MPS run's
+            # scenario_id explicitly so write and read stay on the same plan.
             crp_engine = CRPEngine(db_conn=db)
-            crp_result = crp_engine.calculate(horizon_days=body.crp_horizon_days)
+            crp_result = crp_engine.calculate(
+                horizon_days=body.crp_horizon_days,
+                scenario_id=row["scenario_id"],
+            )
             
             crp_triggered = True
             crp_overload_count = len(crp_result.overloads)
