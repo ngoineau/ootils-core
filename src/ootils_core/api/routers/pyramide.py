@@ -475,10 +475,16 @@ def create_hierarchical_run(
 
     try:
         result = HierarchicalRunner().run(db, config)
-    except PyramideError as exc:
+    except (PyramideError, ValueError) as exc:
         # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
         # message from config validation (unknown block/level/method,
         # empty node history) — DB-free, no SQL/DSN can reach this string.
+        # ValueError is included for the hierarchy registry validation layer
+        # (pyramide/hierarchy/summing.py: unknown hierarchy_id, no levels,
+        # duplicate codes...) which predates PyramideError and is asserted as
+        # ValueError by its own unit tests — its messages are equally
+        # hand-authored (they interpolate only caller-supplied identifiers).
+        # Without this, an unknown hierarchy_id surfaced as a generic 500.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc

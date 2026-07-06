@@ -552,6 +552,36 @@ def test_hierarchical_run_unknown_block_422(migrated_db, client, auth):
             _cleanup_block(conn, h, items, loc_id)
 
 
+def test_hierarchical_run_unknown_hierarchy_422_not_500(migrated_db, client, auth):
+    """An UNKNOWN hierarchy_id (valid location, valid payload otherwise) -> 422,
+    never a generic 500. load_summing_blocks raises a bare ValueError
+    ("hierarchy '...' not found", pyramide/hierarchy/summing.py) which the
+    handler now maps to 422 alongside PyramideError (both are hand-authored
+    registry-validation messages). Pre-fix this surfaced as an uncaught
+    ValueError -> generic 500."""
+    h = "b1-h-ghost"
+    with _db_conn(migrated_db) as conn:
+        # Seed a real block only to obtain a VALID leaf location (the handler
+        # resolves the location before touching the hierarchy registry).
+        _, _, _, items, loc_id = _seed_block(conn, h, "GHOSTL")
+        try:
+            resp = client.post(
+                "/v1/forecast/hierarchical-runs",
+                json={
+                    "hierarchy_id": "hierarchy-does-not-exist",
+                    "block_code": "FAM-IRRELEVANT",
+                    "leaf_location_id": f"B1-{'GHOSTL'}-DC",
+                    "method": "SEASONAL",
+                    "method_params": {"season_length": 7},
+                },
+                headers=auth,
+            )
+            assert resp.status_code == 422, resp.text
+            assert "hierarchy-does-not-exist" in resp.json()["detail"]
+        finally:
+            _cleanup_block(conn, h, items, loc_id)
+
+
 def test_hierarchical_run_bad_recon_method_422_before_db(migrated_db, client, auth):
     """recon_method='banana' is rejected by the Pydantic pattern -> 422, before
     any resolution/DB work (no seed needed)."""
