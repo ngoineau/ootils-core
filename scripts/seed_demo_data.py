@@ -826,6 +826,190 @@ def seed_calendars(conn):
     print(f"  ✅ Calendars seeded: {len(holidays)} US holidays for DC-ATL")
 
 
+def seed_drp(conn):
+    """
+    Seed a DRP inter-site transfer opportunity (#395 PR2b) on a DEDICATED item.
+
+    CRITICAL ISOLATION NOTE: this seed MUST NEVER reuse VALVE-02 or PUMP-01.
+    engine/mrp/loader.py's on-hand scan is `SUM(quantity) FILTER (WHERE
+    node_type='OnHandSupply') ... GROUP BY item_id` — POOLED ACROSS EVERY
+    LOCATION for a given item (no location filter). Any extra OnHandSupply
+    added for VALVE-02 at a new location (e.g. DC-ATL) would silently inflate
+    VALVE-02's item-level on-hand everywhere VALVE-02 is read through mrp_core
+    (the BOM explosion router, the reschedule/shortage watchers, the
+    shortage-truth consistency guard), masking the phase-1 VALVE-02@DC-LAX
+    shortage the rest of the demo depends on. An earlier version of this seed
+    did exactly that and broke two pre-existing tests
+    (test_router_bom_integration.py::test_explode_bom_pump_no_location_
+    aggregates_all_onhand expects on_hand_qty==45.0 for VALVE-02;
+    test_shortage_truth_consistency_integration.py::
+    test_seed_produces_shortages_in_both_truths expects VALVE-02 to still
+    register a shortage in Truth B). The DRP echelon itself is NOT pooled
+    (engine/drp/loader.py keys strictly by (item, location)), but it shares the
+    SAME items/locations tables as the MRP echelon, so a shared-item seed still
+    leaks into the pooled MRP read path. The fix: a brand-new item (XFER-01)
+    that no other seed function touches, so it can never pool onto an existing
+    item's on-hand/demand picture.
+
+    Distribution plan (weekly buckets, transit 7d == 1 bucket):
+      * SOURCE (DC-ATL): item_planning_params (safety 0) + OnHandSupply=2000,
+        NO XFER-01 demand at DC-ATL -> excess = 2000 - (0 + 0) = 2000.
+      * DESTINATION (DC-LAX): item_planning_params (safety 30) + a SMALL
+        OnHandSupply=45 + one CustomerOrderDemand of 200 at day+21 (bucket 3,
+        21 // 7 == 3). safety(30) < on_hand(45), so buckets 0-2 do NOT
+        trigger (45 - 0 demand = 45 >= 30 every bucket before the order lands
+        — the deficit genuinely comes from the FUTURE demand, not an
+        already-short opening balance); at bucket 3 the balance walks to
+        45 - 200 = -155; -155 < safety(30) -> deficit_bucket=3, deficit_qty =
+        30 - (-155) = 185.
+        NOTE (verified against the pure core, engine/drp/core.py:
+        projected_deficits/_projected_deficit_for_coord): the trigger is
+        `pa < safety` evaluated FROM BUCKET 0, independent of demand — a
+        destination safety ABOVE its own opening on-hand (e.g. safety=50 vs
+        on_hand=45) fires immediately at bucket 0 with a trivial deficit_qty
+        (5 here), which then falls BELOW the lane's min_qty=10 and emits NO
+        signal at all. safety MUST stay <= on_hand for the deficit to be
+        driven by the seeded future demand rather than an accidental opening
+        shortfall — 30 (not 50) is the deliberate, verified choice.
+      * Fair share: one source, one destination, one lane -> the destination's
+        full residual (185) is offered, bounded by the source's 2000 excess:
+        qty_brute = min(185, 2000) = 185, DOWN-rounded to transfer_multiple=10
+        -> floor(185/10)*10 = 180 (>= min_qty=10, so it clears). ship_bucket =
+        max(0, 3 - 1) = 2, arrival_bucket = 2 + 1 = 3 == deficit_bucket (covered
+        on time, not late).
+      * Expected DRP output: ONE TRANSFER DRAFT, item=XFER-01,
+        source=DC-ATL, dest=DC-LAX, recommended_qty=180.
+        Verified numerically against engine.drp.core.transfer_signals directly
+        (not just derived by hand) with these exact parameters.
+    These numbers mirror tests/integration/test_transfer_watcher_integration.py
+    ::_seed_transfer_opportunity's defaults EXACTLY (src_onhand=2000,
+    dst_onhand=45, dst_safety=30, deficit_weeks=3, deficit_qty=200,
+    transfer_multiple=10) — the same proven shape already exercised end-to-end
+    by that suite, just on a dedicated item/link instead of the test's
+    per-test uuid4-suffixed ones.
+
+    The link: upstream=DC-ATL, downstream=DC-LAX, item=XFER-01 (item-specific),
+    transit_lead_time_days=7 (1 weekly bucket), minimum_shipment_qty=10,
+    priority=1, transfer_multiple=10 (ship whole 10-unit cases, DOWN-rounded).
+
+    Does NOT seed anything into `shortages`: the DRP computes its own per-site
+    deficits via projected_deficits/load_drp_data, never that table (ADR-021 —
+    `shortages` is ShortageDetector's alone; adding an XFER-01 row there would
+    also risk tripping the shortage-truth-consistency guard for an item no
+    other truth-source (mrp_core, propagation) has ever seen).
+
+    Idempotent: deterministic ids + ON CONFLICT DO NOTHING/UPDATE (link keyed on
+    its own uuid5). Runs on the BASELINE scenario so `POST /v1/drp/run`
+    (default baseline) shows the transfer out of the box. Touches ONLY the new
+    XFER-01 item + its own nodes/IPP rows + one distribution_link row — VALVE-02,
+    PUMP-01, their nodes, and `shortages` are left byte-for-byte as the earlier
+    seed steps left them.
+    """
+    print("\n🚚 Seeding DRP inter-site transfer opportunity (#395)...")
+
+    xfer_id = _uid("item:XFER-01")
+    atl_id = _uid("location:DC-ATL")
+    lax_id = _uid("location:DC-LAX")
+
+    # A brand-new, dedicated item — never touched by seed()/seed_enrichment()/
+    # seed_bom(). See the isolation note above for why this must not be
+    # VALVE-02 or PUMP-01.
+    conn.execute("""
+        INSERT INTO items (item_id, name, item_type, uom, status, external_id)
+        VALUES (%s, 'XFER-01 Transfer Demo Item', 'component', 'EA', 'active', 'XFER-01')
+        ON CONFLICT (item_id) DO UPDATE
+            SET external_id = EXCLUDED.external_id
+    """, (xfer_id,))
+    print(f"  ✓ Item: XFER-01 ({xfer_id[:8]}...) — dedicated to the DRP demo")
+
+    # XFER-01 @ DC-ATL: item_planning_params (safety 0 -> full on-hand is
+    # distributable excess). Mirrors the enrichment IPP column set.
+    conn.execute("""
+        INSERT INTO item_planning_params (
+            param_id, item_id, location_id,
+            lead_time_sourcing_days, lead_time_transit_days,
+            safety_stock_qty, safety_stock_days,
+            min_order_qty, order_multiple,
+            lot_size_rule, planning_horizon_days,
+            is_make, source, effective_from
+        ) VALUES (%s, %s, %s, 21, 2, 0, 0, 50, 25, 'LOTFORLOT', 180, FALSE, 'manual', %s)
+        ON CONFLICT DO NOTHING
+    """, (_uid("ipp:XFER-01:DC-ATL:v1"), xfer_id, atl_id, TODAY))
+
+    # XFER-01 @ DC-LAX: item_planning_params (safety 30 -> the destination's
+    # deficit trigger threshold, see the arithmetic above — MUST stay <=
+    # on_hand=45 or the deficit fires trivially at bucket 0 instead of being
+    # driven by the seeded day+21 demand).
+    conn.execute("""
+        INSERT INTO item_planning_params (
+            param_id, item_id, location_id,
+            lead_time_sourcing_days, lead_time_transit_days,
+            safety_stock_qty, safety_stock_days,
+            min_order_qty, order_multiple,
+            lot_size_rule, planning_horizon_days,
+            is_make, source, effective_from
+        ) VALUES (%s, %s, %s, 21, 3, 30, 7, 50, 25, 'LOTFORLOT', 180, FALSE, 'manual', %s)
+        ON CONFLICT DO NOTHING
+    """, (_uid("ipp:XFER-01:DC-LAX:v1"), xfer_id, lax_id, TODAY))
+
+    # XFER-01 @ DC-ATL: large OnHandSupply -> the transfer SOURCE excess.
+    oh_xfer_atl_id = _uid("node:OnHand:XFER-01:DC-ATL")
+    conn.execute("""
+        INSERT INTO nodes (
+            node_id, node_type, scenario_id, item_id, location_id,
+            time_grain, time_ref, quantity, qty_uom, active
+        ) VALUES (%s, 'OnHandSupply', %s, %s, %s, 'exact_date', %s, 2000, 'EA', TRUE)
+        ON CONFLICT DO NOTHING
+    """, (oh_xfer_atl_id, BASELINE_SCENARIO_ID, xfer_id, atl_id, TODAY))
+    print("  ✓ OnHandSupply: XFER-01@DC-ATL=2000 (transfer source excess)")
+
+    # XFER-01 @ DC-LAX: small OnHandSupply + a future customer order that
+    # outruns on-hand + safety -> the transfer DESTINATION deficit.
+    oh_xfer_lax_id = _uid("node:OnHand:XFER-01:DC-LAX")
+    conn.execute("""
+        INSERT INTO nodes (
+            node_id, node_type, scenario_id, item_id, location_id,
+            time_grain, time_ref, quantity, qty_uom, active
+        ) VALUES (%s, 'OnHandSupply', %s, %s, %s, 'exact_date', %s, 45, 'EA', TRUE)
+        ON CONFLICT DO NOTHING
+    """, (oh_xfer_lax_id, BASELINE_SCENARIO_ID, xfer_id, lax_id, TODAY))
+
+    co_xfer_lax_id = _uid("node:CO:XFER-01:DC-LAX:day21")
+    co_due = TODAY + timedelta(days=21)  # bucket 3 (21 // 7 == 3)
+    conn.execute("""
+        INSERT INTO nodes (
+            node_id, node_type, scenario_id, item_id, location_id,
+            time_grain, time_ref, quantity, qty_uom, active
+        ) VALUES (%s, 'CustomerOrderDemand', %s, %s, %s, 'exact_date', %s, 200, 'EA', TRUE)
+        ON CONFLICT DO NOTHING
+    """, (co_xfer_lax_id, BASELINE_SCENARIO_ID, xfer_id, lax_id, co_due))
+    print("  ✓ OnHandSupply: XFER-01@DC-LAX=45 + CustomerOrderDemand=200 @ day+21 "
+          "(transfer destination deficit)")
+
+    # The distribution link DC-ATL -> DC-LAX for XFER-01.
+    link_id = _uid("distribution_link:DC-ATL->DC-LAX:XFER-01")
+    conn.execute("""
+        INSERT INTO distribution_links (
+            distribution_link_id, upstream_location_id, downstream_location_id,
+            item_id, transit_lead_time_days, minimum_shipment_qty,
+            maximum_shipment_qty, priority, transfer_multiple, active
+        ) VALUES (%s, %s, %s, %s, 7, 10, NULL, 1, 10, TRUE)
+        ON CONFLICT (distribution_link_id) DO UPDATE
+            SET active = TRUE,
+                transit_lead_time_days = EXCLUDED.transit_lead_time_days,
+                minimum_shipment_qty = EXCLUDED.minimum_shipment_qty,
+                priority = EXCLUDED.priority,
+                transfer_multiple = EXCLUDED.transfer_multiple
+    """, (link_id, atl_id, lax_id, xfer_id))
+    print("  ✓ distribution_link: DC-ATL → DC-LAX for XFER-01 "
+          "(transit 7d, min 10, mult 10, priority 1)")
+
+    conn.commit()
+    print("  ✅ DRP seed complete.")
+    print("     → XFER-01: DC-ATL holds 2000 excess, DC-LAX projected short (~185 @ bucket 3)")
+    print("     → POST /v1/drp/run should draft a TRANSFER DC-ATL → DC-LAX (~180 units)")
+
+
 if __name__ == "__main__":
     print(f"Connecting to {DATABASE_URL}...")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
@@ -833,3 +1017,4 @@ if __name__ == "__main__":
         seed_enrichment(conn)
         seed_bom(conn)
         seed_calendars(conn)
+        seed_drp(conn)
