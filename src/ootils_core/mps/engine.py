@@ -715,21 +715,29 @@ class AggregateDemandEngine:
         # Create PlannedSupply for the finished good
         item_id = row["item_id"]
         location_id = row["location_id"]
+        scenario_id = row["scenario_id"]
         planned_qty = Decimal(str(row["planned_quantity"]))
         start_date = row["time_bucket_start"]
-        
+
+        # #398: the promoted supply MUST land on the MPS node's own scenario.
+        # Omitting scenario_id lets the column DEFAULT (baseline, migration 030)
+        # win, so a MPS approved in a fork would contaminate the baseline plan
+        # ("a fork that writes baseline" — North Star anti-pattern). For a
+        # baseline MPS (the nominal case) scenario_id == BASELINE_SCENARIO_ID,
+        # so the INSERT is identical to the previous behaviour.
         planned_supply_id = uuid4()
         db.execute(
             """
             INSERT INTO planned_supply (
-                planned_supply_id, item_id, location_id, source_type,
+                planned_supply_id, item_id, location_id, scenario_id, source_type,
                 source_id, quantity, due_date, status, created_at
-            ) VALUES (%s, %s, %s, 'MPS', %s, %s, %s, 'PLANNED', %s)
+            ) VALUES (%s, %s, %s, %s, 'MPS', %s, %s, %s, 'PLANNED', %s)
             """,
             (
                 planned_supply_id,
                 item_id,
                 location_id,
+                scenario_id,
                 mps_id,
                 planned_qty,
                 start_date,
@@ -737,8 +745,8 @@ class AggregateDemandEngine:
             ),
         )
         logger.info(
-            "promote_to_mrp created planned_supply_id=%s for mps_id=%s, qty=%s",
-            planned_supply_id, mps_id, planned_qty
+            "promote_to_mrp created planned_supply_id=%s for mps_id=%s scenario_id=%s qty=%s",
+            planned_supply_id, mps_id, scenario_id, planned_qty
         )
         
         # Trigger MRP BOM explosion if requested
@@ -780,6 +788,7 @@ class AggregateDemandEngine:
                 "planned_supply_id": str(planned_supply_id),
                 "item_id": str(item_id),
                 "location_id": str(location_id),
+                "scenario_id": str(scenario_id),
                 "quantity": str(planned_qty),
                 "due_date": str(start_date),
                 "explode_components": explode_components,
