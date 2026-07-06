@@ -80,6 +80,17 @@ class PyramideAccuracyMetricOut(BaseModel):
     coverage: Decimal | None = None
     n_cutoffs: int
     n_observations: int
+    # Forecast Value Added over the seasonal-naive baseline (migration 068,
+    # #393 A3-PR3), on the aggregate row (horizon None) only. naive_* = the
+    # trivial baseline error scored on the SAME backtest; fva_* = naive_* -
+    # stat (POSITIVE = the stat model beats the naive — a negative FVA is a
+    # legitimate honest result, never clamped). None = not computable / not
+    # comparable (baseline needs >= 1 season of history, or the stat metric
+    # is itself None), never a masked 0.
+    naive_wape: Decimal | None = None
+    naive_mase: Decimal | None = None
+    fva_wape: Decimal | None = None
+    fva_mase: Decimal | None = None
 
 
 class PyramideRunOut(BaseModel):
@@ -266,7 +277,10 @@ def create_pyramide_run(
         and freshness.ingest_age_days > body.freshness_sla_days
     )
 
-    persisted = persist_run(db, result, stale_demand=stale)
+    # history feeds the FVA seasonal-naive baseline (migration 068): it is
+    # the SAME series the run was computed on, so the naive is backtested on
+    # identical cutoffs (methodological consistency — see fva.compute_fva).
+    persisted = persist_run(db, result, stale_demand=stale, history=history)
     if stale:
         # Exactly once per run (this endpoint is the only writer and the
         # run is created exactly once) — no spam, evidence carries run_id.
@@ -465,6 +479,10 @@ def _accuracy_metric_out(metric) -> PyramideAccuracyMetricOut:
         coverage=metric.coverage,
         n_cutoffs=metric.n_cutoffs,
         n_observations=metric.n_observations,
+        naive_wape=metric.naive_wape,
+        naive_mase=metric.naive_mase,
+        fva_wape=metric.fva_wape,
+        fva_mase=metric.fva_mase,
     )
 
 

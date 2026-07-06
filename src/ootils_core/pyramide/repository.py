@@ -14,6 +14,7 @@ from ootils_core.api.dependencies import BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
 
 from .accuracy import AccuracyReport
+from .fva import FvaResult, compute_fva, resolve_season_length
 from .models import PyramideRunResult
 from .routing import RoutingDecision
 
@@ -135,6 +136,15 @@ class PyramideAccuracyMetric:
     n_cutoffs: int
     n_observations: int
     created_at: datetime
+    # FVA over the seasonal-naive baseline (migration 068, #393 A3-PR3),
+    # populated on the aggregate row (horizon NULL) only. None-honest: None
+    # = baseline not computable / not comparable, never a masked 0. fva_* =
+    # naive_* - stat (POSITIVE = the stat model beats the naive; a negative
+    # FVA is legitimate and never clamped).
+    naive_wape: Decimal | None = None
+    naive_mase: Decimal | None = None
+    fva_wape: Decimal | None = None
+    fva_mase: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -656,12 +666,23 @@ def persist_accuracy_metrics(
     run_id: UUID,
     report: AccuracyReport,
     bias_scale: Decimal = _ONE,
+    fva: FvaResult | None = None,
 ) -> int:
     """
     Persist a run's backtest report into pyramide_accuracy_metrics
     (migration 055): the aggregate row + one row per horizon (see
     ``accuracy_metric_rows`` for the exact mapping and the ``bias_scale``
     transport semantics).
+
+    ``fva`` (migration 068, #393 A3-PR3): the Forecast Value Added of the
+    stat model over the seasonal-naive baseline (``fva.compute_fva``),
+    computed on the SAME backtest as ``report``. Its four values
+    (naive_wape/naive_mase/fva_wape/fva_mase) are written ON THE AGGREGATE
+    ROW ONLY (horizon NULL) — per-horizon rows carry no actuals (like the
+    other non-residual metrics of migration 055), so FVA stays NULL there.
+    ``None`` (the default, and the hierarchical/aggregate path in V1) leaves
+    all four columns NULL — the None-honest "baseline not computed", never a
+    masked 0.
 
     Idempotence: DELETE + INSERT of the run's full row set. The report is
     an atomic artifact of ONE backtest — replacing the whole set keeps
@@ -675,16 +696,26 @@ def persist_accuracy_metrics(
     )
     rows = accuracy_metric_rows(report, bias_scale=bias_scale)
     for horizon, mase, wape, smape, bias_value, coverage, n_cutoffs, n_observations in rows:
+        # FVA columns belong to the all-horizons aggregate row only
+        # (horizon IS NULL); per-horizon rows keep them NULL, exactly like
+        # mase/wape/smape/coverage above (no per-horizon actuals).
+        is_aggregate = horizon is None
+        naive_wape = fva.naive_wape if (fva is not None and is_aggregate) else None
+        naive_mase = fva.naive_mase if (fva is not None and is_aggregate) else None
+        fva_wape = fva.fva_wape if (fva is not None and is_aggregate) else None
+        fva_mase = fva.fva_mase if (fva is not None and is_aggregate) else None
         db.execute(
             """
             INSERT INTO pyramide_accuracy_metrics (
                 run_id, horizon, mase, wape, smape, bias, coverage,
-                n_cutoffs, n_observations
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                n_cutoffs, n_observations,
+                naive_wape, naive_mase, fva_wape, fva_mase
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id, horizon, mase, wape, smape, bias_value, coverage,
                 n_cutoffs, n_observations,
+                naive_wape, naive_mase, fva_wape, fva_mase,
             ),
         )
     return len(rows)
@@ -702,7 +733,8 @@ def fetch_accuracy_metrics(
     rows = db.execute(
         """
         SELECT metric_id, run_id, horizon, mase, wape, smape, bias,
-               coverage, n_cutoffs, n_observations, created_at
+               coverage, n_cutoffs, n_observations, created_at,
+               naive_wape, naive_mase, fva_wape, fva_mase
         FROM pyramide_accuracy_metrics
         WHERE run_id = %s
         ORDER BY horizon ASC NULLS FIRST
@@ -722,6 +754,10 @@ def fetch_accuracy_metrics(
             n_cutoffs=row["n_cutoffs"],
             n_observations=row["n_observations"],
             created_at=row["created_at"],
+            naive_wape=_optional_decimal(row["naive_wape"]),
+            naive_mase=_optional_decimal(row["naive_mase"]),
+            fva_wape=_optional_decimal(row["fva_wape"]),
+            fva_mase=_optional_decimal(row["fva_mase"]),
         )
         for row in rows
     ]
@@ -775,6 +811,7 @@ def persist_run(
     *,
     stale_demand: bool = False,
     routing: RoutingDecision | None = None,
+    history: Sequence[Decimal] | None = None,
 ) -> PyramidePersistedRun:
     """``stale_demand`` (ADR-023, migration 056): the caller measured the
     demand_history freshness at run time and it PROVABLY exceeded the SLA.
@@ -785,7 +822,15 @@ def persist_run(
     decision for this series when the caller routed it — persisted as the
     routed_method/routed_level/routing_reason provenance columns. None
     (the default and the historical behaviour) = the method was requested
-    explicitly, columns stay NULL."""
+    explicitly, columns stay NULL.
+
+    ``history`` (migration 068, #393 A3-PR3): the demand series the run was
+    computed on — the raw material of the Forecast Value Added baseline. When
+    supplied together with a backtest report, ``compute_fva`` scores the
+    seasonal-naive on the SAME cutoffs and persists naive/fva on the
+    aggregate metric row. None (default) leaves the FVA columns NULL
+    (None-honest "baseline not computed") — the accuracy metrics themselves
+    are unchanged."""
     run_id = uuid4()
     snapshot_id = uuid4()
     forecast_id = uuid4()
@@ -893,7 +938,21 @@ def persist_run(
     # honnête existe — run sans rapport (ENSEMBLE_STAT, backend externe,
     # historique trop court) = zéro ligne, documenté.
     if result.accuracy_report is not None:
-        persist_accuracy_metrics(db, run_id, result.accuracy_report)
+        # FVA (migration 068) : la naïve seasonal-naive backtestée sur les
+        # MÊMES cutoffs que le rapport stat. season_length = celui que le run
+        # a réellement utilisé (override method_params, sinon défaut de
+        # granularité — même résolution qu'engines.forecast). history absent
+        # ⇒ fva=None ⇒ colonnes NULL (None-honnête), métriques inchangées.
+        fva = (
+            compute_fva(
+                history,
+                resolve_season_length(config.granularity, config.method_params),
+                stat_report=result.accuracy_report,
+            )
+            if history is not None
+            else None
+        )
+        persist_accuracy_metrics(db, run_id, result.accuracy_report, fva=fva)
     return PyramidePersistedRun(run_id=run_id, snapshot_id=snapshot_id, forecast_id=forecast_id)
 
 
