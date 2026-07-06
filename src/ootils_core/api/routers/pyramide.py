@@ -14,6 +14,12 @@ from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
 from ootils_core.pyramide.confidence import DEFAULT_SLA_DAYS
+from ootils_core.pyramide.hierarchy import (
+    RECON_MIDDLEOUT,
+    SUPPORTED_RECON_METHODS,
+    HierarchicalRunConfig,
+    HierarchicalRunner,
+)
 from ootils_core.pyramide.repository import (
     PyramideAggregateCommitError,
     commit_run,
@@ -142,11 +148,99 @@ class PyramideValueOut(BaseModel):
     forecast_date: date
     quantity: Decimal
     method: str
+    # Bornes conformal du bucket (confidence_interval_lower/upper, migration
+    # 026 — écrites par persist_run/persist_series_run, exposées ici depuis
+    # #394 B1). None = NULL en base = pas de calibration honnête (pas de
+    # backtest déterministe, ou trop peu de résidus pour la garantie
+    # finite-sample) — jamais 0. Additif, rétro-compatible.
+    confidence_lower: Decimal | None = None
+    confidence_upper: Decimal | None = None
 
 
 class PyramideRunResultOut(BaseModel):
     run: PyramideRunOut
     values: list[PyramideValueOut]
+
+
+class HierarchicalRunRequest(BaseModel):
+    # A hierarchical run forecasts ONE summing block of the migration-047
+    # hierarchy registry (hierarchy / hierarchy_node / item_hierarchy) and
+    # reconciles every level (middle-out deterministic core, MinT-shrink
+    # optional edge — HierarchicalRunner, #348). It is NOT a single
+    # (item, location) leaf run: it produces N coherent series (aggregate
+    # nodes + leaves), each persisted as its own pyramide_runs row. The GET
+    # /runs/{run_id}/result endpoint reads any of those run_ids.
+    hierarchy_id: str
+    block_code: str
+    # Leaf series are addressed to this location (locations.external_id) —
+    # the network/central site whose graph consumes the demand plan; the
+    # per-site split is the DRP layer's job (ADR-020). Generic: the caller
+    # chooses, nothing is hardcoded.
+    leaf_location_id: str
+    horizon_days: int = Field(default=90, ge=1, le=365)
+    granularity: str = Field(default="daily", pattern="^(daily|weekly|monthly)$")
+    method: str = Field(default="AUTO_SELECT")
+    method_params: dict[str, Any] = Field(default_factory=dict)
+    scenario_id: str | None = None
+    model_strategy: str = Field(default="stat", pattern="^(auto|stat|ml|fm|hybrid)$")
+    # recon_method opened to the methods HierarchicalRunner actually
+    # supports and tests (#348): 'middleout' (guaranteed deterministic
+    # core) and 'mintrace_wls_shrink' (optional Nixtla edge, falls back to
+    # middleout when the backend or its aligned inputs are unavailable —
+    # the runner reports the EFFECTIVE method, provenance never lies). No
+    # 'none': this endpoint always reconciles (a leaf-only run with no
+    # reconciliation is POST /runs).
+    recon_method: str = Field(
+        default=RECON_MIDDLEOUT, pattern="^(middleout|mintrace_wls_shrink)$"
+    )
+    # Level of the hierarchy to cut blocks at (default: the root/block
+    # level). None = the registry default resolved by load_summing_blocks.
+    block_level: str | None = None
+    # Level at which the base forecast is produced before disaggregating to
+    # the leaves. None = the block level itself (one base forecast at the
+    # block root). Pass a deeper level for a classic middle-out.
+    recon_level: str | None = None
+    lookback_days: int = Field(default=365, ge=1, le=3650)
+    random_seed: int = Field(default=0, ge=0)
+    code_version: str = Field(default="local", min_length=1, max_length=64)
+
+    @staticmethod
+    def _method_error() -> str:
+        return f"method must be one of: {sorted(SUPPORTED_METHODS)}"
+
+
+class HierarchicalSeriesOut(BaseModel):
+    # One persisted series of the block. kind = 'aggregate' (carries level +
+    # node_code, addresses a hierarchy node) or 'leaf' (carries item_id +
+    # location_id). snapshot_id is None for aggregates (leaf-only snapshot
+    # contract — aggregates never enter the graph). run_id is the handle for
+    # GET /runs/{run_id} and /runs/{run_id}/result.
+    kind: str
+    key: str
+    level: str | None = None
+    run_id: UUID
+    forecast_id: UUID
+    snapshot_id: UUID | None = None
+
+
+class HierarchicalRunResultOut(BaseModel):
+    hierarchy_id: str
+    block_code: str
+    block_level: str
+    recon_level: str
+    # The reconciliation method EFFECTIVELY applied (never the rejected
+    # request): a 'mintrace_wls_shrink' request that fell back reports
+    # 'middleout' here, and warnings carries the reason.
+    recon_method: str
+    scenario_id: UUID
+    horizon_start: date
+    horizon_end: date
+    granularity: str
+    method: str
+    series: list[HierarchicalSeriesOut]
+    # Explainability trail: reconciliation fallbacks, cold-start twin rules,
+    # NULL-bound leaves, routing provenance notes. Empty = nothing to flag.
+    warnings: list[str]
 
 
 class PyramideCommitOut(BaseModel):
@@ -306,6 +400,109 @@ def create_pyramide_run(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Pyramide run persistence failed")
 
     return _run_out(summary)
+
+
+@router.post(
+    "/hierarchical-runs",
+    response_model=HierarchicalRunResultOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a hierarchical (multi-level, reconciled) Pyramide forecast run",
+)
+def create_hierarchical_run(
+    body: HierarchicalRunRequest,
+    db: DictRowConnection = Depends(get_db),
+    _token: str = Depends(require_auth),
+) -> HierarchicalRunResultOut:
+    """Forecast and reconcile ONE summing block of the hierarchy registry
+    (HierarchicalRunner, #348). Every level is persisted as its own
+    pyramide_runs row (aggregates carry hierarchy_id/level/node_code, leaves
+    carry item/location); the response lists each run_id so the existing
+    GET /runs/{run_id}/result endpoint reads any of them — leaf results carry
+    conformal bounds, aggregate results carry NULL bounds (hierarchical
+    interval reconciliation is a documented V1 non-goal).
+
+    ``recon_method`` reflects the method EFFECTIVELY applied: a
+    'mintrace_wls_shrink' request that fell back reports 'middleout' with the
+    reason in ``warnings`` — provenance never lies.
+    """
+    body.method = body.method.upper()
+    if body.method not in SUPPORTED_METHODS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=HierarchicalRunRequest._method_error(),
+        )
+    if body.recon_method not in SUPPORTED_RECON_METHODS:
+        # Defensive: the pattern already constrains recon_method, but keep the
+        # runner's catalogue as the single source of truth for the message.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"recon_method must be one of: {sorted(SUPPORTED_RECON_METHODS)}",
+        )
+
+    location_uuid = resolve_location_uuid(db, body.leaf_location_id)
+    if location_uuid is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location '{body.leaf_location_id}' not found",
+        )
+
+    try:
+        scenario_uuid = resolve_scenario_uuid(body.scenario_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid scenario_id '{body.scenario_id}'",
+        ) from exc
+
+    config = HierarchicalRunConfig(
+        hierarchy_id=body.hierarchy_id,
+        block_code=body.block_code,
+        leaf_location_id=location_uuid,
+        scenario_id=scenario_uuid,
+        horizon_start=date.today() + timedelta(days=1),
+        horizon_days=body.horizon_days,
+        block_level=body.block_level,
+        recon_level=body.recon_level,
+        granularity=body.granularity,
+        method=body.method,
+        method_params=body.method_params,
+        model_strategy=body.model_strategy,
+        recon_method=body.recon_method,
+        lookback_days=body.lookback_days,
+        random_seed=body.random_seed,
+        code_version=body.code_version,
+    )
+
+    try:
+        result = HierarchicalRunner().run(db, config)
+    except PyramideError as exc:
+        # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
+        # message from config validation (unknown block/level/method,
+        # empty node history) — DB-free, no SQL/DSN can reach this string.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    logger.info(
+        "pyramide.hierarchical_run hierarchy=%s block=%s scenario_id=%s "
+        "recon_method=%s series=%d warnings=%d",
+        result.hierarchy_id, result.block_code, scenario_uuid,
+        result.recon_method, len(result.persisted), len(result.warnings),
+    )
+    return HierarchicalRunResultOut(
+        hierarchy_id=result.hierarchy_id,
+        block_code=result.block_code,
+        block_level=result.block_level,
+        recon_level=result.recon_level,
+        recon_method=result.recon_method,
+        scenario_id=scenario_uuid,
+        horizon_start=result.horizon_start,
+        horizon_end=result.horizon_end,
+        granularity=result.granularity,
+        method=result.method,
+        series=[_hierarchical_series_out(series) for series in result.persisted],
+        warnings=list(result.warnings),
+    )
 
 
 @router.get(
@@ -492,6 +689,19 @@ def _value_out(value) -> PyramideValueOut:
         forecast_date=value.forecast_date,
         quantity=value.quantity,
         method=value.method,
+        confidence_lower=value.confidence_lower,
+        confidence_upper=value.confidence_upper,
+    )
+
+
+def _hierarchical_series_out(series) -> HierarchicalSeriesOut:
+    return HierarchicalSeriesOut(
+        kind=series.kind,
+        key=series.key,
+        level=series.level,
+        run_id=series.run_id,
+        forecast_id=series.forecast_id,
+        snapshot_id=series.snapshot_id,
     )
 
 
