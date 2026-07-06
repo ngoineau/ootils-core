@@ -88,8 +88,12 @@ def _connect():
 
 
 def _count(sql: str, params: tuple = ()) -> int:
+    # Only hand params to psycopg when there ARE params: execute(sql, ())
+    # switches psycopg into placeholder-validation mode, where a literal '%'
+    # (e.g. a LIKE pattern) raises ProgrammingError. execute(sql) does not.
     with _connect() as conn:
-        return int(conn.execute(sql, params).fetchone()["n"])
+        cur = conn.execute(sql, params) if params else conn.execute(sql)
+        return int(cur.fetchone()["n"])
 
 
 def _run_demo(argv_extra: list[str]) -> tuple[int, str]:
@@ -311,7 +315,8 @@ def test_second_run_is_idempotent(first_run):
             # size, not the row count, stays 2 distinct names).
             "distinct_token_names": _count(
                 "SELECT COUNT(DISTINCT name) AS n FROM api_tokens "
-                "WHERE name LIKE 'DEMO-E2E-%'"
+                "WHERE name LIKE %s",
+                ("DEMO-E2E-%",),
             ),
         }
 
