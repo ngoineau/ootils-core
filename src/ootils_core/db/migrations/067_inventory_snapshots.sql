@@ -65,9 +65,14 @@ BEGIN;
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS inventory_snapshots (
     snapshot_id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-    scenario_id            UUID          NOT NULL REFERENCES scenarios(scenario_id),
-    item_id                UUID          NOT NULL REFERENCES items(item_id),
-    location_id            UUID          NOT NULL REFERENCES locations(location_id),
+    -- ON DELETE RESTRICT is EXPLICIT, not inherited: Postgres' default FK action
+    -- is NO ACTION, and the repo-wide guard test_scenario_fk_retention enforces
+    -- that every FK referencing scenarios uses ON DELETE RESTRICT (a scenario
+    -- must never be deleted out from under its data). item/location follow the
+    -- same discipline — a snapshot without its coordinate is meaningless.
+    scenario_id            UUID          NOT NULL REFERENCES scenarios(scenario_id) ON DELETE RESTRICT,
+    item_id                UUID          NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
+    location_id            UUID          NOT NULL REFERENCES locations(location_id) ON DELETE RESTRICT,
     as_of_date             DATE          NOT NULL,
     on_hand_qty            NUMERIC(18,6) NOT NULL,
     first_shortage_date    DATE,
