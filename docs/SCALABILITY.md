@@ -270,6 +270,29 @@ true async I/O instead of thread-pool offload.
 
 ---
 
+### Breaking point #7: `inventory_snapshots` — daily append, unpartitioned
+
+**Status:** Not a V1 blocker. The proof machine (ADR-030, #393 A3) writes one
+`inventory_snapshots` row per `(item, location)` per capture day. At demo scale
+this is negligible (a handful of rows/day). At pilot scale it grows linearly:
+
+| Scale | Rows/day | Rows/year (365 daily captures) |
+|-------|----------|--------------------------------|
+| Demo (2 items × 2 loc) | ~4 | ~1.5K |
+| Pilot (50 items × 5 loc) | ~250 | ~90K |
+| Pilot upper edge (36K item·location coords) | ~36K | ~13M |
+
+At the pilot upper edge (36K item·location coordinates → 36K rows/day) a year of
+daily captures is ~13M rows — the point where retention and/or `RANGE`
+partitioning by `as_of_date` (drop old partitions instead of DELETE) must be
+addressed. This is **vague C1 work, not a V1 blocker**: the table is additive,
+indexed by `(scenario_id, as_of_date)` and `(item_id, location_id, as_of_date DESC)`
+(migration 067), and V1 captures baseline only. `recommendation_outcomes`
+(migration 069) grows far slower (one verdict per reco per evaluated day, and
+recos are bounded by shortages), so it is not a near-term concern.
+
+---
+
 ## What migration 014 fixes
 
 Migration `014_missing_indexes.sql` addresses Breaking point #5 (allocation upsert performance) and adds indexes for the post-propagation hot paths:
