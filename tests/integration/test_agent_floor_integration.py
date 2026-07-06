@@ -738,9 +738,13 @@ class TestServiceActorKind:
         reco_id = tracker.reco(status="DRAFT")
         clear, _ = tracker.token(actor_kind="service", scopes=["recommend:draft"])
 
+        # No actor_kind in the body: the field is a deprecated Literal['human','agent']
+        # and is ignored for minted tokens. 'service' comes from the TOKEN — that is
+        # exactly the contract this test proves (the widened migration-064 CHECK lets
+        # the transition record actor_kind='service' without a CheckViolation).
         resp = api_client.post(
             f"/v1/recommendations/{reco_id}/transition",
-            json={"to_status": "REVIEWED", "actor": "billing-sync", "actor_kind": "service"},
+            json={"to_status": "REVIEWED", "actor": "billing-sync"},
             headers=_bearer(clear),
         )
         assert resp.status_code == 200, resp.text
