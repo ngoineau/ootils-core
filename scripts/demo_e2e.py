@@ -50,7 +50,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 # The watchers (and their mrp_core / agent_simulation deps) do a bare
 # ``import mrp_core``; scripts/ must be on sys.path for the in-process watcher
@@ -147,6 +147,10 @@ class DemoContext:
     skip_watchers: bool
     run_bench: bool
     show_tokens: bool
+    # What-if base scenario for step 7 (default baseline; a fork enables the
+    # pilot fork-on-fork counter-factual — #414). The literal 'baseline' is a
+    # legal value the simulate router resolves to the sentinel UUID.
+    whatif_base_scenario: str = BASELINE_SCENARIO_ID
     # Populated as steps run.
     agent_token: Optional[str] = None
     human_token: Optional[str] = None
@@ -970,9 +974,10 @@ def _kpi(value: Any) -> str:
 # ===========================================================================
 
 
-def _discover_shortage_coord(dsn: str) -> Optional[dict[str, Any]]:
-    """A real (item, location) that currently has an active shortage — the
-    coordinate whose safety stock we relax in a fork. Read-only."""
+def _discover_shortage_coord(dsn: str, base_scenario_id: str) -> Optional[dict[str, Any]]:
+    """A real (item, location) that currently has an active shortage in the
+    given base scenario — the coordinate whose safety stock we relax in a fork.
+    Read-only."""
     with _connect(dsn) as conn:
         row = conn.execute(
             """
@@ -985,7 +990,7 @@ def _discover_shortage_coord(dsn: str) -> Optional[dict[str, Any]]:
             ORDER BY s.severity_score DESC NULLS LAST
             LIMIT 1
             """,
-            (BASELINE_SCENARIO_ID,),
+            (base_scenario_id,),
         ).fetchone()
     if row is None:
         return None
@@ -997,11 +1002,11 @@ def _discover_shortage_coord(dsn: str) -> Optional[dict[str, Any]]:
     }
 
 
-def _discover_any_pi_coord(dsn: str) -> Optional[dict[str, Any]]:
-    """Fallback what-if coordinate when baseline has NO active shortage: any
-    (item, location) that carries a baseline ProjectedInventory node (so the
-    fork's node-override recompute has something to bite on). Deterministic
-    pick (most PI buckets first). Read-only. Same return shape as
+def _discover_any_pi_coord(dsn: str, base_scenario_id: str) -> Optional[dict[str, Any]]:
+    """Fallback what-if coordinate when the base has NO active shortage: any
+    (item, location) that carries a ProjectedInventory node in the base
+    scenario (so the fork's node-override recompute has something to bite on).
+    Deterministic pick (most PI buckets first). Read-only. Same return shape as
     _discover_shortage_coord."""
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -1019,7 +1024,7 @@ def _discover_any_pi_coord(dsn: str) -> Optional[dict[str, Any]]:
             ORDER BY n_buckets DESC, i.external_id, l.external_id
             LIMIT 1
             """,
-            (BASELINE_SCENARIO_ID,),
+            (base_scenario_id,),
         ).fetchone()
     if row is None:
         return None
@@ -1031,13 +1036,15 @@ def _discover_any_pi_coord(dsn: str) -> Optional[dict[str, Any]]:
     }
 
 
-def _pick_pi_node_for_fork(dsn: str, item_id: str, location_id: Optional[str]) -> Optional[str]:
-    """A baseline ProjectedInventory node id to hang a simulate override on —
-    the node override path that /v1/simulate recomputes a shortage delta from.
-    We nudge its opening_stock upward, a whitelisted simulate field, to prove
-    the fork recomputes an HONEST delta (new/resolved)."""
+def _pick_pi_node_for_fork(
+    dsn: str, base_scenario_id: str, item_id: str, location_id: Optional[str]
+) -> Optional[str]:
+    """A ProjectedInventory node id (in the base scenario) to hang a simulate
+    override on — the node override path that /v1/simulate recomputes a shortage
+    delta from. We nudge its opening_stock upward, a whitelisted simulate field,
+    to prove the fork recomputes an HONEST delta (new/resolved)."""
     conds = ["node_type = 'ProjectedInventory'", "active", "scenario_id = %s", "item_id = %s"]
-    params: list[Any] = [BASELINE_SCENARIO_ID, item_id]
+    params: list[Any] = [base_scenario_id, item_id]
     if location_id is not None:
         conds.append("location_id = %s")
         params.append(location_id)
@@ -1066,17 +1073,25 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
 
     Coordinate: the worst active shortage when the base has one; otherwise
     fall back to any ProjectedInventory coordinate and tighten (opening_stock
-    to 0) instead of relax. SKIP only when the base has no PI node at all."""
-    coord = _discover_shortage_coord(ctx.dsn)
+    to 0) instead of relax. SKIP only when the base has no PI node at all.
+
+    Base scenario: ctx.whatif_base_scenario (default baseline). A non-baseline
+    fork here is the pilot fork-on-fork path (#414): discovery, node pick, and
+    the /v1/simulate base_scenario_id all read that fork, so the counter-factual
+    is a fork OF the pilot fork — never touching baseline."""
+    base = ctx.whatif_base_scenario
+    is_baseline_base = base == BASELINE_SCENARIO_ID
+    if not is_baseline_base:
+        print(f"  What-if base   : {base} (fork-on-fork; baseline untouched)")
+    coord = _discover_shortage_coord(ctx.dsn, base)
     relax = True  # shortage coord -> RELAX stock (resolve); fallback -> TIGHTEN
     if coord is None:
-        # No active shortage on baseline (e.g. no recent calc run on the pilot
-        # base). Fall back to ANY ProjectedInventory coordinate and run the
-        # counter-factual in the OTHER direction: opening_stock=0 ("what if we
-        # had less stock?") — an equally honest fork whose delta shows NEW
-        # shortages instead of resolved ones. Only SKIP when the base has no
-        # PI node at all to fork.
-        coord = _discover_any_pi_coord(ctx.dsn)
+        # No active shortage on the base (e.g. no recent calc run). Fall back to
+        # ANY ProjectedInventory coordinate and run the counter-factual in the
+        # OTHER direction: opening_stock=0 ("what if we had less stock?") — an
+        # equally honest fork whose delta shows NEW shortages instead of
+        # resolved ones. Only SKIP when the base has no PI node at all to fork.
+        coord = _discover_any_pi_coord(ctx.dsn, base)
         relax = False
         if coord is None:
             return StepResult(
@@ -1085,16 +1100,16 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
                 status=SKIP,
                 detail=(
                     "no active-shortage coordinate AND no ProjectedInventory "
-                    "node on baseline to fork"
+                    f"node on base scenario {base[:8]} to fork"
                 ),
             )
-        print("  No active shortage on baseline — falling back to a PI "
+        print("  No active shortage on the base — falling back to a PI "
               "coordinate, tightening instead of relaxing")
     print(f"  What-if coord  : item={coord['item_ext']} "
           f"location={coord['loc_ext']} "
           f"(direction: {'relax stock' if relax else 'tighten stock to 0'})")
 
-    pi_node = _pick_pi_node_for_fork(ctx.dsn, coord["item_id"], coord["location_id"])
+    pi_node = _pick_pi_node_for_fork(ctx.dsn, base, coord["item_id"], coord["location_id"])
     fork_name = f"demo-e2e-whatif-{_dt.datetime.now(_dt.timezone.utc):%Y%m%dT%H%M%SZ}"
 
     overrides = []
@@ -1112,7 +1127,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
         headers=ctx.human_auth,
         json={
             "scenario_name": fork_name,
-            "base_scenario_id": "baseline",
+            "base_scenario_id": base,
             "overrides": overrides,
         },
     )
@@ -1178,9 +1193,13 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
             # 0/0 with a failed recompute is NOT "no change" — say so loudly.
             + ("" if sim_body["delta_computed"] else " (DELTA NOT COMPUTED)")
             + f", overlay={'set' if overlay_ok else 'n/a'}, archived={archived}"
+            # Only mention the base when it is NOT baseline, to keep the CI-seeded
+            # run's line identical to before this change.
+            + ("" if is_baseline_base else f", base={base[:8]}")
         ),
         data={
             "fork_id": fork_id,
+            "base_scenario_id": base,
             "propagation_status": sim_body["propagation_status"],
             "delta_computed": sim_body["delta_computed"],
             "new_shortages": n_new,
@@ -1409,6 +1428,15 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     )
     p.add_argument("--out", default=None, help="Write a scoreboard JSON to this path.")
     p.add_argument(
+        "--whatif-base-scenario",
+        default="baseline",
+        help=(
+            "Base scenario for step 7's what-if fork (UUID or 'baseline', "
+            "default 'baseline'). A fork here runs the pilot fork-on-fork "
+            "counter-factual; baseline stays untouched (#414)."
+        ),
+    )
+    p.add_argument(
         "--show-tokens",
         action="store_true",
         help="Print the minted token cleartext (operator escape hatch).",
@@ -1454,9 +1482,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     # (the exact failure of the first pilot run).
     os.environ["DATABASE_URL"] = args.dsn
 
+    # Resolve the what-if base: accept the literal 'baseline' (or a bad UUID)
+    # as the sentinel, otherwise the caller's fork UUID. The simulate router
+    # also tolerates 'baseline'/bad UUIDs, but resolving here keeps the ctx
+    # value a canonical UUID string for the discovery SELECTs.
+    raw_base = (args.whatif_base_scenario or "baseline").strip()
+    if raw_base.lower() == "baseline":
+        whatif_base = BASELINE_SCENARIO_ID
+    else:
+        try:
+            whatif_base = str(UUID(raw_base))
+        except ValueError:
+            print(
+                f"ERROR: --whatif-base-scenario {raw_base!r} is neither 'baseline' "
+                "nor a valid UUID.",
+                file=sys.stderr,
+            )
+            return 2
+
     _banner("OOTILS WEDGE RUNBOOK (#408) — autonomous shortage control tower")
     print(f"  Target : {mask_dsn(args.dsn)}")
     print(f"  Mode   : skip_watchers={args.skip_watchers} bench={args.bench}")
+    if whatif_base != BASELINE_SCENARIO_ID:
+        print(f"  What-if base scenario (step 7): {whatif_base}")
 
     results: list[StepResult] = []
 
@@ -1481,6 +1529,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         skip_watchers=args.skip_watchers,
         run_bench=args.bench,
         show_tokens=args.show_tokens,
+        whatif_base_scenario=whatif_base,
     )
 
     steps: list[Callable[[DemoContext], StepResult]] = [
