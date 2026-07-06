@@ -144,17 +144,46 @@ def _seed_link(
     maximum_shipment_qty=None,
     priority=100,
     active=True,
+    transfer_multiple=None,
 ) -> UUID:
     """A distribution_links row (migration 029). Columns/defaults read straight
     off the real schema: minimum_shipment_qty NOT NULL DEFAULT 1, priority NOT
-    NULL DEFAULT 100 (CHECK >= 1), maximum_shipment_qty NULLABLE."""
+    NULL DEFAULT 100 (CHECK >= 1), maximum_shipment_qty NULLABLE.
+
+    transfer_multiple (#395 PR2a, migration 065): the column is NOT NULL
+    DEFAULT 1. `transfer_multiple=None` (the default here) OMITS the column
+    from the INSERT entirely, so the row exercises the real SQL DEFAULT rather
+    than a Python-side stand-in — the point of
+    test_link_transfer_multiple_defaults_to_one below. Pass an explicit float
+    to seed a lane with a real logistics multiple."""
+    if transfer_multiple is None:
+        return conn.execute(
+            """
+            INSERT INTO distribution_links (
+                distribution_link_id, upstream_location_id, downstream_location_id,
+                transit_lead_time_days, minimum_shipment_qty, maximum_shipment_qty,
+                priority, active
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING distribution_link_id
+            """,
+            (
+                uuid4(),
+                upstream_location_id,
+                downstream_location_id,
+                transit_lead_time_days,
+                minimum_shipment_qty,
+                maximum_shipment_qty,
+                priority,
+                active,
+            ),
+        ).fetchone()["distribution_link_id"]
     return conn.execute(
         """
         INSERT INTO distribution_links (
             distribution_link_id, upstream_location_id, downstream_location_id,
             transit_lead_time_days, minimum_shipment_qty, maximum_shipment_qty,
-            priority, active
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            priority, active, transfer_multiple
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING distribution_link_id
         """,
         (
@@ -166,6 +195,7 @@ def _seed_link(
             maximum_shipment_qty,
             priority,
             active,
+            transfer_multiple,
         ),
     ).fetchone()["distribution_link_id"]
 
@@ -605,3 +635,57 @@ def test_links_order_by_is_stable_across_calls(conn):
 
     assert refs1 == expected_ref_order, "ORDER BY ... distribution_link_id sorts the smaller UUID first"
     assert refs1 == refs2, "the relative order must be stable across two separate calls"
+
+
+# ---------------------------------------------------------------------------
+# #395 PR2a: distribution_links.transfer_multiple (migration 065) surfaces
+# ---------------------------------------------------------------------------
+
+
+def test_link_transfer_multiple_surfaces_onto_transferlink(conn):
+    """#395 PR2a (loader side): a lane seeded with transfer_multiple=25 must
+    surface as TransferLink.transfer_multiple == 25.0 — the loader's
+    COALESCE(dl.transfer_multiple, 1) reads the real column value straight
+    through when it is set."""
+    item_id = _seed_item(conn)
+    dest = _seed_location(conn, "drp-mult-dest")
+    src = _seed_location(conn, "drp-mult-src")
+    _seed_planning_params(conn, item_id, dest)
+
+    link_id = _seed_link(
+        conn, upstream_location_id=src, downstream_location_id=dest,
+        transit_lead_time_days=7, transfer_multiple=25,
+    )
+    conn.commit()
+
+    d = load_drp_data(conn, horizon_days=180, scenario=str(BASELINE))
+    links_by_ref = {lk.link_ref: lk for lk in d.links}
+
+    assert links_by_ref[str(link_id)].transfer_multiple == 25.0
+
+
+def test_link_transfer_multiple_defaults_to_one_when_column_omitted(conn):
+    """#395 PR2a (loader side): a lane inserted WITHOUT transfer_multiple (the
+    column omitted from the INSERT entirely, exercising the real schema
+    DEFAULT — migration 065: NOT NULL DEFAULT 1) surfaces as
+    TransferLink.transfer_multiple == 1.0, the no-rounding default. This is the
+    real DB DEFAULT, not merely the dataclass field default (TransferLink's
+    Python default is exercised separately by the core golden
+    test_transferlink_six_arg_backward_compat_no_rounding, which never touches
+    SQL at all)."""
+    item_id = _seed_item(conn)
+    dest = _seed_location(conn, "drp-mult-default-dest")
+    src = _seed_location(conn, "drp-mult-default-src")
+    _seed_planning_params(conn, item_id, dest)
+
+    link_id = _seed_link(
+        conn, upstream_location_id=src, downstream_location_id=dest,
+        transit_lead_time_days=7,
+        # transfer_multiple intentionally omitted -> real SQL DEFAULT 1.
+    )
+    conn.commit()
+
+    d = load_drp_data(conn, horizon_days=180, scenario=str(BASELINE))
+    links_by_ref = {lk.link_ref: lk for lk in d.links}
+
+    assert links_by_ref[str(link_id)].transfer_multiple == 1.0

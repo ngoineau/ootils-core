@@ -286,12 +286,18 @@ def load_drp_data(conn, horizon_days: int = 180, scenario: str = BASELINE) -> DR
     # core.py's _resolve_candidate_links / transfer_signals) — belt AND
     # braces: the loader emits a stable order, and the core's own sort keys
     # never depend on it holding.
+    # transfer_multiple (migration 065): the lane's logistics shipment multiple,
+    # rounded DOWN by the DRP planner (#395 PR2a). NOT NULL DEFAULT 1 in the
+    # schema, so a value is always present; COALESCE(..., 1) is belt-and-braces
+    # against a hypothetical NULL and keeps a lane loaded on a pre-065 fixture
+    # (where the column is absent from the row) at the no-rounding default.
     links: list[TransferLink] = []
-    for src, dst, lt_days, min_q, max_q, prio, item_key, link_id in cur.execute(
+    for src, dst, lt_days, min_q, max_q, prio, item_key, link_id, mult in cur.execute(
         f"SELECT {_loc_key_sql('su')}, {_loc_key_sql('du')}, "
         "dl.transit_lead_time_days, dl.minimum_shipment_qty, "
         "dl.maximum_shipment_qty, dl.priority, "
-        "COALESCE(ii.external_id, ii.item_id::text), dl.distribution_link_id "
+        "COALESCE(ii.external_id, ii.item_id::text), dl.distribution_link_id, "
+        "COALESCE(dl.transfer_multiple, 1) "
         "FROM distribution_links dl "
         "JOIN locations su ON su.location_id = dl.upstream_location_id "
         "JOIN locations du ON du.location_id = dl.downstream_location_id "
@@ -308,6 +314,7 @@ def load_drp_data(conn, horizon_days: int = 180, scenario: str = BASELINE) -> DR
             priority=int(prio),
             item=item_key,
             link_ref=str(link_id),
+            transfer_multiple=float(mult),
         ))
     d.links = links
 
