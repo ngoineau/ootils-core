@@ -496,10 +496,17 @@ def _load_recommendations(
     cost-of-inaction KPI). The evidence JSONB is read for the $ basis.
     """
     cur = conn.cursor(row_factory=dict_row)
+    # recommendations has NO bare location_id column: a shortage reco is
+    # item-level (item_id + shortage_date), and only transfers carry
+    # source/dest_location_id (migrations 039/061/066). The outcome matcher
+    # resolves a reco with no location item-wise via the observed shortages'
+    # (item_id, None) fallback key (reco.get("location_id") -> None). Selecting a
+    # non-existent location_id here crashed evaluate_and_persist with
+    # UndefinedColumn on a real DB.
     return cur.execute(
         """
         SELECT recommendation_id, scenario_id, item_id, item_external_id,
-               location_id, shortage_date, deficit_qty, recommended_qty,
+               shortage_date, deficit_qty, recommended_qty,
                estimated_cost, currency, action, decision_level, status,
                confidence, evidence
         FROM recommendations
