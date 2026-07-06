@@ -34,8 +34,12 @@ The seven areas (the governed-watcher contract):
   6. Endpoint        — POST /v1/drp/run: 401 without a token, 403 for a token
                        lacking recommend:draft, 503 with OOTILS_DRP_ENABLED=0,
                        forkable via ?scenario_id=, {recommendations_emitted,...}.
-  7. Seed demo       — after seed_drp, a baseline run drafts VALVE-02
-                       DC-ATL -> DC-LAX.
+  7. Seed demo       — after seed_drp, a baseline run drafts XFER-01
+                       DC-ATL -> DC-LAX (a DEDICATED demo item, never
+                       VALVE-02/PUMP-01 — see seed_drp's docstring for why
+                       reusing an existing item would pool on-hand across
+                       locations in engine/mrp/loader.py and mask the phase-1
+                       VALVE-02 shortage).
 
 Determinism: every date is anchored on the DB-side CURRENT_DATE (never Python
 now()), exactly like the DRP loader's horizon anchor and the sibling watcher
@@ -134,10 +138,14 @@ def _item(conn, external_id):
 
 
 def _location(conn, external_id):
+    # location_type is CHECKed to 'plant'/'dc'/'warehouse'/'supplier_virtual'/
+    # 'customer_virtual' (migration 002); 'dc' is the correct value for a
+    # distribution-center test fixture — 'distribution_center' violates the
+    # constraint.
     return conn.execute(
         "INSERT INTO locations (name, location_type, external_id) "
         "VALUES (%s, %s, %s) RETURNING location_id",
-        (external_id, "distribution_center", external_id),
+        (external_id, "dc", external_id),
     ).fetchone()["location_id"]
 
 
@@ -677,15 +685,31 @@ def test_endpoint_is_forkable_via_scenario_id(api_client, migrated_db):
 
 
 # ===========================================================================
-# 7. Seed demo — after the DRP seed, a baseline run drafts VALVE-02 ATL->LAX.
+# 7. Seed demo — after the DRP seed, a baseline run drafts XFER-01 ATL->LAX.
 # ===========================================================================
 
 
-def test_seed_drp_produces_valve02_atl_to_lax_transfer(migrated_db):
-    """After the demo DRP seed (scripts/seed_demo_data.py:seed_drp — an ACTIVE
-    DC-ATL -> DC-LAX link for VALVE-02 + a source excess at DC-ATL against the
-    destination's projected shortage at DC-LAX), a baseline run drafts exactly
-    that inter-site transfer. Proves the wedge demo works out of the box."""
+def test_seed_drp_produces_xfer01_atl_to_lax_transfer(migrated_db):
+    """After the demo DRP seed (scripts/seed_demo_data.py:seed_drp — a DEDICATED
+    item XFER-01, an ACTIVE DC-ATL -> DC-LAX link for it, a source excess at
+    DC-ATL against a destination deficit at DC-LAX seeded specifically for this
+    item), a baseline run drafts exactly that inter-site transfer. Proves the
+    wedge demo works out of the box.
+
+    XFER-01, not VALVE-02: seed_drp is deliberately isolated to a brand-new item
+    (see its docstring) because engine/mrp/loader.py pools OnHandSupply BY ITEM
+    across every location — an earlier version of this seed reused VALVE-02 and
+    added +2000 on-hand at a new location, which silently masked the phase-1
+    VALVE-02@DC-LAX shortage everywhere mrp_core reads it (broke
+    test_router_bom_integration.py's on_hand_qty==45.0 assertion and
+    test_shortage_truth_consistency_integration.py's Truth-B VALVE-02
+    membership). XFER-01 has no other seed step touching it, so it can never
+    pool onto — or be masked by — any other item's on-hand/demand picture.
+
+    Expected quantity: seed_drp's own arithmetic (source excess 2000, dest
+    on-hand 45 vs a 200-qty order @ day+21 vs safety 50) works out to a
+    deficit_qty of 185 at bucket 3, DOWN-rounded by transfer_multiple=10 to a
+    recommended_qty of 180 (see seed_drp's docstring for the full derivation)."""
     dsn = migrated_db
     # The DRP seed depends on the enrichment (VALVE-02 @ DC-LAX shortage) + the
     # baseline master data; run the full demo seed pipeline the same way
@@ -701,7 +725,7 @@ def test_seed_drp_produces_valve02_atl_to_lax_transfer(migrated_db):
         seed.seed_calendars(conn)
         seed.seed_drp(conn)
 
-    # A baseline run must draft the VALVE-02 DC-ATL -> DC-LAX transfer.
+    # A baseline run must draft the XFER-01 DC-ATL -> DC-LAX transfer.
     assert _run(dsn) == 0
 
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
@@ -720,16 +744,27 @@ def test_seed_drp_produces_valve02_atl_to_lax_transfer(migrated_db):
             (AGENT, str(BASELINE)),
         ).fetchall()
 
-    valve = [
+    xfer = [
         r for r in rows
-        if r["item_ext"] == "VALVE-02"
+        if r["item_ext"] == "XFER-01"
         and r["src_ext"] == "DC-ATL"
         and r["dst_ext"] == "DC-LAX"
     ]
-    assert len(valve) == 1, (
-        "seed_drp must yield exactly one VALVE-02 DC-ATL -> DC-LAX transfer DRAFT "
+    assert len(xfer) == 1, (
+        "seed_drp must yield exactly one XFER-01 DC-ATL -> DC-LAX transfer DRAFT "
         f"(got transfers: {[(r['item_ext'], r['src_ext'], r['dst_ext']) for r in rows]})"
     )
-    assert float(valve[0]["recommended_qty"]) > 0
+    assert float(xfer[0]["recommended_qty"]) > 0
     # transfer_multiple=10 in the seed -> a whole-multiple-of-10 shipment.
-    assert float(valve[0]["recommended_qty"]) % 10 == 0
+    assert float(xfer[0]["recommended_qty"]) % 10 == 0
+    # Derived arithmetic (see seed_drp's docstring): deficit 185 @ bucket 3,
+    # floored to the nearest multiple of 10 -> 180.
+    assert float(xfer[0]["recommended_qty"]) == 180.0
+
+    # VALVE-02 must NOT have gained a transfer draft from this seed — it is
+    # deliberately untouched by seed_drp (isolation guard, direct assertion).
+    valve = [r for r in rows if r["item_ext"] == "VALVE-02"]
+    assert valve == [], (
+        "seed_drp must never draft a VALVE-02 transfer — VALVE-02 is reserved "
+        "for the phase-1 shortage demo, not the DRP transfer demo"
+    )
