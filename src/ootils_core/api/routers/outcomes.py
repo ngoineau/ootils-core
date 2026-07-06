@@ -30,13 +30,14 @@ scenario (``recommendations.scenario_id`` — an outcome inherits its scenario
 through its reco, migration 069 carries no scenario_id of its own). V1 evaluates
 baseline only, but the read surface is scenario-scoped by construction.
 
-FVA CAVEAT (KPI 3): ``pyramide_accuracy_metrics`` persists ``wape`` (the model's
-own error), NOT a Forecast-Value-Added figure — there is no naive-baseline
-column to difference against in the schema today. The summary therefore reports
-``avg_wape`` (the aggregate/all-horizons WAPE of the runs in scope), NULL-honest
-(NULL rows ignored). This is named for what it IS; wiring a true FVA (naive vs
-model) is a schema addition deferred beyond this PR (see the final response
-notes).
+KPI 3 (FVA): the summary reports ``avg_fva_wape`` — the mean of the real
+Forecast-Value-Added on the WAPE axis (``pyramide_accuracy_metrics.fva_wape`` =
+naive_wape − wape, migration 068), over the aggregate (all-horizons) rows of the
+runs in scope. NULL-honest: rows whose ``fva_wape`` is NULL (naive not
+computable, or a stat operand NULL) are ignored, and the KPI is None when no
+non-NULL aggregate ``fva_wape`` exists. A positive value means the statistical
+model beats a trivial seasonal-naive baseline; a negative value is a legitimate,
+un-clamped result (the naive can win on a strongly seasonal series).
 
 Kill switch: ``OOTILS_OUTCOMES_ENABLED`` (default enabled). Falsy → 503 on the
 evaluate verb, checked AFTER auth/scope but BEFORE the DB pool — mirrors
@@ -127,10 +128,10 @@ class OutcomeSummaryOut(BaseModel):
     )
     # KPI 2 — total $ proven avoided.
     avoided_severity_usd_total: Optional[float] = None
-    # KPI 3 — mean forecast WAPE of runs in scope (see FVA caveat in the module
-    # docstring: this is WAPE, not a true Forecast-Value-Added figure).
-    avg_wape: Optional[float] = None
-    wape_basis_count: int = Field(
+    # KPI 3 — mean Forecast-Value-Added (fva_wape = naive_wape − wape, mig 068)
+    # of the aggregate rows in scope; positive = model beats seasonal-naive.
+    avg_fva_wape: Optional[float] = None
+    fva_basis_count: int = Field(
         ..., description="Non-NULL aggregate WAPE rows averaged (KPI 3 denominator)."
     )
     # KPI 4 — reco approval rate.
@@ -219,7 +220,7 @@ def get_recommendation_outcome(
     summary="Proof-of-value KPI summary",
     description=(
         "The five proof KPIs for a scenario over an observation-date window: "
-        "pct_shortages_avoided, avoided_severity_usd_total, avg_wape (see FVA "
+        "pct_shortages_avoided, avoided_severity_usd_total, avg_fva_wape (see FVA "
         "caveat), reco_approval_rate, cost_of_inaction_usd. Every KPI is "
         "NULL/0-honest (NULL = no data, 0 = genuine zero). Fully parameterized "
         "SQL, scenario-scoped."
@@ -247,7 +248,7 @@ def outcomes_summary(
     scenario_str = str(scenario_id)
 
     outcome_stats = _kpi_outcome_stats(db, scenario_str, from_, to)
-    wape_stats = _kpi_avg_wape(db, scenario_str)
+    wape_stats = _kpi_avg_fva_wape(db, scenario_str)
     approval_stats = _kpi_approval_rate(db, scenario_str)
 
     return OutcomeSummaryOut(
@@ -257,8 +258,8 @@ def outcomes_summary(
         pct_shortages_avoided=outcome_stats["pct_shortages_avoided"],
         avoided_basis_count=outcome_stats["avoided_basis_count"],
         avoided_severity_usd_total=outcome_stats["avoided_severity_usd_total"],
-        avg_wape=wape_stats["avg_wape"],
-        wape_basis_count=wape_stats["wape_basis_count"],
+        avg_fva_wape=wape_stats["avg_fva_wape"],
+        fva_basis_count=wape_stats["fva_basis_count"],
         reco_approval_rate=approval_stats["reco_approval_rate"],
         reco_total_count=approval_stats["reco_total_count"],
         cost_of_inaction_usd=outcome_stats["cost_of_inaction_usd"],
@@ -454,8 +455,8 @@ def _kpi_outcome_stats(
     }
 
 
-def _kpi_avg_wape(db: DictRowConnection, scenario: str) -> dict[str, Any]:
-    """KPI 3 — mean aggregate WAPE of the Pyramide runs in this scenario.
+def _kpi_avg_fva_wape(db: DictRowConnection, scenario: str) -> dict[str, Any]:
+    """KPI 3 — mean Forecast-Value-Added (fva_wape) of the Pyramide runs.
 
     Joins pyramide_accuracy_metrics (aggregate row: horizon IS NULL) to
     pyramide_runs for the scenario filter. NULL-honest: only non-NULL WAPE rows
@@ -463,28 +464,29 @@ def _kpi_avg_wape(db: DictRowConnection, scenario: str) -> dict[str, Any]:
     accuracy contract — NEVER a masked 0), and the whole KPI is None when NO
     non-NULL aggregate WAPE row exists for the scenario.
 
-    CAVEAT (see module docstring): this is WAPE, not Forecast-Value-Added — the
-    schema has no naive-baseline column to difference against. Reported as
-    ``avg_wape``, named for what it is.
+    The REAL Forecast-Value-Added on the WAPE axis: ``fva_wape`` = naive_wape −
+    wape (migration 068). Positive = the model beats a trivial seasonal-naive;
+    negative is a legitimate un-clamped result. NULL-honest: NULL ``fva_wape``
+    rows (naive not computable) are ignored, and the KPI is None when none exist.
     """
     row = db.execute(
         """
-        SELECT AVG(m.wape) AS avg_wape,
-               COUNT(m.wape) AS wape_basis_count
+        SELECT AVG(m.fva_wape) AS avg_fva_wape,
+               COUNT(m.fva_wape) AS fva_basis_count
         FROM pyramide_accuracy_metrics m
         JOIN pyramide_runs pr ON pr.run_id = m.run_id
         WHERE pr.scenario_id = %s
           AND m.horizon IS NULL
-          AND m.wape IS NOT NULL
+          AND m.fva_wape IS NOT NULL
         """,
         (scenario,),
     ).fetchone()
     if row is None:  # pragma: no cover — aggregate always returns a row
-        return {"avg_wape": None, "wape_basis_count": 0}
-    count = int(row["wape_basis_count"] or 0)
+        return {"avg_fva_wape": None, "fva_basis_count": 0}
+    count = int(row["fva_basis_count"] or 0)
     return {
-        "avg_wape": float(row["avg_wape"]) if count > 0 else None,
-        "wape_basis_count": count,
+        "avg_fva_wape": float(row["avg_fva_wape"]) if count > 0 else None,
+        "fva_basis_count": count,
     }
 
 
