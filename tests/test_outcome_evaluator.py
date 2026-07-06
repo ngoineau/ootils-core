@@ -10,12 +10,27 @@ none is copied back from an execution. If the evaluator ever disagrees with a
 derivation here, the derivation is the contract and the divergence is a bug to
 investigate, not a golden to "fix".
 
-The five deterministic branches, with the exact knobs (evaluator.py:100-102):
-    AVOIDED_EPS_RATIO        = 0.05   (observed <= predicted*0.05 -> effectively gone)
-    AVOIDED_EPS_ABS          = 1      (absolute sub-unit floor, whichever is larger)
-    MATERIALIZED_FLOOR_RATIO = 0.90   (observed >= predicted*0.90 -> not reduced)
+POST-REVIEW RE-DERIVATION (6 fixes applied to evaluator.py — see the coordinator
+note this file was rewritten against): the classifier for an ACTED reco with an
+observation snapshot present is now THREE PURE, MUTUALLY EXCLUSIVE, EXHAUSTIVE
+bands of ``ratio = observed_qty / predicted_qty`` (evaluator.py:78-116, 323-404),
+with MATERIALIZED TESTED FIRST:
+    ratio >= MATERIALIZED_FLOOR_RATIO (0.90)  -> MATERIALIZED (avoided=0)
+    ratio <= AVOIDED_EPS_RATIO        (0.05)  -> AVOIDED      (avoided=predicted_$)
+    otherwise                                 -> PARTIAL      (avoided=predicted_$*(1-ratio))
+There is NO absolute floor mixed into these bands anymore — a prior version used
+``max(predicted*AVOIDED_EPS_RATIO, AVOIDED_EPS_ABS)`` as an AVOIDED ceiling, which
+for predicted <= AVOIDED_EPS_ABS/AVOIDED_EPS_RATIO = 20 let the absolute floor
+dominate the ratio and score a ratio-1.0 fully-materialized shortage as AVOIDED
+with full $ credit. The helper that computed that ceiling (``_avoided_ceiling``)
+no longer exists.
 
-The avoided-$ basis (evaluator.py:157-199):
+``AVOIDED_EPS_ABS`` (=1) is retained ONLY for the DEGENERATE case — predicted_qty
+is None or <= 0, so no ratio can be formed at all (evaluator.py:330-351, tested
+BEFORE the ratio bands): observed_qty <= AVOIDED_EPS_ABS -> AVOIDED, else
+MATERIALIZED. It never re-enters the ratio bands.
+
+The avoided-$ basis (evaluator.py:170-212, UNCHANGED by the review):
     predicted_$ = predicted_deficit_qty * unit_cost
     unit_cost precedence: evidence['unit_cost'] (if > 0) -> estimated_cost /
     recommended_qty (if qty > 0) -> None (NULL-honest, no masked 0).
@@ -38,7 +53,6 @@ from ootils_core.engine.outcome.evaluator import (
     MATERIALIZED_FLOOR_RATIO,
     VALID_STATUSES,
     ObservedShortage,
-    _avoided_ceiling,
     _predicted_unit_cost,
     evaluate_outcome,
 )
@@ -110,8 +124,8 @@ def test_avoided_observed_zero_credits_full_predicted_dollars():
     """Case 1 — AVOIDED (the headline win).
     Reco APPROVED (acted), predicted deficit 100, unit_cost 3.0 (evidence) ->
     predicted_$ = 100 * 3 = 300. Snapshot present. Observed deficit 0.
-      avoided_ceiling = max(100*0.05, 1) = max(5.0, 1) = 5.0.
-      observed 0 <= ceiling 5.0 -> AVOIDED.
+      ratio = 0 / 100 = 0.0 <= AVOIDED_EPS_RATIO (0.05) -> AVOIDED
+      (MATERIALIZED tested first: 0.0 >= 0.90? No.)
     Verdict: observed_deficit_qty = 0 (Decimal(0), a HARD zero the branch sets),
     avoided_severity_usd = predicted_$ = 300. snapshot_id echoed.
     """
@@ -132,8 +146,8 @@ def test_avoided_observed_zero_credits_full_predicted_dollars():
 
 
 def test_avoided_small_residual_under_ceiling_still_avoided():
-    """Case 1b — a residual strictly UNDER the ceiling is still AVOIDED.
-    Predicted 100 -> ceiling 5.0. Observed 4 (< 5.0) -> AVOIDED.
+    """Case 1b — a residual strictly under the AVOIDED ratio band is still
+    AVOIDED. Predicted 100, observed 4: ratio = 4/100 = 0.04 <= 0.05 -> AVOIDED.
     observed_deficit_qty is forced to Decimal(0) by the branch (the residual is
     treated as noise, NOT carried through as 4). avoided_$ = full 300.
     """
@@ -222,13 +236,11 @@ def test_partial_just_below_materialized_floor():
     assert out.avoided_severity_usd == pytest.approx(33.0)
 
 
-def test_partial_just_above_avoided_ceiling():
-    """Case 2c — observed strictly just ABOVE the ceiling is PARTIAL, not
-    AVOIDED. Predicted 100 -> ceiling 5.0. Observed 6 (> 5.0):
-      ratio = 6/100 = 0.06 ; 0.05 (ceiling ratio) < 0.06 < 0.90 -> PARTIAL.
-      avoided_$ = 300 * (1 - 0.06) = 300 * 0.94 = 282.00.
-    Note the ceiling is the ABS/ratio MAX (5.0), NOT the raw ratio boundary — 6
-    clears 5.0 so it is graded, not zeroed.
+def test_partial_just_above_avoided_ratio_band():
+    """Case 2c — observed strictly just ABOVE the AVOIDED ratio band is PARTIAL,
+    not AVOIDED. Predicted 100, observed 6:
+      ratio = 6/100 = 0.06 ; 0.06 > 0.05 (not AVOIDED) and 0.06 < 0.90 (not
+      MATERIALIZED) -> PARTIAL. avoided_$ = 300 * (1 - 0.06) = 300 * 0.94 = 282.00.
     """
     out = evaluate_outcome(
         _reco(status="APPROVED", evidence=UNIT_COST_EVIDENCE),
@@ -396,10 +408,11 @@ def test_indeterminate_acted_no_snapshot_even_with_observed_shortage():
 # ===========================================================================
 
 
-def test_boundary_observed_exactly_at_avoided_ceiling_is_avoided():
-    """Observed EXACTLY at the ceiling (5.0 for predicted 100) is AVOIDED — the
-    comparison is `observed_qty <= avoided_ceiling` (inclusive at the ceiling).
-    avoided_$ = full 300; observed zeroed."""
+def test_boundary_ratio_exactly_at_avoided_eps_is_avoided():
+    """Observed EXACTLY at ratio == AVOIDED_EPS_RATIO (0.05) is AVOIDED — the
+    comparison is `ratio <= AVOIDED_EPS_RATIO` (inclusive). Predicted 100,
+    observed 5: ratio = 5/100 = 0.05 (MATERIALIZED checked first: 0.05 >= 0.90?
+    No). avoided_$ = full 300; observed zeroed."""
     out = evaluate_outcome(
         _reco(status="APPROVED", evidence=UNIT_COST_EVIDENCE),
         _observed(5),
@@ -409,6 +422,40 @@ def test_boundary_observed_exactly_at_avoided_ceiling_is_avoided():
     assert out.evaluation_status == "AVOIDED"
     assert out.observed_deficit_qty == Decimal(0)
     assert out.avoided_severity_usd == Decimal("300")
+
+
+def test_boundary_ratio_just_above_avoided_eps_is_partial():
+    """NEW (post-review): ratio strictly JUST ABOVE AVOIDED_EPS_RATIO is PARTIAL,
+    not AVOIDED — the 0.05 boundary is a hard line, no absolute floor blurs it
+    anymore. Predicted 100, observed 5.01: ratio = 0.0501 > 0.05 -> PARTIAL.
+    avoided_$ = 300 * (1 - 0.0501) = 300 * 0.9499 = 284.97.
+    """
+    out = evaluate_outcome(
+        _reco(status="APPROVED", evidence=UNIT_COST_EVIDENCE),
+        _observed("5.01"),
+        _snapshot(),
+        AS_OF,
+    )
+    assert out.evaluation_status == "PARTIAL"
+    ratio = Decimal("5.01") / Decimal("100")
+    assert out.observed_deficit_qty == Decimal("5.01")
+    assert out.avoided_severity_usd == Decimal("300") * (Decimal(1) - ratio)
+
+
+def test_boundary_ratio_just_below_materialized_floor_is_partial():
+    """NEW (post-review): ratio strictly JUST BELOW MATERIALIZED_FLOOR_RATIO is
+    PARTIAL, not MATERIALIZED. Predicted 100, observed 89.99: ratio = 0.8999 <
+    0.90 -> PARTIAL. avoided_$ = 300 * (1 - 0.8999) = 300 * 0.1001 = 30.03.
+    """
+    out = evaluate_outcome(
+        _reco(status="APPROVED", evidence=UNIT_COST_EVIDENCE),
+        _observed("89.99"),
+        _snapshot(),
+        AS_OF,
+    )
+    assert out.evaluation_status == "PARTIAL"
+    ratio = Decimal("89.99") / Decimal("100")
+    assert out.avoided_severity_usd == Decimal("300") * (Decimal(1) - ratio)
 
 
 def test_boundary_observed_exactly_at_materialized_floor():
@@ -426,11 +473,21 @@ def test_boundary_observed_exactly_at_materialized_floor():
     assert out.avoided_severity_usd == Decimal(0)
 
 
-def test_boundary_tiny_predicted_uses_absolute_floor():
-    """The absolute floor (AVOIDED_EPS_ABS=1) dominates for a tiny prediction.
-    Predicted 2 -> ceiling = max(2*0.05, 1) = max(0.1, 1) = 1.0 (the ABS floor
-    wins, so a tiny deficit is not held to an impossible 0.1 bar).
-    Observed 1 <= ceiling 1.0 -> AVOIDED (unit_cost 3 -> predicted_$ = 2*3 = 6).
+def test_tiny_predicted_now_uses_pure_ratio_not_absolute_floor():
+    """POST-REVIEW BEHAVIOUR CHANGE (fix #1 — the review's central defect): a
+    tiny NON-degenerate prediction (predicted_qty=2, which is > 0, so this is
+    NOT the None/<=0 degenerate branch) is now graded by the PURE ratio, never
+    by the old absolute floor. Predicted 2, observed 1, unit_cost 3 ->
+    predicted_$ = 2*3 = 6.
+      ratio = 1/2 = 0.5 ; 0.5 >= 0.90? No (not MATERIALIZED).
+      0.5 <= 0.05? No (not AVOIDED). -> PARTIAL.
+      avoided_$ = predicted_$ * (1 - ratio) = 6 * (1 - 0.5) = 6 * 0.5 = 3.
+      observed_deficit_qty carried through as 1 (NOT zeroed — only the AVOIDED
+      branch zeroes it).
+    Pre-review this case was misclassified AVOIDED with the full 6 credited
+    (the old absolute floor: max(2*0.05, 1) = max(0.1, 1) = 1.0 dominated the
+    ratio, letting a HALF-materialized shortage be scored as fully avoided —
+    exactly the defect the review fixed).
     """
     out = evaluate_outcome(
         _reco(status="APPROVED", deficit_qty=Decimal("2"), evidence=UNIT_COST_EVIDENCE),
@@ -438,17 +495,38 @@ def test_boundary_tiny_predicted_uses_absolute_floor():
         _snapshot(),
         AS_OF,
     )
-    assert out.evaluation_status == "AVOIDED"
-    assert out.avoided_severity_usd == Decimal("6")
+    assert out.evaluation_status == "PARTIAL"
+    assert out.observed_deficit_qty == Decimal("1")
+    assert out.avoided_severity_usd == Decimal("3")
+
+
+def test_tiny_predicted_observed_equals_predicted_is_materialized():
+    """The coordinator's own smoking-gun example: predicted=1, observed=1 (ratio
+    == 1.0, a FULLY materialized shortage) must be MATERIALIZED, never AVOIDED —
+    even though predicted_qty (1) is well under the old absolute-floor crossover
+    (AVOIDED_EPS_ABS/AVOIDED_EPS_RATIO = 1/0.05 = 20). predicted_qty=1 is > 0, so
+    this is NOT the degenerate branch either; ratio = 1/1 = 1.0 >= 0.90 ->
+    MATERIALIZED, avoided_severity_usd = 0 (a genuine zero, nothing avoided).
+    """
+    out = evaluate_outcome(
+        _reco(status="APPROVED", deficit_qty=Decimal("1"), evidence=UNIT_COST_EVIDENCE),
+        _observed(1),
+        _snapshot(),
+        AS_OF,
+    )
+    assert out.evaluation_status == "MATERIALIZED"
+    assert out.observed_deficit_qty == Decimal("1")
+    assert out.avoided_severity_usd == Decimal(0)
 
 
 def test_predicted_qty_none_with_shortage_is_materialized_prudent():
     """predicted_qty=None (reco carried no deficit figure) + a real observed
-    shortage: documents what the code does. observed 50 > ceiling (ABS 1, since
-    predicted None -> _avoided_ceiling returns AVOIDED_EPS_ABS=1). Then the
-    `predicted_qty is None or <= 0` guard fires -> MATERIALIZED is the PRUDENT
-    honest call (a shortage happened; nothing proven avoided). avoided = 0.
-    observed carried through as 50; predicted_deficit_qty stays None.
+    shortage: documents what the code does. This is the DEGENERATE branch
+    (predicted_qty is None -> no ratio can be formed at all, tested BEFORE the
+    ratio bands): observed 50 > AVOIDED_EPS_ABS (1) -> MATERIALIZED is the
+    PRUDENT honest call (a shortage happened; nothing proven avoided).
+    avoided = 0. observed carried through as 50; predicted_deficit_qty stays
+    None.
     """
     out = evaluate_outcome(
         _reco(status="APPROVED", deficit_qty=None, evidence=UNIT_COST_EVIDENCE),
@@ -463,10 +541,11 @@ def test_predicted_qty_none_with_shortage_is_materialized_prudent():
 
 
 def test_predicted_qty_none_no_shortage_is_avoided_with_null_dollars():
-    """predicted_qty=None + observed 0: the AVOIDED branch fires FIRST (0 <=
-    ceiling 1). But predicted_severity is None (no deficit qty to value) ->
-    avoided_severity_usd = None even though the verdict is AVOIDED. This is the
-    NULL-honest $ discipline: an AVOIDED with no cost basis credits None, not 0.
+    """predicted_qty=None + observed 0: the DEGENERATE branch's AVOIDED case
+    fires (0 <= AVOIDED_EPS_ABS 1). But predicted_severity is None (no deficit
+    qty to value) -> avoided_severity_usd = None even though the verdict is
+    AVOIDED. This is the NULL-honest $ discipline: an AVOIDED with no cost basis
+    credits None, not 0.
     """
     out = evaluate_outcome(
         _reco(status="APPROVED", deficit_qty=None, evidence=UNIT_COST_EVIDENCE),
@@ -479,10 +558,51 @@ def test_predicted_qty_none_no_shortage_is_avoided_with_null_dollars():
     assert out.avoided_severity_usd is None, "AVOIDED with no predicted qty -> NULL $, not 0"
 
 
+def test_degenerate_boundary_observed_at_and_above_abs_floor():
+    """NEW (post-review) — the DEGENERATE case's own boundary, explicit at a
+    NON-integer scale so it cannot be confused with the ratio bands (predicted
+    is None throughout, so there IS no ratio): observed 0.5 (<= AVOIDED_EPS_ABS
+    1) -> AVOIDED; observed 5 (> 1) -> MATERIALIZED. Mirrors the coordinator's
+    explicit degenerate-boundary request.
+    """
+    avoided = evaluate_outcome(
+        _reco(status="APPROVED", deficit_qty=None, evidence=UNIT_COST_EVIDENCE),
+        _observed("0.5"),
+        _snapshot(),
+        AS_OF,
+    )
+    assert avoided.evaluation_status == "AVOIDED"
+    assert avoided.observed_deficit_qty == Decimal(0)
+    assert avoided.avoided_severity_usd is None  # no predicted qty -> no $ basis
+
+    materialized = evaluate_outcome(
+        _reco(status="APPROVED", deficit_qty=None, evidence=UNIT_COST_EVIDENCE),
+        _observed("5"),
+        _snapshot(),
+        AS_OF,
+    )
+    assert materialized.evaluation_status == "MATERIALIZED"
+    assert materialized.observed_deficit_qty == Decimal("5")
+    assert materialized.avoided_severity_usd == Decimal(0)
+
+
+def test_degenerate_boundary_observed_exactly_at_abs_floor_is_avoided():
+    """The degenerate AVOIDED/MATERIALIZED split is inclusive at exactly
+    AVOIDED_EPS_ABS (`observed_qty <= AVOIDED_EPS_ABS`): observed == 1 (not just
+    below it) is still AVOIDED."""
+    out = evaluate_outcome(
+        _reco(status="APPROVED", deficit_qty=None, evidence=UNIT_COST_EVIDENCE),
+        _observed(1),
+        _snapshot(),
+        AS_OF,
+    )
+    assert out.evaluation_status == "AVOIDED"
+    assert out.observed_deficit_qty == Decimal(0)
+
+
 def test_predicted_qty_zero_with_shortage_is_materialized():
-    """predicted_qty = 0 (not None): _avoided_ceiling returns ABS 1 (the
-    `<= 0` guard), observed 10 > 1 -> not AVOIDED, then `predicted_qty <= 0` ->
-    MATERIALIZED, avoided 0."""
+    """predicted_qty = 0 (not None) is ALSO the degenerate branch (the `<= 0`
+    guard): observed 10 > AVOIDED_EPS_ABS (1) -> MATERIALIZED, avoided 0."""
     out = evaluate_outcome(
         _reco(status="APPROVED", deficit_qty=Decimal("0"), evidence=UNIT_COST_EVIDENCE),
         _observed(10),
@@ -641,18 +761,38 @@ def test_status_case_insensitive_lowercase_approved_acts():
 
 
 # ===========================================================================
-# 7. Helper-level golden checks (the ceiling + unit-cost precedence in isolation)
+# 7. Helper-level golden checks (the ratio bands + unit-cost precedence, direct)
 # ===========================================================================
 
 
-def test_avoided_ceiling_helper_arithmetic():
-    """_avoided_ceiling: max(qty*0.05, 1), ABS floor when qty is None/<=0."""
-    assert _avoided_ceiling(Decimal("100")) == Decimal("5.00")  # 100*0.05 wins
-    assert _avoided_ceiling(Decimal("2")) == Decimal("1")  # ABS floor wins (0.1 < 1)
-    assert _avoided_ceiling(Decimal("20")) == Decimal("1.00")  # 20*0.05 = 1.0 == ABS
-    assert _avoided_ceiling(None) == AVOIDED_EPS_ABS  # no prediction -> ABS alone
-    assert _avoided_ceiling(Decimal("0")) == AVOIDED_EPS_ABS
-    assert _avoided_ceiling(Decimal("-5")) == AVOIDED_EPS_ABS
+def test_ratio_bands_are_pure_no_absolute_floor_mixed_in():
+    """POST-REVIEW (fix #1): ``_avoided_ceiling`` no longer exists — there is no
+    standalone ceiling helper to unit-test anymore, because the bands are PURE
+    ratio thresholds with no absolute-floor blending. This test asserts that
+    property directly, by holding ``observed_qty`` FIXED at 1 and sweeping
+    ``predicted_qty`` across a range that would have crossed the old absolute
+    floor (predicted <= AVOIDED_EPS_ABS/AVOIDED_EPS_RATIO = 20) and asserting the
+    verdict is decided by ratio alone (via evaluate_outcome, the only public
+    entry point for this logic post-review):
+      predicted=1  -> ratio 1/1=1.00   -> MATERIALIZED (>= 0.90)
+      predicted=2  -> ratio 1/2=0.50   -> PARTIAL       (between bands)
+      predicted=20 -> ratio 1/20=0.05  -> AVOIDED       (<= 0.05, boundary)
+      predicted=21 -> ratio 1/21~0.048 -> AVOIDED       (<= 0.05)
+    None of these hit the degenerate branch (predicted_qty is always > 0 here).
+    """
+    def _status(predicted):
+        out = evaluate_outcome(
+            _reco(status="APPROVED", deficit_qty=Decimal(str(predicted))),
+            _observed(1),
+            _snapshot(),
+            AS_OF,
+        )
+        return out.evaluation_status
+
+    assert _status(1) == "MATERIALIZED"
+    assert _status(2) == "PARTIAL"
+    assert _status(20) == "AVOIDED"
+    assert _status(21) == "AVOIDED"
 
 
 def test_predicted_unit_cost_precedence_helper():

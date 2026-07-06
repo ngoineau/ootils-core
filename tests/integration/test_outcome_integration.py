@@ -41,20 +41,31 @@ are anchored on the DB-side CURRENT_DATE. No wall-clock timing assertions. When 
 test reads a snapshot/outcome back in SQL it accesses columns BY NAME (dict_row) —
 never by positional unpacking (the DRP dict_row pitfall).
 
-KNOWN SOURCE BUG these tests will surface in CI (NOT a test defect — reported to
-the owner): ``evaluator.py::_load_recommendations`` SELECTs a ``location_id``
-column that does NOT exist on ``recommendations`` (migration 039 has none; 061
-adds target_node_id/current_receipt_date/proposed_date; 066 adds source_location_
-id/dest_location_id — but never a plain ``location_id``). So ``evaluate_and_
-persist`` raises ``psycopg.errors.UndefinedColumn`` on any real DB, and every test
-here that drives it (all of ``TestEvaluateAndPersist``, the seeded ``TestGet*`` /
-``TestOutcomesSummary`` cases via ``_seed_full_scenario``, and
-``TestEvaluatePost``'s 201/as_of cases) FAILS until the one-line fix lands: drop
-``location_id`` from that SELECT. The evaluator ALREADY handles the absence
-correctly downstream (``reco.get("location_id")`` -> None -> item-pooled matching),
-so removing the column is the whole fix and these expectations then hold as
-written. The empty-scenario summary, the 401/403 scope cases and the 503
-kill-switch case do NOT touch the broken loader and pass regardless.
+FIXED SOURCE BUG (formerly documented here as a known defect, now resolved):
+``evaluator.py::_load_recommendations`` no longer SELECTs a non-existent
+``location_id`` column — the loader was fixed to select only columns that exist
+on ``recommendations`` (item_id, no location_id; only source/dest_location_id on
+TRANSFER recos), matching a reco with no location item-wise via the observed
+shortages' (item_id, None) pooled fallback. ``evaluate_and_persist`` runs cleanly
+against a real DB again.
+
+POST-REVIEW RE-DERIVATION (6 review fixes applied to evaluator.py/outcomes.py —
+this file was re-derived against the new rules, not just patched):
+  * Fix #1 (ratio bands, MATERIALIZED-first): none of THIS file's seeded verdicts
+    change, because every seed here uses predicted_deficit_qty=100 (well above
+    the old absolute-floor crossover of 20) — the pure-ratio bands agree with the
+    prior absolute-floor-blended bands at that scale. The pure golden coverage of
+    the fix itself lives in tests/test_outcome_evaluator.py.
+  * Fix #2 (pooled-worst, order-independent): NEW coverage added below
+    (``TestEvaluateAndPersist.test_pooled_worst_across_two_locations_is_max_severity``)
+    — an item with a MILD shortage at the alphabetically-FIRST location and a
+    SEVERE one at the second must resolve the (item, None) pooled key to the
+    SEVERE (max deficit_qty) observation, never "whichever SQL saw first".
+  * Fix #3 (KPI 5 rejects a negative unit_cost): NEW coverage added below
+    (``TestOutcomesSummary.test_kpi5_rejects_negative_evidence_unit_cost_falls_back``).
+  * Fix #4 (from/to windows ONLY 1/2/5): the existing window test is extended to
+    assert KPI 3 (avg_fva_wape) is ALSO unaffected by the window (KPI 4 was
+    already asserted) — both are scenario-scope-lifetime by construction.
 """
 from __future__ import annotations
 
@@ -457,6 +468,67 @@ class TestEvaluateAndPersist:
 
         assert after == before, "shortages/recos/snapshots must be untouched (ADR-021 read-only)"
         assert outcomes_after > outcomes_before, "only recommendation_outcomes grows"
+
+    def test_pooled_worst_across_two_locations_is_max_severity(self, conn):
+        """Fix #2 golden — the (item, None) pooled key resolves to the
+        MAX-severity observation across the item's locations, INDEPENDENT of SQL
+        row order (which orders by (item_id, location_id), i.e. by location
+        UUID first).
+
+        Two locations, deliberately ordered so the alphabetically-FIRST
+        location_id carries the MILD shortage (severity 1, qty 2) and the
+        SECOND carries the SEVERE one (severity 100, qty 95) — reproducing
+        exactly the case that a naive "first SQL row wins" pooling would get
+        backwards (it would pick the mild one just because its UUID sorts
+        first).
+
+        The reco carries no location (a procurement-style reco), so it resolves
+        via the pooled fallback. Predicted 100, unit_cost 3.0 -> predicted_$=300.
+        If pooling picked the mild shortage (qty 2): ratio 2/100=0.02 <= 0.05 ->
+        would be AVOIDED — the wrong, overstated verdict. Picking the correct
+        max-severity (qty 95): ratio 95/100=0.95 >= 0.90 -> MATERIALIZED,
+        avoided=0 — the honest verdict this fix guarantees.
+        """
+        item = _seed_item(conn)
+        loc_first = UUID("00000000-0000-0000-0000-0000000000a1")
+        loc_second = UUID("00000000-0000-0000-0000-0000000000b2")
+        assert str(loc_first) < str(loc_second), "test setup: loc_first must sort before loc_second"
+        conn.execute(
+            "INSERT INTO locations (location_id, name) VALUES (%s, 'pool-a'), (%s, 'pool-b')",
+            (loc_first, loc_second),
+        )
+        today = conn.execute("SELECT CURRENT_DATE AS d").fetchone()["d"]
+
+        # Mild shortage at the FIRST-sorting location: low severity, low qty.
+        _seed_shortage(
+            conn, scenario_id=BASELINE, item_id=item, location_id=loc_first,
+            shortage_date=today, shortage_qty=2, severity_score=1,
+        )
+        # Severe shortage at the SECOND-sorting location: high severity, high qty.
+        _seed_shortage(
+            conn, scenario_id=BASELINE, item_id=item, location_id=loc_second,
+            shortage_date=today, shortage_qty=95, severity_score=100,
+        )
+        # A snapshot anchor so the reco is classifiable (not INDETERMINATE) —
+        # item-pooled, no location on the reco itself.
+        _seed_snapshot(conn, scenario_id=BASELINE, item_id=item, location_id=loc_first, as_of_date=today)
+
+        reco_id = _seed_reco(
+            conn, scenario_id=BASELINE, item_id=item,
+            shortage_date=today + timedelta(days=20), deficit_qty=100, unit_cost=3.0,
+        )
+        conn.commit()
+
+        evaluate_and_persist(conn, str(BASELINE))
+        conn.commit()
+
+        row = _outcomes_for(conn, reco_id)[0]
+        assert row["evaluation_status"] == "MATERIALIZED", (
+            "pooling must pick the max-severity (95-qty) observation, not the "
+            "alphabetically-first (2-qty) one"
+        )
+        assert row["observed_deficit_qty"] == 95
+        assert row["avoided_severity_usd"] == 0
 
     def test_explicit_as_of_scopes_the_observation_window(self, conn):
         """A shortage dated in the FUTURE relative to a past as_of is NOT observed
@@ -861,14 +933,23 @@ class TestOutcomesSummary:
     def test_window_from_to_filters_observation_date(
         self, api_client, new_scenario, migrated_db
     ):
-        """The from/to window filters on evaluated_as_of. The seed evaluates on
-        CURRENT_DATE; a window entirely in the past excludes it (avoided basis 0,
-        KPIs None), while a window covering today includes it."""
+        """The from/to window filters KPIs 1/2/5 on evaluated_as_of ONLY (fix
+        #4). The seed evaluates on CURRENT_DATE; a window entirely in the past
+        excludes it (avoided basis 0, KPIs 1/2 None), while a window covering
+        today includes it. KPI 3 (avg_fva_wape) and KPI 4 (reco_approval_rate)
+        are scenario-scope-LIFETIME by construction and must NOT move between
+        the two windows — asserted explicitly on both responses, not just one.
+        """
         handles = _seed_full_scenario(migrated_db, new_scenario)
         today = handles["today"]
+        with _db_conn(migrated_db) as conn:
+            _seed_pyramide_accuracy(
+                conn, scenario_id=new_scenario, item_id=handles["item_a"],
+                location_id=handles["loc"], fva_wape=0.15,
+            )
         clear = _mint_token(migrated_db, actor_kind="service", scopes=["read"])
 
-        # A past-only window: no outcomes in range -> outcome KPIs empty.
+        # A past-only window: no outcomes in range -> outcome KPIs (1/2/5) empty.
         past_to = (today - timedelta(days=1)).isoformat()
         resp = api_client.get(
             "/v1/outcomes/summary",
@@ -880,11 +961,14 @@ class TestOutcomesSummary:
         assert past["avoided_basis_count"] == 0, "no outcome falls in the past-only window"
         assert past["pct_shortages_avoided"] is None
         assert past["avoided_severity_usd_total"] is None
-        # KPI4 (reco_total_count) is NOT window-filtered (it counts recos, not
-        # outcomes) — the recos still exist regardless of the observation window.
+        # KPI3/4 are NOT window-filtered (fix #4: no evaluated_as_of of their
+        # own) — unaffected by a window that excludes every outcome.
         assert past["reco_total_count"] == 3
+        assert past["reco_approval_rate"] == pytest.approx(2 / 3)
+        assert past["avg_fva_wape"] == pytest.approx(0.15)
+        assert past["fva_basis_count"] == 1
 
-        # A window covering today includes the outcomes.
+        # A window covering today includes the KPI1/2/5 outcomes.
         resp = api_client.get(
             "/v1/outcomes/summary",
             params={
@@ -898,6 +982,73 @@ class TestOutcomesSummary:
         now = resp.json()
         assert now["avoided_basis_count"] == 2
         assert now["avoided_severity_usd_total"] == pytest.approx(300.0)
+        # KPI3/4 are IDENTICAL across both windows — proof they are lifetime,
+        # not silently re-scoped by the same from/to that moved KPI1/2 above.
+        assert now["reco_total_count"] == past["reco_total_count"]
+        assert now["reco_approval_rate"] == pytest.approx(past["reco_approval_rate"])
+        assert now["avg_fva_wape"] == pytest.approx(past["avg_fva_wape"])
+        assert now["fva_basis_count"] == past["fva_basis_count"]
+
+    def test_kpi5_rejects_negative_evidence_unit_cost_falls_back(
+        self, api_client, new_scenario, migrated_db
+    ):
+        """Fix #3 golden — KPI 5's SQL unit-cost CASE mirrors the evaluator's
+        Python ``uc > 0`` guard EXACTLY: a negative evidence unit_cost (-5) is
+        REJECTED (the regex ``^-?[0-9]+(\\.[0-9]+)?$`` matches the literal
+        '-5', but the ``> 0`` predicate then excludes it), so the fallback
+        estimated_cost/recommended_qty (400/100 = 4.0) is used instead — never a
+        negative cost of inaction.
+
+        DRAFT reco (never acted), evidence unit_cost=-5, estimated_cost=400,
+        recommended_qty=100 -> fallback unit_cost=4.0. An active shortage of
+        qty=40 at the coordinate -> NOT_APPLICABLE outcome, observed_deficit_qty
+        =40. cost_of_inaction_usd = 40 * 4.0 = 160 — NEVER 40 * -5 = -200.
+        """
+        with _db_conn(migrated_db) as conn:
+            item = _seed_item(conn, "kpi5-neg")
+            loc = _seed_location(conn)
+            today = conn.execute("SELECT CURRENT_DATE AS d").fetchone()["d"]
+            conn.execute(
+                """
+                INSERT INTO recommendations (
+                    recommendation_id, agent_name, agent_run_id, scenario_id,
+                    item_id, item_external_id, shortage_date,
+                    deficit_qty, recommended_qty, estimated_cost, currency,
+                    action, status, confidence, evidence
+                ) VALUES (
+                    %s, 'shortage_watcher', %s, %s,
+                    %s, %s, %s,
+                    100, 100, 400, 'EUR',
+                    'EXPEDITE', 'DRAFT', 'HIGH', %s
+                )
+                """,
+                (
+                    uuid4(),
+                    _seed_agent_run(conn, new_scenario),
+                    new_scenario,
+                    item, f"EXT-{uuid4().hex[:8]}", today + timedelta(days=20),
+                    json.dumps({"unit_cost": -5}),
+                ),
+            )
+            _seed_shortage(
+                conn, scenario_id=new_scenario, item_id=item, location_id=loc,
+                shortage_date=today, shortage_qty=40, severity_score=120,
+            )
+            evaluate_and_persist(conn, str(new_scenario))
+            conn.commit()
+
+        clear = _mint_token(migrated_db, actor_kind="service", scopes=["read"])
+        resp = api_client.get(
+            "/v1/outcomes/summary",
+            params={"scenario_id": str(new_scenario)},
+            headers=_bearer(clear),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["cost_of_inaction_usd"] == pytest.approx(160.0), (
+            "negative evidence unit_cost must be rejected, fallback (400/100=4.0) used"
+        )
+        assert body["cost_of_inaction_usd"] != pytest.approx(-200.0)
 
     def test_scenario_isolation(self, api_client, new_scenario, migrated_db):
         """The summary is scenario-scoped: a DIFFERENT empty scenario sees none of

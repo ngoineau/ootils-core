@@ -8,8 +8,14 @@ The HTTP surface over the recommendation-outcome backbone (engine/outcome +
   * ``GET /v1/recommendations/{id}/outcome`` — the latest observed outcome of
     one recommendation (its deterministic verdict + the NULL-honest $ figures).
   * ``GET /v1/outcomes/summary`` — the FIVE proof KPIs (SQL aggregates), scoped
-    to a scenario and an observation-date window. Every KPI is NULL/0-honest:
-    NULL distinguishes "no data to compute this" from a real 0.
+    to a scenario. Every KPI is NULL/0-honest: NULL distinguishes "no data to
+    compute this" from a real 0. The ``from``/``to`` window is an OBSERVATION
+    window on ``evaluated_as_of`` (recommendation_outcomes) — it filters KPIs
+    1/2/5 (which read that table) but NOT KPI 3 (Pyramide run accuracy) or
+    KPI 4 (reco approval rate), which have no ``evaluated_as_of`` of their own
+    and are scenario-scope-LIFETIME by construction (see the per-KPI note
+    below and each KPI's own docstring — the contract is documented, not a
+    silent mix of windowed/unwindowed data).
   * ``POST /v1/outcomes/evaluate`` — governed trigger of an evaluation pass
     (scope ``ingest``, kill switch ``OOTILS_OUTCOMES_ENABLED``). Writes verdicts
     into ``recommendation_outcomes`` (idempotent). The CLI
@@ -38,6 +44,15 @@ computable, or a stat operand NULL) are ignored, and the KPI is None when no
 non-NULL aggregate ``fva_wape`` exists. A positive value means the statistical
 model beats a trivial seasonal-naive baseline; a negative value is a legitimate,
 un-clamped result (the naive can win on a strongly seasonal series).
+NOT windowed by ``from``/``to`` — a Pyramide run has no ``evaluated_as_of``;
+scoping is scenario-only, over EVERY run in the scenario's history.
+
+KPI 4 (approval rate): scoped by ``recommendations.scenario_id`` only, NOT
+windowed by ``from``/``to`` — the denormalized ``status`` column carries no
+``evaluated_as_of`` either (a reco's lifetime approval state, not an
+observation). Windowing it would require the reco's OWN emission/transition
+date, a different axis than the outcome observation window; deferred rather
+than silently approximated.
 
 Kill switch: ``OOTILS_OUTCOMES_ENABLED`` (default enabled). Falsy → 503 on the
 evaluate verb, checked AFTER auth/scope but BEFORE the DB pool — mirrors
@@ -109,7 +124,9 @@ class OutcomeOut(BaseModel):
 
 
 class OutcomeSummaryOut(BaseModel):
-    """The five proof KPIs over a scenario + observation-date window.
+    """The five proof KPIs over a scenario. ``from_date``/``to_date`` echo the
+    OUTCOME observation window applied to KPI 1/2/5 only — KPI 3/4 are always
+    scenario-scope-lifetime regardless of the window (see the router docstring).
 
     Every field is NULL/0-honest: None means "no data to compute this KPI"
     (e.g. zero acted recos for the rate, no WAPE rows for the accuracy), a real
@@ -219,11 +236,15 @@ def get_recommendation_outcome(
     response_model=OutcomeSummaryOut,
     summary="Proof-of-value KPI summary",
     description=(
-        "The five proof KPIs for a scenario over an observation-date window: "
-        "pct_shortages_avoided, avoided_severity_usd_total, avg_fva_wape (see FVA "
-        "caveat), reco_approval_rate, cost_of_inaction_usd. Every KPI is "
-        "NULL/0-honest (NULL = no data, 0 = genuine zero). Fully parameterized "
-        "SQL, scenario-scoped."
+        "The five proof KPIs for a scenario: pct_shortages_avoided, "
+        "avoided_severity_usd_total, avg_fva_wape (see FVA caveat), "
+        "reco_approval_rate, cost_of_inaction_usd. Every KPI is NULL/0-honest "
+        "(NULL = no data, 0 = genuine zero). Fully parameterized SQL, "
+        "scenario-scoped. `from`/`to` window recommendation_outcomes.evaluated_as_of "
+        "and therefore filter ONLY KPIs 1/2/5 (avoided rate, avoided $, cost of "
+        "inaction); KPI 3 (Pyramide run accuracy) and KPI 4 (reco approval rate) "
+        "have no evaluated_as_of of their own and are ALWAYS scenario-scope-"
+        "lifetime, window or not."
     ),
 )
 def outcomes_summary(
@@ -231,20 +252,37 @@ def outcomes_summary(
     scenario_id: UUID = Depends(resolve_scenario_id),
     from_: Optional[_dt.date] = Query(
         default=None, alias="from",
-        description="Window start (inclusive) on the observation date (evaluated_as_of).",
+        description=(
+            "Window start (inclusive) on the OUTCOME observation date "
+            "(recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — "
+            "KPI 3/4 have no evaluated_as_of and ignore this filter (always "
+            "scenario-scope-lifetime)."
+        ),
     ),
     to: Optional[_dt.date] = Query(
         default=None,
-        description="Window end (inclusive) on the observation date (evaluated_as_of).",
+        description=(
+            "Window end (inclusive) on the OUTCOME observation date "
+            "(recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — "
+            "KPI 3/4 have no evaluated_as_of and ignore this filter (always "
+            "scenario-scope-lifetime)."
+        ),
     ),
     db: DictRowConnection = Depends(get_db),
 ) -> OutcomeSummaryOut:
     """Compute the five proof KPIs. scenario_id always constrains the aggregates
     (North Star: every read path is scenario-scoped) via the reco's own
     scenario_id (an outcome inherits it). The observation window (from/to) is an
-    optional inclusive filter on ``evaluated_as_of``. All SQL is parameterized;
-    the assembled window predicates are static ``col <= %s`` fragments with their
-    values bound positionally — never caller data in the SQL text."""
+    optional inclusive filter on ``recommendation_outcomes.evaluated_as_of`` —
+    it applies ONLY to KPI 1/2/5 (``_kpi_outcome_stats``, which reads that
+    table). KPI 3 (``_kpi_avg_fva_wape``) and KPI 4 (``_kpi_approval_rate``) have
+    no ``evaluated_as_of`` of their own (a Pyramide run / a reco's current
+    status carry no observation date) and are ALWAYS scenario-scope-lifetime,
+    window or not — a deliberate, documented asymmetry (see the module
+    docstring), never a silent mix of windowed and unwindowed data. All SQL is
+    parameterized; the assembled window predicates are static ``col <= %s``
+    fragments with their values bound positionally — never caller data in the
+    SQL text."""
     scenario_str = str(scenario_id)
 
     outcome_stats = _kpi_outcome_stats(db, scenario_str, from_, to)
@@ -359,9 +397,12 @@ def _kpi_outcome_stats(
     static window fragment.
     """
     window_sql, window_params = _window_predicates(from_, to)
-    # The reco unit-cost basis mirrors the evaluator's _predicted_unit_cost:
-    # evidence->>'unit_cost' first, else estimated_cost / recommended_qty. Kept
-    # in SQL here so KPI 5 (cost of inaction on never-approved recos) values the
+    # The reco unit-cost basis mirrors the evaluator's _predicted_unit_cost
+    # EXACTLY (including its ``uc > 0`` guard — a negative/zero unit_cost is
+    # rejected there and MUST be rejected here too, or the same reco values
+    # differently on the Python side vs this SQL side): evidence->>'unit_cost'
+    # first (ONLY when > 0), else estimated_cost / recommended_qty. Kept in SQL
+    # here so KPI 5 (cost of inaction on never-approved recos) values the
     # materialised deficit with the SAME per-unit basis the evaluator used for
     # the avoided-$ side — one valuation convention, both directions. The
     # evidence cast is GUARDED by a numeric-shape regex: a malformed unit_cost
@@ -376,11 +417,9 @@ def _kpi_outcome_stats(
                 o.avoided_severity_usd,
                 r.status AS reco_status,
                 COALESCE(
-                    NULLIF(
-                        CASE WHEN (r.evidence->>'unit_cost') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-                             THEN (r.evidence->>'unit_cost')::numeric END,
-                        0
-                    ),
+                    CASE WHEN (r.evidence->>'unit_cost') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                              AND (r.evidence->>'unit_cost')::numeric > 0
+                         THEN (r.evidence->>'unit_cost')::numeric END,
                     CASE WHEN r.recommended_qty > 0
                          THEN r.estimated_cost / r.recommended_qty END
                 ) AS unit_cost
@@ -468,6 +507,10 @@ def _kpi_avg_fva_wape(db: DictRowConnection, scenario: str) -> dict[str, Any]:
     wape (migration 068). Positive = the model beats a trivial seasonal-naive;
     negative is a legitimate un-clamped result. NULL-honest: NULL ``fva_wape``
     rows (naive not computable) are ignored, and the KPI is None when none exist.
+
+    NOT windowed by from/to (deliberately — see the module + endpoint
+    docstrings): a Pyramide run has no ``evaluated_as_of``. Scoped by
+    ``scenario`` alone, over the ENTIRE run history of the scenario.
     """
     row = db.execute(
         """
@@ -497,6 +540,11 @@ def _kpi_approval_rate(db: DictRowConnection, scenario: str) -> dict[str, Any]:
     approved first, so both count as approved). NULL-honest: None when NO reco
     was emitted in the scenario (empty set), a real ratio (including 0.0)
     otherwise. Scenario-scoped.
+
+    NOT windowed by from/to (deliberately — see the module + endpoint
+    docstrings): ``recommendations.status`` is a current-state column with no
+    ``evaluated_as_of`` of its own. Scoped by ``scenario`` alone, over the
+    ENTIRE reco history of the scenario.
     """
     row = db.execute(
         """

@@ -41,13 +41,23 @@
 -- scenario_id column => no scenarios FK => no conflict, and the audit
 -- semantics stay correct.
 --
+-- CORRECTION (adversarial review): recommendations.scenario_id (migration
+-- 039) is NOT a foreign key — it is a bare UUID NOT NULL, with NO
+-- REFERENCES scenarios(scenario_id) clause. There is therefore NO RESTRICT
+-- FK anywhere protecting scenario retention through the reco. The scenario
+-- inheritance above (no redundant column, no scenarios FK on THIS table) is
+-- still the correct design and test_scenario_fk_retention still does not
+-- apply to recommendation_outcomes — but not because a RESTRICT FK on the
+-- reco "already protects" anything; no such protection exists in this
+-- schema today. If scenario retention on recommendations itself is ever
+-- tightened (a real scenarios FK added there), THAT migration is the one
+-- that must carry the ON DELETE RESTRICT discipline, not this one.
+--
 -- FK POLICY (two references, two intentional ON DELETE actions):
 --   recommendation_id -> recommendations ON DELETE CASCADE. An outcome is
 --     meaningless without the reco it evaluates; if the reco is hard-
 --     deleted the outcome goes with it (it is a dependent evaluation, not
---     an independent audit record). This is also why scenario retention is
---     inherited: the reco's own scenario FK (RESTRICT) already protects the
---     scenario from disappearing under live data.
+--     an independent audit record).
 --   snapshot_id -> inventory_snapshots ON DELETE SET NULL. The observation
 --     snapshot (migration 067) is the evidence we read to classify, but the
 --     AUDIT of the classification must SURVIVE a snapshot purge/rollup: the
@@ -148,8 +158,11 @@ COMMENT ON TABLE recommendation_outcomes IS
 
 COMMENT ON COLUMN recommendation_outcomes.recommendation_id IS
     'The evaluated reco. ON DELETE CASCADE: an outcome is a dependent '
-    'evaluation, meaningless without its reco. Scenario retention is '
-    'inherited from this reco''s own RESTRICT FK to scenarios.';
+    'evaluation, meaningless without its reco. Scenario is inherited via this '
+    'FK (recommendations.scenario_id), which carries NO REFERENCES scenarios '
+    '-- there is no RESTRICT FK anywhere protecting scenario retention through '
+    'the reco today; the inheritance is a coordinate lookup, not a retention '
+    'guarantee.';
 
 COMMENT ON COLUMN recommendation_outcomes.evaluated_as_of IS
     'Observation date the verdict is anchored to.';

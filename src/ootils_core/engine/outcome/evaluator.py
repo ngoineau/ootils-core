@@ -78,21 +78,34 @@ ACTED_STATUSES: frozenset[str] = frozenset({"APPROVED", "APPLIED"})
 # ---------------------------------------------------------------------------
 # Classification thresholds (🎯 tunable — documented defaults, no hidden magic)
 # ---------------------------------------------------------------------------
-# AVOIDED vs PARTIAL vs MATERIALIZED is decided by comparing the observed
-# deficit against the predicted one. Two knobs, both on the OBSERVED/predicted
-# ratio so they are unit-free and scale-free:
+# AVOIDED vs PARTIAL vs MATERIALIZED is decided PURELY by the ratio
+# observed_deficit_qty / predicted_deficit_qty — three MUTUALLY EXCLUSIVE,
+# EXHAUSTIVE bands over ratio in [0, +inf):
 #
-#   * AVOIDED_EPS_RATIO — observed <= predicted * this => the deficit is
-#     effectively gone (AVOIDED). Default 0.05: a residual under 5% of what was
-#     predicted is noise, not a surviving shortage. (An absolute floor,
-#     AVOIDED_EPS_ABS, additionally treats a sub-unit residual as zero so a tiny
-#     predicted deficit is not held to an impossibly tight relative bar.)
-#   * MATERIALIZED_FLOOR_RATIO — observed >= predicted * this => the shortage
+#   * MATERIALIZED_FLOOR_RATIO (default 0.90) — ratio >= this => the shortage
 #     happened essentially as predicted (MATERIALIZED, no meaningful reduction).
-#     Default 0.90: within 10% of the prediction is "not reduced".
+#     Within 10% of the prediction is "not reduced". TESTED FIRST (see
+#     evaluate_outcome): a fully-materialized shortage (ratio == 1.0) must never
+#     fall into AVOIDED regardless of the absolute scale of predicted_qty.
+#   * AVOIDED_EPS_RATIO (default 0.05) — ratio <= this => the deficit is
+#     effectively gone (AVOIDED). A residual under 5% of what was predicted is
+#     noise, not a surviving shortage.
+#   * Otherwise (AVOIDED_EPS_RATIO < ratio < MATERIALIZED_FLOOR_RATIO) — the
+#     deficit was genuinely reduced but not eliminated => PARTIAL.
 #
-# Between the two (AVOIDED_EPS_RATIO < observed/predicted < MATERIALIZED_FLOOR_
-# RATIO) the deficit was genuinely reduced but not eliminated => PARTIAL.
+# The three bands are [0, AVOIDED_EPS_RATIO] AVOIDED / (AVOIDED_EPS_RATIO,
+# MATERIALIZED_FLOOR_RATIO) PARTIAL / [MATERIALIZED_FLOOR_RATIO, +inf)
+# MATERIALIZED — they partition ratio>=0 with NO overlap and NO gap. There is
+# deliberately NO absolute floor mixed into these bands (a prior version used
+# max(predicted * AVOIDED_EPS_RATIO, AVOIDED_EPS_ABS) as the AVOIDED ceiling,
+# which for predicted <= AVOIDED_EPS_ABS / AVOIDED_EPS_RATIO = 20 made the
+# absolute floor dominate the ratio and score a ratio-1.0 fully-materialized
+# shortage as AVOIDED with full $ credit — a MAJOR defect for a proof machine
+# that must never overstate value; see the fix history for the concrete case).
+#
+# AVOIDED_EPS_ABS is retained ONLY for the degenerate predicted_qty <= 0 / None
+# case, where there is no ratio to compute at all — see the "Degenerate case
+# FIRST" branch in evaluate_outcome below. It never re-enters the ratio bands.
 #
 # These live HERE, not in the DB and not in the consumer — the classification of
 # a physical observation is the evaluator's job. (Decision-Ladder score
@@ -234,20 +247,31 @@ def evaluate_outcome(
         coordinate/day: we cannot classify honestly. Everything observed/avoided
         is None (honest), predicted_* still reported.
 
-      AVOIDED — an ACTED reco, snapshot present, observed deficit effectively
-        zero (<= max(predicted x AVOIDED_EPS_RATIO, AVOIDED_EPS_ABS)):
-        ``observed_deficit_qty`` = 0, ``avoided_severity_usd`` = the predicted $
-        (NULL-honest if no cost basis).
+      For an ACTED reco with an observation snapshot present, the remaining
+      three verdicts are decided by ``ratio = observed_qty / predicted_qty`` in
+      three MUTUALLY EXCLUSIVE, EXHAUSTIVE bands (MATERIALIZED is tested FIRST —
+      see the thresholds section above for why the test order matters):
 
-      MATERIALIZED — an ACTED reco, snapshot present, observed deficit >=
-        predicted x MATERIALIZED_FLOOR_RATIO (the shortage happened anyway, not
-        meaningfully reduced): ``avoided_severity_usd`` = 0 (genuinely nothing
-        avoided — distinct from NULL "not computable").
+      MATERIALIZED — ratio >= MATERIALIZED_FLOOR_RATIO (the shortage happened
+        anyway, not meaningfully reduced, INCLUDING a fully-materialized
+        ratio == 1.0 regardless of predicted_qty's absolute scale):
+        ``avoided_severity_usd`` = 0 (genuinely nothing avoided — distinct from
+        NULL "not computable"). Also the prudent fallback for the DEGENERATE
+        predicted_qty None/<=0 case when observed_qty exceeds the ABSOLUTE noise
+        floor (AVOIDED_EPS_ABS) — no ratio can be formed, so a shortage that
+        clears the noise floor is honestly MATERIALIZED (nothing proven
+        avoided), while one AT or BELOW it is AVOIDED (see below).
 
-      PARTIAL — an ACTED reco, snapshot present, observed deficit strictly
-        between the AVOIDED ceiling and the MATERIALIZED floor (reduced, not
-        eliminated): ``avoided_severity_usd`` = the avoided FRACTION of the
-        predicted $ = predicted_$ x (1 - observed/predicted), NULL-honest.
+      AVOIDED — ratio <= AVOIDED_EPS_RATIO (the predicted shortage did not
+        materialise, allowing for noise-level residual): ``observed_deficit_qty``
+        = 0, ``avoided_severity_usd`` = the predicted $ (NULL-honest if no cost
+        basis). For the DEGENERATE predicted_qty None/<=0 case (no ratio
+        possible), the same verdict applies when observed_qty <= AVOIDED_EPS_ABS
+        (the noise-floor reading of "nothing meaningful observed").
+
+      PARTIAL — AVOIDED_EPS_RATIO < ratio < MATERIALIZED_FLOOR_RATIO (reduced,
+        not eliminated): ``avoided_severity_usd`` = the avoided FRACTION of the
+        predicted $ = predicted_$ x (1 - ratio), NULL-honest.
     """
     reco_id = _coerce_uuid(reco_row["recommendation_id"])
     snapshot_id = (
@@ -297,26 +321,24 @@ def evaluate_outcome(
         )
 
     # --- Branches 3-5: acted + observation present -> compare deficits. -------
-    avoided_ceiling = _avoided_ceiling(predicted_qty)
-
-    if observed_qty <= avoided_ceiling:
-        # AVOIDED — the predicted shortage did not materialise.
-        return OutcomeRow(
-            recommendation_id=reco_id,
-            evaluated_as_of=evaluated_as_of,
-            evaluation_status="AVOIDED",
-            predicted_shortage_date=predicted_date,
-            predicted_deficit_qty=predicted_qty,
-            observed_deficit_qty=Decimal(0),
-            avoided_severity_usd=predicted_severity,
-            snapshot_id=snapshot_id,
-        )
-
-    # From here observed_qty > 0. If we have no predicted quantity to compare
-    # against, we cannot grade AVOIDED/PARTIAL/MATERIALIZED — a shortage exists
-    # but its relation to the (absent) prediction is unknowable => MATERIALIZED
-    # is the prudent honest call (a shortage happened; nothing proven avoided).
+    # Degenerate case FIRST: no predicted quantity to form a ratio against at
+    # all. This is the ONLY place AVOIDED_EPS_ABS applies — "noise on an unknown
+    # prediction" — and it is entirely separate from the ratio bands below (it
+    # never re-enters them). A shortage below the absolute noise floor with no
+    # prediction to compare is AVOIDED (nothing meaningful observed); at or
+    # above it, a shortage exists with nothing proven avoided => MATERIALIZED.
     if predicted_qty is None or predicted_qty <= 0:
+        if observed_qty <= AVOIDED_EPS_ABS:
+            return OutcomeRow(
+                recommendation_id=reco_id,
+                evaluated_as_of=evaluated_as_of,
+                evaluation_status="AVOIDED",
+                predicted_shortage_date=predicted_date,
+                predicted_deficit_qty=predicted_qty,
+                observed_deficit_qty=Decimal(0),
+                avoided_severity_usd=predicted_severity,
+                snapshot_id=snapshot_id,
+            )
         return OutcomeRow(
             recommendation_id=reco_id,
             evaluated_as_of=evaluated_as_of,
@@ -328,7 +350,13 @@ def evaluate_outcome(
             snapshot_id=snapshot_id,
         )
 
+    # Ratio bands — pure, mutually exclusive, exhaustive over ratio in [0, +inf).
+    # MATERIALIZED IS TESTED FIRST: a fully-materialized shortage (ratio == 1.0,
+    # or anything >= the floor) must never be reachable via a later AVOIDED
+    # check, regardless of predicted_qty's absolute scale (see the thresholds
+    # section for the concrete defect this ordering fixes).
     ratio = observed_qty / predicted_qty
+
     if ratio >= MATERIALIZED_FLOOR_RATIO:
         # MATERIALIZED — happened essentially as predicted, not reduced.
         return OutcomeRow(
@@ -342,9 +370,23 @@ def evaluate_outcome(
             snapshot_id=snapshot_id,
         )
 
-    # PARTIAL — reduced but not eliminated. Credit the avoided FRACTION of the
-    # predicted $ (proportional to the deficit reduction). NULL-honest if no
-    # cost basis.
+    if ratio <= AVOIDED_EPS_RATIO:
+        # AVOIDED — the predicted shortage did not materialise (noise-level
+        # residual at most).
+        return OutcomeRow(
+            recommendation_id=reco_id,
+            evaluated_as_of=evaluated_as_of,
+            evaluation_status="AVOIDED",
+            predicted_shortage_date=predicted_date,
+            predicted_deficit_qty=predicted_qty,
+            observed_deficit_qty=Decimal(0),
+            avoided_severity_usd=predicted_severity,
+            snapshot_id=snapshot_id,
+        )
+
+    # PARTIAL — strictly between the two ratio thresholds: reduced but not
+    # eliminated. Credit the avoided FRACTION of the predicted $ (proportional
+    # to the deficit reduction). NULL-honest if no cost basis.
     avoided_partial: Optional[Decimal]
     if predicted_severity is None:
         avoided_partial = None
@@ -360,20 +402,6 @@ def evaluate_outcome(
         avoided_severity_usd=avoided_partial,
         snapshot_id=snapshot_id,
     )
-
-
-def _avoided_ceiling(predicted_qty: Optional[Decimal]) -> Decimal:
-    """The observed-deficit ceiling below which a shortage counts as AVOIDED.
-
-    max(predicted x AVOIDED_EPS_RATIO, AVOIDED_EPS_ABS): a relative floor (5% of
-    the prediction) OR an absolute sub-unit floor, whichever is larger — so a
-    tiny predicted deficit is not held to an impossibly tight relative bar, and a
-    large one still tolerates a small residual. With no prediction the absolute
-    floor applies alone.
-    """
-    if predicted_qty is None or predicted_qty <= 0:
-        return AVOIDED_EPS_ABS
-    return max(predicted_qty * AVOIDED_EPS_RATIO, AVOIDED_EPS_ABS)
 
 
 def _coerce_uuid(value: Any) -> UUID:
@@ -414,13 +442,13 @@ def evaluate_and_persist(
     connection so the observation day matches the scenario's own clock (as the
     MRP/DRP/snapshot loaders anchor theirs).
 
-    The observed shortage for a reco is the MOST RECENT active ``shortages`` row
+    The observed shortage for a reco is the MOST SEVERE active ``shortages`` row
     at or before ``evaluated_as_of`` for the reco's (item, location) coordinate;
     the observation snapshot is the coordinate's snapshot for that day. Both are
     resolved by the reco's raw ``item_id`` (+ ``location_id`` when the reco
     carries one — reschedule/transfer recos do; procurement recos may not, in
-    which case the shortage is matched on item alone, item-pooled, matching the
-    canonical shortage grain).
+    which case the shortage is matched item-pooled: the WORST (max severity_usd)
+    observation across the item's locations — see ``_load_observed_shortages``).
 
     Returns a metrics dict (evaluated / by_status / with_avoided_usd) for the
     caller to log / store.
@@ -522,10 +550,25 @@ def _load_observed_shortages(
     """Load the observed active shortages for a scenario AS OF ``as_of``.
 
     Reads the canonical ``shortages`` table (ADR-021 — READ ONLY). Keyed by
-    (item_id, location_id) AND (item_id, None) so a reco with or without a
-    location resolves. The most severe active shortage per coordinate at/before
-    ``as_of`` is kept (DISTINCT ON severity DESC) — an observed shortage is a
-    materialised deficit; the worst one is the honest observation.
+    (item_id, location_id) — the per-location observation, one row per
+    coordinate, most severe active shortage at/before ``as_of`` (DISTINCT ON
+    severity DESC) — AND (item_id, None), the item-POOLED fallback for a reco
+    with no location (a shortage/procurement reco carries no location_id;
+    reschedule/transfer recos do — see migrations 039/061/066).
+
+    The pooled key is NOT derived from SQL row order (DISTINCT ON orders by
+    (item_id, location_id), i.e. by location first — the row FOR THE LOWEST
+    location_id, not the worst one, would land first per item; relying on
+    "first seen wins" silently picked an ARBITRARY location's severity, which
+    for an unlocated reco could match a nearly-resolved shortage at location A
+    while location B fully materialized the SAME predicted deficit — a
+    proof-machine MAJOR: crediting AVOIDED + full $ for a shortage that, pooled
+    correctly, plainly happened). This function therefore computes the pooled
+    entry in an EXPLICIT SECOND PASS over the already-fetched per-location rows,
+    independent of SQL ordering: the item-pooled ``ObservedShortage`` is the one
+    with MAX severity_usd across all of the item's locations — the single worst
+    observation, which is the only defensible pooled reading for an unlocated
+    reco (crediting AVOIDED against the item's WORST site, never its mildest).
     """
     cur = conn.cursor(row_factory=dict_row)
     rows = cur.execute(
@@ -543,6 +586,7 @@ def _load_observed_shortages(
     ).fetchall()
 
     out: dict[tuple[UUID, Optional[UUID]], ObservedShortage] = {}
+    per_item: dict[UUID, list[ObservedShortage]] = {}
     for r in rows:
         item_id = _coerce_uuid(r["item_id"])
         loc_id = _coerce_uuid(r["location_id"]) if r["location_id"] else None
@@ -554,12 +598,12 @@ def _load_observed_shortages(
             severity_usd=_as_decimal(r["severity_score"]) or Decimal(0),
         )
         out[(item_id, loc_id)] = obs
-        # Item-pooled fallback: keep the worst per item so an unlocated reco
-        # resolves. Rows are severity-desc within an item, so the first seen is
-        # the worst — do not overwrite with a lesser one.
-        pooled_key = (item_id, None)
-        if pooled_key not in out:
-            out[pooled_key] = obs
+        per_item.setdefault(item_id, []).append(obs)
+
+    # Second pass: the pooled (item, None) key is the MAX-severity observation
+    # across every location of the item — explicit, order-independent.
+    for item_id, observations in per_item.items():
+        out[(item_id, None)] = max(observations, key=lambda o: o.severity_usd)
     return out
 
 
@@ -569,10 +613,22 @@ def _load_snapshots(
     """Load the observation snapshots for a scenario on ``as_of``.
 
     Reads ``inventory_snapshots`` (migration 067 — READ ONLY). Keyed by
-    (item_id, location_id) and an item-pooled (item_id, None) fallback (latest
-    snapshot for the item) so an unlocated reco still has an observation anchor.
-    The snapshot's presence is what lets an ACTED reco be classified rather than
-    INDETERMINATE.
+    (item_id, location_id) — the per-location observation — AND an item-pooled
+    (item_id, None) fallback so an unlocated reco still has an observation
+    anchor. The snapshot's MERE PRESENCE is what lets an ACTED reco be
+    classified rather than INDETERMINATE (see evaluate_outcome) — no field of
+    the snapshot row itself is read by the classifier, so which location's
+    snapshot backs the pooled key has NO effect on the verdict beyond "a
+    snapshot exists for this item on this day".
+
+    The pooled entry is nonetheless picked EXPLICITLY (an independent second
+    pass over the per-location rows, by MAX as_of_date per item — the item's
+    single MOST RECENT observation) rather than relying on SQL row order: the
+    DISTINCT ON above orders by (item_id, location_id), i.e. by location first,
+    so "first row per item" would be an ARBITRARY (lowest-location-id)
+    snapshot, not the latest one. Correctness of the verdict does not depend on
+    this choice today (presence-only gate), but the comment must describe what
+    the code actually does, not an SQL-order accident.
     """
     cur = conn.cursor(row_factory=dict_row)
     rows = cur.execute(
@@ -588,13 +644,18 @@ def _load_snapshots(
     ).fetchall()
 
     out: dict[tuple[UUID, Optional[UUID]], dict[str, Any]] = {}
+    per_item: dict[UUID, list[dict[str, Any]]] = {}
     for r in rows:
         item_id = _coerce_uuid(r["item_id"])
         loc_id = _coerce_uuid(r["location_id"]) if r["location_id"] else None
         out[(item_id, loc_id)] = r
-        pooled_key = (item_id, None)
-        if pooled_key not in out:
-            out[pooled_key] = r
+        per_item.setdefault(item_id, []).append(r)
+
+    # Second pass: the pooled (item, None) key is the MOST RECENT snapshot
+    # (max as_of_date) across every location of the item — explicit,
+    # order-independent.
+    for item_id, snap_rows in per_item.items():
+        out[(item_id, None)] = max(snap_rows, key=lambda s: s["as_of_date"])
     return out
 
 
