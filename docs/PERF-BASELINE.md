@@ -241,6 +241,26 @@ consolidation des scans répétés dans `load_planning_data` (12 scans de
 `item_planning_params` → 1, idem nodes/supplier_items/items), parité dict-exacte
 vérifiée sur les 19 champs. Mesure isolée : 12 scans 473 ms → 1 scan 87 ms (5.5×).
 
+### Re-mesure 2026-07-06 — post-#349 (fenêtre de consommation), via le runbook démo #408
+
+Même base pilote (36 635 items, 3,76 M `demand_history`), `demo_e2e.py --bench`
+(1 répétition, lecture seule) :
+
+| Phase | 2026-05 (post-consolidation) | 2026-07-06 (post-#349) |
+|---|---|---|
+| consume | — (inclus cascade) | 0.110 s |
+| timephased | — | 0.603 s |
+| peg | — | 0.055 s |
+| compute total | 1.46 s | **0.77 s** (258 957 ordres/s) |
+| **total wall** | 2.88 s | **4.80 s** (load DB = 84 %) |
+
+Le calcul pur a **doublé de vitesse** (150K → 259K ordres/s — la fenêtre de
+consommation #349 réduit aussi les besoins nets à planifier), mais le wall est
+dominé à 84 % par le chargement DB, qui a grossi depuis mai (loader #349 +
+conditions réseau non contrôlées entre les deux mesures — pas un A/B strict).
+Le levier suivant reste côté load, pas côté cascade. Mesure prise pendant
+l'exécution pilote du runbook (`docs/DEMO-RUNBOOK.md`, step 9).
+
 ## Hardware / contexte
 
 - Postgres 16.13 sur VM Debian (192.168.1.176:5432) — infra refondue 2026-05-24
