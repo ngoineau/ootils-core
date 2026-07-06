@@ -826,6 +826,87 @@ def seed_calendars(conn):
     print(f"  ✅ Calendars seeded: {len(holidays)} US holidays for DC-ATL")
 
 
+def seed_drp(conn):
+    """
+    Seed a DRP inter-site transfer opportunity (#395 PR2b).
+
+    Adds an ACTIVE distribution_link DC-ATL -> DC-LAX for VALVE-02, plus a stock
+    imbalance that makes the DRP fair-share planner emit exactly one transfer:
+
+      * SOURCE (DC-ATL): a large VALVE-02 OnHandSupply (excess) with no VALVE-02
+        demand at DC-ATL -> distributable excess. A VALVE-02@DC-ATL
+        item_planning_params row (safety 0) so the overlay resolver returns a
+        safety figure for the coordinate (excess = on_hand - demand - safety).
+      * DESTINATION (DC-LAX): VALVE-02 is ALREADY projected short there — the
+        existing enrichment seeds on-hand 45, safety 30, CO-003 (60 @ day+15)
+        and a 56/week forecast, so demand outruns on-hand+safety. No change
+        needed on the destination side beyond what the enrichment already seeds.
+
+    The link: upstream=DC-ATL, downstream=DC-LAX, item=VALVE-02 (item-specific),
+    transit_lead_time_days=7 (1 weekly bucket), minimum_shipment_qty=10,
+    priority=1, transfer_multiple=10 (ship whole 10-unit cases, DOWN-rounded).
+
+    Idempotent: deterministic ids + ON CONFLICT DO NOTHING (link keyed on its
+    own uuid5). Runs on the BASELINE scenario so `POST /v1/drp/run` (default
+    baseline) shows the transfer out of the box. Does NOT touch the phase-1
+    PUMP-01/VALVE-02 shortage flow — it only ADDS a VALVE-02 excess at DC-ATL
+    (a location where VALVE-02 had no nodes before) and a distribution link.
+    """
+    print("\n🚚 Seeding DRP inter-site transfer opportunity (#395)...")
+
+    valve_id = _uid("item:VALVE-02")
+    atl_id = _uid("location:DC-ATL")
+    lax_id = _uid("location:DC-LAX")
+
+    # VALVE-02 @ DC-ATL: item_planning_params (safety 0 -> full on-hand is
+    # distributable excess). Mirrors the enrichment IPP column set.
+    conn.execute("""
+        INSERT INTO item_planning_params (
+            param_id, item_id, location_id,
+            lead_time_sourcing_days, lead_time_transit_days,
+            safety_stock_qty, safety_stock_days,
+            min_order_qty, order_multiple,
+            lot_size_rule, planning_horizon_days,
+            is_make, source, effective_from
+        ) VALUES (%s, %s, %s, 21, 2, 0, 0, 50, 25, 'LOTFORLOT', 180, FALSE, 'manual', %s)
+        ON CONFLICT DO NOTHING
+    """, (_uid("ipp:VALVE-02:DC-ATL:v1"), valve_id, atl_id, TODAY))
+
+    # VALVE-02 @ DC-ATL: large OnHandSupply -> the transfer SOURCE excess.
+    oh_valve_atl_id = _uid("node:OnHand:VALVE-02:DC-ATL")
+    conn.execute("""
+        INSERT INTO nodes (
+            node_id, node_type, scenario_id, item_id, location_id,
+            time_grain, time_ref, quantity, qty_uom, active
+        ) VALUES (%s, 'OnHandSupply', %s, %s, %s, 'exact_date', %s, 2000, 'EA', TRUE)
+        ON CONFLICT DO NOTHING
+    """, (oh_valve_atl_id, BASELINE_SCENARIO_ID, valve_id, atl_id, TODAY))
+    print("  ✓ OnHandSupply: VALVE-02@DC-ATL=2000 (transfer source excess)")
+
+    # The distribution link DC-ATL -> DC-LAX for VALVE-02.
+    link_id = _uid("distribution_link:DC-ATL->DC-LAX:VALVE-02")
+    conn.execute("""
+        INSERT INTO distribution_links (
+            distribution_link_id, upstream_location_id, downstream_location_id,
+            item_id, transit_lead_time_days, minimum_shipment_qty,
+            maximum_shipment_qty, priority, transfer_multiple, active
+        ) VALUES (%s, %s, %s, %s, 7, 10, NULL, 1, 10, TRUE)
+        ON CONFLICT (distribution_link_id) DO UPDATE
+            SET active = TRUE,
+                transit_lead_time_days = EXCLUDED.transit_lead_time_days,
+                minimum_shipment_qty = EXCLUDED.minimum_shipment_qty,
+                priority = EXCLUDED.priority,
+                transfer_multiple = EXCLUDED.transfer_multiple
+    """, (link_id, atl_id, lax_id, valve_id))
+    print("  ✓ distribution_link: DC-ATL → DC-LAX for VALVE-02 "
+          "(transit 7d, min 10, mult 10, priority 1)")
+
+    conn.commit()
+    print("  ✅ DRP seed complete.")
+    print("     → VALVE-02: DC-ATL holds 2000 excess, DC-LAX projected short")
+    print("     → POST /v1/drp/run should draft a TRANSFER DC-ATL → DC-LAX")
+
+
 if __name__ == "__main__":
     print(f"Connecting to {DATABASE_URL}...")
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
@@ -833,3 +914,4 @@ if __name__ == "__main__":
         seed_enrichment(conn)
         seed_bom(conn)
         seed_calendars(conn)
+        seed_drp(conn)

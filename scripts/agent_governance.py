@@ -38,6 +38,8 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from ootils_core.engine.recommendation.transfer import TRANSFER_DECISION_LEVEL
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,11 @@ _ACTION_DECISION_LEVELS: dict = {
     # reschedule watcher (#346) — cancel an engaged order (irreversible on the
     # supplier side => human gate mandatory, handled by the state machine)
     "CANCEL": "L3",
+    # transfer watcher (#395) — draft a NEW inter-site transfer of finished
+    # stock (a physical relocation, reversible until executed) => same L1 class
+    # as an ORDER_NOW new-order draft. Level sourced from the engine module (the
+    # single place the TRANSFER literal is written), not re-typed here.
+    "TRANSFER": TRANSFER_DECISION_LEVEL,
     # lot policy watcher — parameter-change proposals (drafts)
     "RENEGOTIATE_MOQ": "L1",
     "REVIEW_MULTIPLE": "L1",
