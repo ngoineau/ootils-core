@@ -630,6 +630,19 @@ def test_endpoint_runs_baseline_and_returns_metrics(api_client, migrated_db):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["decision_level"] == "L1"
+    # Diagnostic assertions BEFORE the emission assertion, to pinpoint the
+    # failure mode if this ever regresses: signals==0 means the endpoint's
+    # connection did not see the seeded plan (a connection/visibility defect);
+    # signals>=1 but unresolved_coords>0 means the coordinate->UUID resolution
+    # is broken (this is exactly the row_factory bug this suite caught: a
+    # dict_row connection made _resolve_coord_maps's plain conn.cursor()
+    # inherit dict_row, so `for item_id, external_id in rows` unpacked the
+    # dict's KEYS instead of its values — every real coordinate lookup missed
+    # and recommendations_emitted silently stayed 0 with zero exceptions
+    # raised; fixed by pinning that cursor to row_factory=tuple_row, matching
+    # engine/drp/loader.py's own cursors).
+    assert data["signals"] >= 1, data
+    assert data["unresolved_coords"] == 0, data
     assert data["recommendations_emitted"] >= 1
     # Response schema keys the agent fleet consumes.
     for key in ("scenario_id", "agent_run_id", "signals",
@@ -671,6 +684,11 @@ def test_endpoint_is_forkable_via_scenario_id(api_client, migrated_db):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert str(data["scenario_id"]) == str(fork_id)
+    # Diagnostic pair (see test_endpoint_runs_baseline_and_returns_metrics for
+    # the full rationale): signals==0 -> connection/visibility defect;
+    # signals>=1 with unresolved_coords>0 -> coordinate resolution defect.
+    assert data["signals"] >= 1, data
+    assert data["unresolved_coords"] == 0, data
     assert data["recommendations_emitted"] >= 1
 
     with _db_conn(migrated_db) as conn:

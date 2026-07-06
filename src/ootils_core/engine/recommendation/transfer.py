@@ -50,6 +50,7 @@ from typing import Any
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import tuple_row
 from psycopg.types.json import Jsonb
 
 from ootils_core.engine.drp.core import TransferSignal
@@ -289,8 +290,23 @@ def _resolve_coord_maps(
     loc_coord -> location_id). item_external_id is the human-readable label for
     the recommendation row; it falls back to the coordinate string (the UUID)
     when the item has no external_id — never None (the column is NOT NULL).
+
+    Pinned to tuple_row (matching engine/drp/loader.py's own cursors) so the
+    positional unpacking below (`for item_id, external_id in ...`) is correct
+    REGARDLESS of the parent connection's configured row_factory. Without this
+    pin, a dict_row connection (the app pool's default via OotilsDB /
+    Depends(get_db) — see api/dependencies.py / db/connection.py) makes
+    conn.cursor() inherit dict_row, and iterating a list of 2-key dicts unpacks
+    their KEYS ("item_id", "external_id" — the literal column names), not their
+    values: item_id_by_coord silently fills with {"external_id": "item_id"}
+    instead of the real coordinate -> UUID mapping, so every real coordinate
+    lookup misses and every signal is counted as unresolved_coords with ZERO
+    recommendations emitted — with NO exception raised (a real bug found via
+    POST /v1/drp/run, which runs on the app's dict_row pool; the CLI watcher
+    never surfaced it because psycopg.connect() with no row_factory argument
+    defaults to tuple_row, masking the defect on that one call path only).
     """
-    cur = conn.cursor()
+    cur = conn.cursor(row_factory=tuple_row)
     item_id_by_coord: dict[str, uuid.UUID] = {}
     item_ext_by_coord: dict[str, str] = {}
     for item_id, external_id in cur.execute(
