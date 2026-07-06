@@ -11590,6 +11590,11 @@
               }
             ],
             "title": "Dq Status"
+          },
+          "aliases_upserted": {
+            "type": "integer",
+            "title": "Aliases Upserted",
+            "default": 0
           }
         },
         "type": "object",
@@ -12004,6 +12009,28 @@
         "title": "LoadProfileOut",
         "description": "Load profile for a work center."
       },
+      "LocationAliasRow": {
+        "properties": {
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Alias",
+            "description": "Alternate code as it appears in a source feed (e.g. numeric ERP warehouse code)."
+          },
+          "source_system": {
+            "type": "string",
+            "title": "Source System",
+            "description": "Origin system of this code; part of the UNIQUE (alias, source_system) key.",
+            "default": "_default"
+          }
+        },
+        "type": "object",
+        "required": [
+          "alias"
+        ],
+        "title": "LocationAliasRow",
+        "description": "One alternate source-system code for a site (location_aliases,\nmigration 070 — #414/ADR-031). Mirrors the DB CHECK\n(alias <> '' AND btrim(alias) = alias): the alias is stripped and a\nblank one is rejected at the Pydantic boundary so a malformed code fails\nat 422 rather than at the DB CHECK. ``source_system`` defaults to the\n''_default'' sentinel (never nullable — see migration 070 header)."
+      },
       "LocationRow": {
         "properties": {
           "external_id": {
@@ -12055,6 +12082,14 @@
             ],
             "title": "Parent External Id",
             "description": "External_id of the parent site (optional, for hierarchies)."
+          },
+          "aliases": {
+            "items": {
+              "$ref": "#/components/schemas/LocationAliasRow"
+            },
+            "type": "array",
+            "title": "Aliases",
+            "description": "Optional alternate source-system codes resolving to this site (#414)."
           }
         },
         "type": "object",
