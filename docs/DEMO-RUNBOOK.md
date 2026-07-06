@@ -278,7 +278,13 @@ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
   "$BASE/v1/scenarios/$FORK" -H "Authorization: Bearer $T"   # -> 204 (archived)
 ```
 
-*SKIPs* if baseline has no active-shortage coordinate.
+When baseline has no active shortage (e.g. a pilot base with no recent calc
+run), the step **falls back** to the richest ProjectedInventory coordinate and
+runs the counter-factual in the *other* direction — `opening_stock="0"`
+("what if we had less stock?"), an equally honest delta of **new** shortages
+instead of resolved ones. *SKIPs* only if the base has no PI node at all.
+Note: on a large base the fork is a full deep-copy of baseline — budget
+minutes, not seconds, for this step on 200K+ nodes.
 
 ### Step 8 — StreamChanges (replayable by cursor)
 
@@ -337,9 +343,16 @@ operating data; they are safe to leave in place.
   `agent_shortage_watcher` is not instant. Use `--skip-watchers` for a fast
   walkthrough; step 5 then governs a DRAFT from the DRP step instead, and steps
   6–8 still run. On the CI base the watcher is quick.
-- **Forecast SKIPs without history.** If the target has no booking-based
-  `demand_history`, step 2 reports `SKIP` (no series) rather than inventing one.
-  The CI-seeded base *does* have history (PUMP-01@DC-ATL, 90 days) so it forecasts.
+- **Forecast SKIPs without history — and names the mapping gap.** If the target
+  has no booking-based `demand_history`, step 2 reports `SKIP` (no series)
+  rather than inventing one. The CI-seeded base *does* have history
+  (PUMP-01@DC-ATL, 90 days) so it forecasts. **Pilot caveat (🎯 data
+  onboarding):** on `ootils_pilote_test`, `demand_history.warehouse_id` carries
+  ERP numeric DC codes (`'87'`, `'286'`, …) that were never mapped to
+  `locations.external_id` (alpha codes `'DAL'`, `'CAN'`, …) — millions of
+  bookings, zero forecastable series. The SKIP diagnostic prints the exact
+  counts. Mapping those codes into the locations registry is a pilot business
+  decision, not something the demo fabricates.
 - **The demo mints fresh token secrets each run.** A live token of the same name
   cannot be recovered (only its hash is stored), so a re-run mints a new secret
   and leaves the prior row for the operator to revoke. Use the `DEMO-E2E-%`
