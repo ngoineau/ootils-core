@@ -176,6 +176,29 @@ class DemandFreshness:
     coverage_lag_days: int | None
 
 
+def _warehouse_codes_subquery() -> str:
+    """SQL fragment: the set of demand_history.warehouse_id codes that
+    resolve to a given location — its own external_id UNION its aliases
+    (location_aliases, migration 070). Single source of the alias
+    semantics (#414/ADR-031). Callers bind the location_id parameter as the
+    named placeholder %(location_id)s and embed the fragment inside an
+    ``IN (...)`` predicate against dh.warehouse_id.
+
+    Empty-alias case: the UNION with an empty right side collapses to the
+    external_id alone, so a location with no aliases resolves to EXACTLY the
+    single-code set it did before this table existed (strict backward
+    compatibility)."""
+    return """
+        SELECT l.external_id AS code
+        FROM locations l
+        WHERE l.location_id = %(location_id)s
+        UNION
+        SELECT la.alias AS code
+        FROM location_aliases la
+        WHERE la.location_id = %(location_id)s
+    """
+
+
 def get_demand_freshness(
     db: DictRowConnection,
     item_id: UUID | None = None,
@@ -189,6 +212,15 @@ def get_demand_freshness(
     ingestion pipeline, not the training signal — a warranty-only or
     inter-entity-only ingest still proves the pipeline ran. MAX() ignores
     NULL booked_date rows, so last_booked_date stays honest.
+
+    Alias resolution (#414/ADR-031): when ``warehouse_id`` names a site that
+    owns aliases (location_aliases, migration 070), freshness is measured
+    over EVERY code of that site via the single-source
+    ``_warehouse_codes_subquery`` — freshness is a property of the pipeline
+    feeding the site, not of one arbitrary code. The passed code is mapped to
+    its owning location_id (locations.external_id is UNIQUE, so unambiguous);
+    a code that matches no location keeps the exact literal-equality filter of
+    old (honest for unmatched warehouse_id, and the empty-alias identity).
     """
     filters = []
     params: dict[str, object] = {}
@@ -196,8 +228,16 @@ def get_demand_freshness(
         filters.append("dh.item_id = %(item_id)s")
         params["item_id"] = item_id
     if warehouse_id is not None:
-        filters.append("dh.warehouse_id = %(warehouse_id)s")
-        params["warehouse_id"] = warehouse_id
+        owner = db.execute(
+            "SELECT location_id FROM locations WHERE external_id = %s",
+            (warehouse_id,),
+        ).fetchone()
+        if owner is not None:
+            filters.append(f"dh.warehouse_id IN ({_warehouse_codes_subquery()})")
+            params["location_id"] = owner["location_id"]
+        else:
+            filters.append("dh.warehouse_id = %(warehouse_id)s")
+            params["warehouse_id"] = warehouse_id
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     row = db.execute(
@@ -398,10 +438,11 @@ def get_historical_demand(
     forecast-on-booking signal — stream='regular' only (warranty is a
     separate forecast), inter-entity flows excluded (PPS→PCC double-count,
     migration 048), strict past (booked_date < today). The location is
-    mapped through ``locations.external_id = demand_history.warehouse_id``
-    (warehouse_id stores the ERP DC code; resolution happens at read time
-    per migration 047). Rows with NULL/unmatched warehouse_id drop out of
-    the per-site series by design.
+    mapped to its set of accepted warehouse codes through the single-source
+    ``_warehouse_codes_subquery`` (its own external_id UNION its aliases,
+    location_aliases / migration 070 — #414/ADR-031); with no aliases the
+    set is the external_id alone, strictly as before. Rows with
+    NULL/unmatched warehouse_id drop out of the per-site series by design.
 
     ``demand_history`` deliberately carries no scenario_id: actuals are
     invariant across scenarios. ``scenario_id`` is used ONLY by the
@@ -428,14 +469,14 @@ def get_historical_demand(
                    COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
             FROM demand_history dh
             WHERE dh.item_id = %(item_id)s
-              AND dh.warehouse_id = %(warehouse_id)s
+              AND dh.warehouse_id IN ({_warehouse_codes_subquery()})
               AND {_DEMAND_HISTORY_BUSINESS_PREDICATES}
             GROUP BY dh.booked_date
             ORDER BY dh.booked_date ASC
             """,
             {
                 "item_id": item_id,
-                "warehouse_id": warehouse_external_id,
+                "location_id": location_id,
                 "lookback_days": lookback_days,
             },
         ).fetchall()

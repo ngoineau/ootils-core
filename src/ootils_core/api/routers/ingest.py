@@ -55,19 +55,24 @@ class IngestResponse(BaseModel):
     results: list[dict]
     batch_id: Optional[UUID] = None
     dq_status: Optional[str] = None
+    # Number of location_aliases rows upserted (#414). Defaults to 0 so every
+    # non-location endpoint and every pre-#414 client keep an unchanged
+    # payload — additive, optional, never breaks the existing contract.
+    aliases_upserted: int = 0
 
 
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _ok(inserted: int, updated: int, total: int, results: list[dict], batch_id: UUID | None = None, dq_status: str | None = None) -> IngestResponse:
+def _ok(inserted: int, updated: int, total: int, results: list[dict], batch_id: UUID | None = None, dq_status: str | None = None, aliases_upserted: int = 0) -> IngestResponse:
     return IngestResponse(
         status="ok",
         summary=IngestSummary(total=total, inserted=inserted, updated=updated, errors=0),
         results=results,
         batch_id=batch_id,
         dq_status=dq_status,
+        aliases_upserted=aliases_upserted,
     )
 
 
@@ -552,6 +557,33 @@ def ingest_items(
 VALID_LOCATION_TYPES = {"plant", "dc", "warehouse", "supplier_virtual", "customer_virtual"}
 
 
+class LocationAliasRow(BaseModel):
+    """One alternate source-system code for a site (location_aliases,
+    migration 070 — #414/ADR-031). Mirrors the DB CHECK
+    (alias <> '' AND btrim(alias) = alias): the alias is stripped and a
+    blank one is rejected at the Pydantic boundary so a malformed code fails
+    at 422 rather than at the DB CHECK. ``source_system`` defaults to the
+    ''_default'' sentinel (never nullable — see migration 070 header)."""
+
+    alias: str = Field(
+        ...,
+        min_length=1,
+        description="Alternate code as it appears in a source feed (e.g. numeric ERP warehouse code).",
+    )
+    source_system: str = Field(
+        "_default",
+        description="Origin system of this code; part of the UNIQUE (alias, source_system) key.",
+    )
+
+    @field_validator("alias")
+    @classmethod
+    def alias_non_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("alias must not be blank")
+        return stripped
+
+
 class LocationRow(BaseModel):
     external_id: str = Field(..., description="Site/DC identifier (e.g. DC-ATL). Upsert key.")
     name: str = Field(..., description="Site label / description.")
@@ -559,6 +591,12 @@ class LocationRow(BaseModel):
     country: Optional[str] = None
     timezone: Optional[str] = None
     parent_external_id: Optional[str] = Field(None, description="External_id of the parent site (optional, for hierarchies).")
+    # Backward-compatible: absent → [] → no alias work, identical behaviour to
+    # a pre-#414 payload (location_aliases, migration 070).
+    aliases: list[LocationAliasRow] = Field(
+        default_factory=list,
+        description="Optional alternate source-system codes resolving to this site (#414).",
+    )
 
     @field_validator("external_id", "name")
     @classmethod
@@ -571,6 +609,46 @@ class LocationRow(BaseModel):
 class IngestLocationsRequest(BaseModel):
     locations: list[LocationRow]
     dry_run: bool = False
+
+
+def _upsert_location_aliases(
+    db: DictRowConnection,
+    location_id: UUID,
+    loc: LocationRow,
+) -> int:
+    """Upsert a site's aliases into location_aliases (migration 070, #414).
+
+    ON CONFLICT (alias, source_system) DO UPDATE SET location_id — NOT
+    DO NOTHING. Rationale: location_aliases is a CORRESPONDENCE table and a
+    correspondence gets corrected. Ingest is declared an upsert (the normal
+    correction channel for master data), so re-sending an alias that was
+    previously mapped to the wrong site must re-point it to the right one —
+    DO NOTHING would freeze the first (possibly wrong) mapping and force an
+    out-of-band DELETE to fix a typo. The cross-site anti-collision guard in
+    the caller already blocks the only dangerous re-map (an alias equal to a
+    LIVE external_id of another site); what remains re-mappable here is an
+    alias moving between sites via successive ingests, which is exactly the
+    correction we want to allow.
+
+    An alias equal to the site's OWN external_id is skipped (silent no-op):
+    the site already resolves to that code through locations.external_id, so
+    the row would be redundant. Returns the number of alias rows written.
+    """
+    written = 0
+    for alias_row in loc.aliases:
+        if alias_row.alias == loc.external_id:
+            continue
+        db.execute(
+            """
+            INSERT INTO location_aliases (location_id, alias, source_system)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (alias, source_system)
+            DO UPDATE SET location_id = EXCLUDED.location_id
+            """,
+            (location_id, alias_row.alias, alias_row.source_system),
+        )
+        written += 1
+    return written
 
 
 @router.post("/locations", response_model=IngestResponse, summary="Import locations", description="Upsert a batch of sites/DCs. Upsert key: external_id.")
@@ -586,6 +664,76 @@ def ingest_locations(
 
     # Build set of external_ids in the payload (for parent validation)
     payload_ext_ids = {loc.external_id for loc in body.locations}
+
+    # Site identity of every payload external_id ALREADY in DB (empty →
+    # brand-new site). Resolved once, up front — validation (Trou A/B below)
+    # AND the upsert loop both need "does this external_id already have a
+    # location_id, and which one" to tell "this is genuinely the same site"
+    # apart from "this collides with a different, pre-existing site". A
+    # single batched ANY(%s) query (_batch_existing), reused by both phases —
+    # never re-fetched later.
+    existing = _batch_existing(
+        db, "locations", "external_id", "location_id",
+        [loc.external_id for loc in body.locations],
+    )
+
+    # Cross-site alias anti-collision (#414/ADR-031). Applicative invariant:
+    # ONE code -> EXACTLY ONE site, ACROSS ALL SOURCE SYSTEMS —
+    # demand_history.warehouse_id carries no system tag, so the UNION
+    # resolution (_warehouse_codes_subquery) is itself system-agnostic; two
+    # sites sharing a code under different systems would double-count demand
+    # at read time. Not expressible as a single-table DB constraint (see
+    # migration 070 header) — the ingest layer owns it, batched, before any
+    # write (all-or-nothing intact).
+    #
+    # One combined batched lookup serves BOTH known holes below: every
+    # location_aliases row whose `alias` equals EITHER a payload external_id
+    # (Trou A candidate) OR a payload alias string (Trou B candidate), any
+    # source_system, in ONE query (no N+1).
+    alias_strings = {a.alias for loc in body.locations for a in loc.aliases}
+    collision_candidates = list(payload_ext_ids | alias_strings)
+    db_alias_rows_by_alias: dict[str, list[tuple[str, UUID]]] = {}
+    if collision_candidates:
+        alias_rows = db.execute(
+            "SELECT alias, source_system, location_id FROM location_aliases WHERE alias = ANY(%s)",
+            (collision_candidates,),
+        ).fetchall()
+        for r in alias_rows:
+            db_alias_rows_by_alias.setdefault(r["alias"], []).append(
+                (r["source_system"], r["location_id"])
+            )
+
+    # Pre-existing check (alias == another site's external_id, DB side):
+    # batch-fetch, in one query, every `locations` row whose external_id
+    # equals an INCOMING alias string — never a per-row lookup.
+    alias_ext_id_owner: dict[str, str] = {}
+    if alias_strings:
+        ext_id_rows = db.execute(
+            "SELECT external_id FROM locations WHERE external_id = ANY(%s)",
+            (list(alias_strings),),
+        ).fetchall()
+        alias_ext_id_owner = {r["external_id"]: r["external_id"] for r in ext_id_rows}
+
+    # Intra-payload alias anti-collision — judged on the CHAIN (the alias
+    # STRING alone), NOT the (alias, source_system) pair. Same invariant class
+    # as Trou A/B above: demand_history.warehouse_id carries no system tag, so
+    # a code declared by two DIFFERENT sites in one batch is ambiguous
+    # regardless of which source_system(s) each side used — the per-system
+    # UNIQUE key on location_aliases would happily store both rows (different
+    # keys) and silently create the exact two-resolutions corruption this
+    # whole feature exists to prevent. owner = the FIRST site declaring the
+    # code (setdefault); ANY other site later declaring the SAME code, under
+    # ANY source_system, is the ambiguity and gets rejected below.
+    #
+    # Chain-level ownership alone also fully covers the same-site no-op: the
+    # SAME site declaring the same code under several systems (the legitimate
+    # multi-flux case), or repeating the exact same pair, all resolve to that
+    # site's own external_id here — no separate pair-level structure is
+    # needed to distinguish them.
+    alias_string_owner: dict[str, str] = {}
+    for loc in body.locations:
+        for alias_row in loc.aliases:
+            alias_string_owner.setdefault(alias_row.alias, loc.external_id)
 
     for i, loc in enumerate(body.locations):
         row_errs = []
@@ -603,6 +751,86 @@ def ingest_locations(
                 row_errs.append(
                     f"parent_external_id '{loc.parent_external_id}' not found in payload or DB"
                 )
+
+        # Trou A: the INCOMING external_id (new site, or an existing site
+        # being updated) equals an alias ALREADY IN DB that belongs to a
+        # DIFFERENT site. `existing.get(loc.external_id)` is None for a
+        # brand-new site, so any DB alias hit is automatically "a different
+        # site" (a not-yet-existing site cannot legitimately own a prior
+        # alias row).
+        own_location_id = existing.get(loc.external_id)
+        for source_system, owner_location_id in db_alias_rows_by_alias.get(loc.external_id, []):
+            if owner_location_id != own_location_id:
+                row_errs.append(
+                    f"external_id '{loc.external_id}' collides with an "
+                    f"existing alias (source_system '{source_system}') already "
+                    f"pointing to a different site (location_id "
+                    f"'{owner_location_id}'); a code must resolve to exactly "
+                    "one site"
+                )
+
+        for alias_row in loc.aliases:
+            alias = alias_row.alias
+            # alias == the site's OWN external_id → silent no-op (documented):
+            # the site already resolves to that code via locations.external_id,
+            # so an alias row would be redundant, never a collision.
+            if alias == loc.external_id:
+                continue
+            # alias == a DIFFERENT site's external_id (in this payload or
+            # already in the DB) → the alias would resolve to two distinct
+            # sites: reject the row (fail-loudly).
+            collides_with = None
+            if alias in payload_ext_ids:
+                collides_with = alias
+            elif alias in alias_ext_id_owner:
+                collides_with = alias_ext_id_owner[alias]
+            if collides_with is not None:
+                row_errs.append(
+                    f"alias '{alias}' collides with the external_id of another "
+                    f"site '{collides_with}' (target site '{loc.external_id}'); "
+                    "an alias must not equal another site's external_id"
+                )
+            # Chain-level intra-payload collision: this alias STRING already
+            # claimed by a DIFFERENT site elsewhere in this payload, under
+            # ANY source_system → same ambiguity class as Trou A/B, reject.
+            # Same site re-declaring its own code (any system, incl. a
+            # DIFFERENT one from a prior row — the legitimate multi-flux
+            # case) resolves to itself in alias_string_owner (first-declarer
+            # is that same site) and is never an error.
+            chain_owner_ext_id = alias_string_owner[alias]
+            if chain_owner_ext_id != loc.external_id:
+                row_errs.append(
+                    f"alias '{alias}' (source_system '{alias_row.source_system}') "
+                    f"is declared by two different sites in this batch: "
+                    f"'{chain_owner_ext_id}' and '{loc.external_id}'; a code "
+                    "must resolve to exactly one site within a batch, "
+                    "regardless of source_system"
+                )
+
+            # Trou B: the INCOMING alias equals a DB alias, under a
+            # DIFFERENT source_system, already pointing to a DIFFERENT site.
+            # System-agnostic invariant: demand_history.warehouse_id carries
+            # no system tag, so a code owned by two sites under two systems
+            # is a real ambiguity. The EXACT (alias, source_system) pair is
+            # deliberately excluded here — that is the permitted re-map
+            # handled by _upsert_location_aliases's ON CONFLICT DO UPDATE
+            # (an assumed correction, even when it moves the alias to a new
+            # site). Same alias, same SITE, different source_system (the
+            # legitimate multi-system-per-site case) is also excluded by the
+            # `owner_location_id == own_location_id` check.
+            for other_source_system, owner_location_id in db_alias_rows_by_alias.get(alias, []):
+                if other_source_system == alias_row.source_system:
+                    continue
+                if owner_location_id != own_location_id:
+                    row_errs.append(
+                        f"alias '{alias}' (source_system "
+                        f"'{alias_row.source_system}') collides with the same "
+                        f"alias already registered under source_system "
+                        f"'{other_source_system}' pointing to a different "
+                        f"site (location_id '{owner_location_id}'); a code "
+                        "must resolve to exactly one site across all source "
+                        "systems"
+                    )
         if row_errs:
             errors.append({"external_id": loc.external_id, "row": i, "errors": row_errs})
 
@@ -626,16 +854,15 @@ def ingest_locations(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
 
-    existing = _batch_existing(
-        db, "locations", "external_id", "location_id",
-        [loc.external_id for loc in body.locations],
-    )
-
+    # `existing` was already resolved above (before validation, batched) and
+    # is reused here — no re-fetch.
     results: list[dict] = []
     inserted = updated = 0
+    aliases_upserted = 0
 
     for loc in body.locations:
         if loc.external_id in existing:
+            location_id = existing[loc.external_id]
             # `locations` table has no `updated_at` column (see migration 002:
             # only `created_at`). Older code copy-pasted the `items` UPDATE
             # template and crashed with UndefinedColumn at runtime.
@@ -647,7 +874,7 @@ def ingest_locations(
                 """,
                 (loc.name, loc.location_type, loc.country, loc.timezone, loc.external_id),
             )
-            results.append({"external_id": loc.external_id, "location_id": str(existing[loc.external_id]), "action": "updated"})
+            action = "updated"
             updated += 1
         else:
             location_id = uuid4()
@@ -658,12 +885,29 @@ def ingest_locations(
                 """,
                 (location_id, loc.external_id, loc.name, loc.location_type, loc.country, loc.timezone),
             )
-            results.append({"external_id": loc.external_id, "location_id": str(location_id), "action": "inserted"})
+            action = "inserted"
             inserted += 1
 
-    logger.info("ingest.locations total=%d inserted=%d updated=%d", len(body.locations), inserted, updated)
+        row_aliases = _upsert_location_aliases(db, location_id, loc)
+        aliases_upserted += row_aliases
+        result_row: dict[str, Any] = {
+            "external_id": loc.external_id,
+            "location_id": str(location_id),
+            "action": action,
+        }
+        if loc.aliases:
+            result_row["aliases_upserted"] = row_aliases
+        results.append(result_row)
+
+    logger.info(
+        "ingest.locations total=%d inserted=%d updated=%d aliases_upserted=%d",
+        len(body.locations), inserted, updated, aliases_upserted,
+    )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.locations), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(
+        inserted, updated, len(body.locations), results,
+        batch_id=batch_id, dq_status=dq_status, aliases_upserted=aliases_upserted,
+    )
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
