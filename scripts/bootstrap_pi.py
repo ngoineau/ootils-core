@@ -48,9 +48,11 @@ import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.rows import dict_row
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,13 +81,18 @@ def _guard_db(dsn: str, allow_dev: bool) -> str:
     return db_name
 
 
-def _count_scenario_nodes(cur: psycopg.Cursor, scenario_id: str) -> int:
-    cur.execute(
-        "SELECT COUNT(*) FROM nodes WHERE scenario_id = %s::uuid",
-        (scenario_id,),
-    )
-    row = cur.fetchone()
-    return int(row[0]) if row else 0
+def _count_scenario_nodes(conn: psycopg.Connection, scenario_id: str) -> int:
+    """Row-factory agnostic: opens its OWN dict_row cursor so it never depends
+    on the row_factory the caller's connection/cursor happens to use (#414
+    CI fix — the pre-existing bootstrap() cursor is positional/tuple in
+    main()'s bare psycopg.connect(), but the integration `conn` fixture is
+    dict_row; this helper must work under either)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        row = cur.execute(
+            "SELECT COUNT(*) AS n FROM nodes WHERE scenario_id = %s::uuid",
+            (scenario_id,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def _read_external_ids(path: Path) -> list[str]:
@@ -99,7 +106,7 @@ def _read_external_ids(path: Path) -> list[str]:
 
 
 def _build_seed_items(
-    cur: psycopg.Cursor,
+    cur: psycopg.Cursor[Any],
     *,
     sample_finished: int | None,
     external_ids: list[str] | None,
@@ -158,7 +165,7 @@ def _build_seed_items(
     )
 
 
-def _close_bom_subtree(cur: psycopg.Cursor) -> None:
+def _close_bom_subtree(cur: psycopg.Cursor[Any]) -> None:
     """Expand _b_seed_items into _b_scope_items via the full active-BOM closure.
 
     A recursive walk parent → component over active bom_headers/bom_lines. The
@@ -200,14 +207,22 @@ def bootstrap(
     """Bootstrap the PI graph for one scenario.
 
     Returns a dict with counts and per-phase timings.
+
+    Row access is BY NAME throughout (explicit dict_row cursor), never by
+    positional index: bootstrap() must behave identically whether the caller's
+    connection defaults to tuple rows (main()'s bare psycopg.connect()) or
+    dict_row (the integration `conn` fixture) — the repo convention besides.
+
+    The volumetric guard (anti-big-bang) is evaluated BEFORE any date
+    arithmetic that depends on `horizon` (horizon_start/horizon_end): an
+    absurd --horizon-days must be refused, not raise OverflowError while
+    building a `date` that will never be used because the guard would have
+    refused the run anyway.
     """
-    cur = conn.cursor()
-    today = date.today()
-    horizon_start = today
-    horizon_end = today + timedelta(days=horizon)
+    cur = conn.cursor(row_factory=dict_row)
     timings: dict[str, float] = {}
 
-    nodes_before = _count_scenario_nodes(cur, scenario_id)
+    nodes_before = _count_scenario_nodes(conn, scenario_id)
 
     subset_mode = "full"
     external_ids: list[str] | None = None
@@ -225,12 +240,12 @@ def bootstrap(
             cur, sample_finished=sample_finished, external_ids=external_ids
         )
         _close_bom_subtree(cur)
-        cur.execute("SELECT COUNT(*) FROM _b_seed_items")
+        cur.execute("SELECT COUNT(*) AS n FROM _b_seed_items")
         seed_row = cur.fetchone()
-        n_seed_items = int(seed_row[0]) if seed_row else 0
-        cur.execute("SELECT COUNT(*) FROM _b_scope_items")
+        n_seed_items = int(seed_row["n"]) if seed_row else 0
+        cur.execute("SELECT COUNT(*) AS n FROM _b_scope_items")
         scope_row = cur.fetchone()
-        n_scope_items = int(scope_row[0]) if scope_row else 0
+        n_scope_items = int(scope_row["n"]) if scope_row else 0
         # Restrict the pair-derivation to items in the closed scope.
         scope_join = "JOIN _b_scope_items si ON si.item_id = nodes.item_id"
         logger.info(
@@ -260,9 +275,9 @@ def bootstrap(
         """,
         (scenario_id,),
     )
-    cur.execute("SELECT COUNT(*) FROM _b_pi_pairs")
+    cur.execute("SELECT COUNT(*) AS n FROM _b_pi_pairs")
     total_pairs_row = cur.fetchone()
-    total_pairs = int(total_pairs_row[0]) if total_pairs_row else 0
+    total_pairs = int(total_pairs_row["n"]) if total_pairs_row else 0
     logger.info("Found %d (item, location) pairs with activity", total_pairs)
 
     # Random sampling (legacy --sample) is applied AFTER subset selection.
@@ -275,12 +290,16 @@ def bootstrap(
         logger.info("Sampling %d pairs", sample)
     else:
         pairs_table = "_b_pi_pairs"
-    cur.execute(f"SELECT COUNT(*) FROM {pairs_table}")
+    cur.execute(f"SELECT COUNT(*) AS n FROM {pairs_table}")
     n_pairs_row = cur.fetchone()
-    n_pairs = int(n_pairs_row[0]) if n_pairs_row else 0
+    n_pairs = int(n_pairs_row["n"]) if n_pairs_row else 0
     timings["1_identify_pairs_s"] = round(time.perf_counter() - t0, 2)
 
     # ── 1b. Volumetric guard (anti-big-bang) ──────────────────────
+    # Pure int arithmetic (n_pairs x horizon) — deliberately evaluated BEFORE
+    # any `date` arithmetic that depends on `horizon` (below). An absurd
+    # --horizon-days must be refused here, not raise OverflowError while
+    # building horizon_end for a run the guard would refuse anyway.
     projected_nodes = n_pairs * horizon
     if projected_nodes > MAX_PROJECTED_NODES and not force:
         raise SystemExit(
@@ -290,6 +309,15 @@ def bootstrap(
             "(--sample-finished / --items-file), shorten --horizon-days, or pass "
             "--force to override (accepts the volumetric debt knowingly)."
         )
+
+    # Horizon date arithmetic — deliberately AFTER the guard above (#414 CI
+    # fix): an out-of-range --horizon-days (e.g. millions of days) would raise
+    # OverflowError building `today + timedelta(days=horizon)` before the
+    # guard ever got to refuse the run. Nothing before this point needs a
+    # `date` value.
+    today = date.today()
+    horizon_start = today
+    horizon_end = today + timedelta(days=horizon)
 
     # ── 2. Create projection_series ───────────────────────────────
     t0 = time.perf_counter()
@@ -416,7 +444,7 @@ def bootstrap(
     timings["6_demand_edges_s"] = round(time.perf_counter() - t0, 2)
     logger.info("Created %d demand→PI edges in %.2fs", n_dem_edges, timings["6_demand_edges_s"])
 
-    nodes_after = _count_scenario_nodes(cur, scenario_id)
+    nodes_after = _count_scenario_nodes(conn, scenario_id)
 
     return {
         "scenario_id": scenario_id,
