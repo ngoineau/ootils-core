@@ -55,9 +55,12 @@ TERMINAL_STATUSES: frozenset[str] = frozenset(
 # Decision Ladder gate (North Star L3+): approving or applying a
 # recommendation is a human decision. Enforced HERE — the single source of
 # truth of the machine — so no in-process caller (router, CLI, future
-# watcher/orchestrator import) can bypass it. actor_kind is self-declared
-# until per-token agent scopes land (#350); this gate is the transitional
-# floor, not the final authentication story.
+# watcher/orchestrator import) can bypass it. As of #392, actor_kind is no
+# longer self-declared: the REST callers source it from the authenticated
+# Principal (the api_tokens row behind the Bearer token), so an agent token is
+# structurally unable to claim 'human' at this gate. The CLI still passes an
+# explicit actor_kind (a trusted local operator context). This function only
+# decides; it never trusts a request body.
 HUMAN_ONLY_TARGETS: frozenset[str] = frozenset({"APPROVED", "APPLIED"})
 
 

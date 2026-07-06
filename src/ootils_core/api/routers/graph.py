@@ -305,6 +305,10 @@ def list_nodes(
 # agent) act on a single order, not an irreversible commitment (it can be
 # reversed by DELETE) — no approval gate for V1, audited via `events` is
 # sufficient. Revisit if firm/unfirm ever needs L2+ governance.
+#
+# governance PR2: not a silent gap re-audited under #392 — this pre-existing
+# decision (reversible, event-audited, deliberately gate-free) stands. Left
+# require_auth-only; explicitly reviewed, not deferred by oversight.
 # ---------------------------------------------------------------------------
 
 class FirmRequest(BaseModel):

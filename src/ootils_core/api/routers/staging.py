@@ -25,6 +25,19 @@ Endpoint:
 
 ADR-013 D4 mandates approval; this endpoint only enqueues the upload —
 batches sit in `pending` until /v1/staging/batches/{id}/approve lands.
+
+Authorization (#392 security-review follow-up): every staging write
+(upload, diff-preview, reject, approve) requires the `ingest` scope — the
+legacy token holds `admin` (a superset) so nothing pre-#392 regresses.
+`approve` additionally applies the same UPSERT + soft-delete to canonical
+master data (items/locations/suppliers) that `staging/approve.py` describes
+below — an apply-to-baseline L3 action — so it ALSO requires the Decision
+Ladder human gate on top of the scope: a non-human principal (agent/service)
+is refused with 403 regardless of scope. The approver identity written to
+`staging.transform_runs.approved_by` is the request body's `approved_by`
+field (kept for the human-readable name a bearer token doesn't carry), but
+the *governance decision* (human vs not) is the authenticated principal's
+`actor_kind`, never self-declared.
 """
 from __future__ import annotations
 
@@ -44,7 +57,7 @@ from fastapi import (
 
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.staging.approve import ApprovalError, approve_batch
@@ -85,7 +98,7 @@ _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 @router.post(
     "/upload",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_scope("ingest"))],
 )
 def upload_file(
     file: Annotated[UploadFile, File(description="Source file (TSV/CSV/XLSX/JSON)")],
@@ -206,17 +219,18 @@ def upload_file(
 def _extract_submitter() -> str | None:
     """Placeholder for pulling the authenticated identity off the request.
 
-    The current `require_auth` dependency only validates the bearer
-    token (no subject extraction yet). When ADR-013's audit story
-    needs real identities (OIDC subject, API-key owner, etc.) this
-    function is the single place to wire it up.
+    `resolve_principal` (#392) now extracts a name/actor_kind from a minted
+    token, but `upload_file` above only depends on the `ingest` scope check
+    (not the Principal itself) — wiring `principal.name` in here as the
+    submitter is a small follow-up, not yet done. This function stays the
+    single place to do it.
     """
     return None
 
 
 @router.get(
     "/batches/{batch_id}/diff",
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_scope("ingest"))],
 )
 def get_batch_diff(
     batch_id: UUID,
@@ -295,12 +309,12 @@ class ApproveRequest(BaseModel):
 
 @router.post(
     "/batches/{batch_id}/approve",
-    dependencies=[Depends(require_auth)],
 )
 def approve(
     batch_id: UUID,
     body: ApproveRequest,
     db: DictRowConnection = Depends(get_db),
+    principal: Principal = Depends(require_scope("ingest")),
 ) -> dict:
     """Apply the validated batch to canonical tables (ADR-013 D3+D4).
 
@@ -313,7 +327,34 @@ def approve(
     transaction is rolled back and the transform_runs row is marked
     'failed' with the error message (audit trail preserved). The
     batch stays in 'validated' state so the operator can retry.
+
+    Decision Ladder gate (#392 security-review follow-up): this endpoint
+    UPSERTs + soft-deletes canonical master data (items/locations/suppliers)
+    — an apply-to-baseline L3 action, exactly the class of decision the #392
+    token-truth model exists to gate. A non-human principal (actor_kind
+    'agent' or 'service') is refused with 403 even if it holds the `ingest`
+    scope: scope says "may operate staging", the human gate says "may commit
+    to baseline". This is a NEW gate (staging/approve.py had none before
+    #392) — there is no pre-#392 self-declared actor_kind to preserve here
+    (contrast with recommendations/scenarios, which already gated on a body
+    field and need the #392-9 legacy fallback).
     """
+    if principal.actor_kind != "human":
+        logger.warning(
+            "staging.approve.human_gate_rejected batch=%s actor_kind=%s token=%s",
+            batch_id,
+            principal.actor_kind,
+            principal.token_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Approving a staging batch commits to canonical baseline data "
+                "and is an L3/L4 decision reserved to human actors (Decision "
+                "Ladder, strategy doc §5)."
+            ),
+        )
+
     try:
         result = approve_batch(
             db,
@@ -372,7 +413,7 @@ class RejectRequest(BaseModel):
 
 @router.post(
     "/batches/{batch_id}/reject",
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_scope("ingest"))],
 )
 def reject(
     batch_id: UUID,

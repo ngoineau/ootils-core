@@ -230,6 +230,142 @@
         }
       }
     },
+    "/v1/stream": {
+      "get": {
+        "tags": [
+          "stream"
+        ],
+        "summary": "Stream Events",
+        "description": "Server-Sent Events feed of the ``events`` table for one scenario.\n\n``scenario_id`` resolves via the shared pool-free resolver (query param or\n``X-Scenario-ID`` header; default baseline). Auth requires the ``read``\nscope (#392) like every other agent-consumable read path. The kill switch\nand the concurrency budget are checked HERE, before opening any connection,\nso a disabled or saturated stream service answers 503 without touching the\nDB.",
+        "operationId": "stream_events_v1_stream_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional CSV of event_type values to include. Unknown types match nothing.",
+              "title": "Types"
+            },
+            "description": "Optional CSV of event_type values to include. Unknown types match nothing."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resume AFTER this stream_seq. 0 = replay full scenario history. Omit to stream from now. Takes precedence over the Last-Event-ID header.",
+              "title": "Cursor"
+            },
+            "description": "Resume AFTER this stream_seq. 0 = replay full scenario history. Omit to stream from now. Takes precedence over the Last-Event-ID header."
+          },
+          {
+            "name": "once",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Bounded catch-up mode: drain the keyset once and close, instead of LISTENing and staying open. No heartbeat in this mode. The natural mode for a cron watcher's periodic 'give me everything since my last cursor' call.",
+              "default": false,
+              "title": "Once"
+            },
+            "description": "Bounded catch-up mode: drain the keyset once and close, instead of LISTENing and staying open. No heartbeat in this mode. The natural mode for a cron watcher's periodic 'give me everything since my last cursor' call."
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/projection": {
       "get": {
         "tags": [
@@ -1898,7 +2034,7 @@
           "staging"
         ],
         "summary": "Approve",
-        "description": "Apply the validated batch to canonical tables (ADR-013 D3+D4).\n\nReturns counts (rows_inserted / rows_updated / rows_soft_deleted /\nrows_noop), the new run_id, and a list of samples per category.\nThe batch transitions from 'validated' to 'imported'; a new\n`staging.transform_runs` row is created in 'completed' state.\n\nFailure mode: if the canonical write fails for any reason, the\ntransaction is rolled back and the transform_runs row is marked\n'failed' with the error message (audit trail preserved). The\nbatch stays in 'validated' state so the operator can retry.",
+        "description": "Apply the validated batch to canonical tables (ADR-013 D3+D4).\n\nReturns counts (rows_inserted / rows_updated / rows_soft_deleted /\nrows_noop), the new run_id, and a list of samples per category.\nThe batch transitions from 'validated' to 'imported'; a new\n`staging.transform_runs` row is created in 'completed' state.\n\nFailure mode: if the canonical write fails for any reason, the\ntransaction is rolled back and the transform_runs row is marked\n'failed' with the error message (audit trail preserved). The\nbatch stays in 'validated' state so the operator can retry.\n\nDecision Ladder gate (#392 security-review follow-up): this endpoint\nUPSERTs + soft-deletes canonical master data (items/locations/suppliers)\n— an apply-to-baseline L3 action, exactly the class of decision the #392\ntoken-truth model exists to gate. A non-human principal (actor_kind\n'agent' or 'service') is refused with 403 even if it holds the `ingest`\nscope: scope says \"may operate staging\", the human gate says \"may commit\nto baseline\". This is a NEW gate (staging/approve.py had none before\n#392) — there is no pre-#392 self-declared actor_kind to preserve here\n(contrast with recommendations/scenarios, which already gated on a body\nfield and need the #392-9 legacy fallback).",
         "operationId": "approve_v1_staging_batches__batch_id__approve_post",
         "security": [
           {
@@ -3363,7 +3499,7 @@
           "recommendations"
         ],
         "summary": "Transition Recommendation",
-        "description": "Apply a governed state-machine transition to one recommendation.",
+        "description": "Apply a governed state-machine transition to one recommendation.\n\nTwo authorization floors stack (#392): a token SCOPE (recommend:approve for\nthe human-only targets APPROVED/APPLIED, recommend:draft otherwise) AND the\nDecision Ladder human gate. The SCOPE always decides on the authenticated\nPrincipal's real actor_kind (never the body). The GATE decides on\n``resolve_gate_kind`` (see auth.py, #392 defect 9): for a MINTED token, that\nis always ``principal.actor_kind`` — the body is never trusted. For the\nLEGACY token ONLY, if the body still declares an actor_kind, the gate\ndecides on THAT value — preserving the exact pre-#392 self-declared-gate\nbehaviour for the shared token during the transition window before PR2\nmints per-agent tokens (naively gating legacy on the synthetic 'human'\nPrincipal would let an honestly-declared agent on the shared token sail\nthrough a human-only transition it used to get 403 on).",
         "operationId": "transition_recommendation_v1_recommendations__recommendation_id__transition_post",
         "security": [
           {
@@ -3646,7 +3782,7 @@
           "scenarios"
         ],
         "summary": "Promote Scenario",
-        "description": "Promote a scenario's overrides onto the baseline (L3+ decision).\n\nConflict-safe (ADR-018 P2.2.c): if the baseline diverged since the\noverrides were captured, the promote aborts with 409 and the typed\nconflict list — nothing is written. Success writes the\nscenario_promotions audit row (migration 052) and emits a\n'scenario_merge' event.",
+        "description": "Promote a scenario's overrides onto the baseline (L3+ decision).\n\nConflict-safe (ADR-018 P2.2.c): if the baseline diverged since the\noverrides were captured, the promote aborts with 409 and the typed\nconflict list — nothing is written. Success writes the\nscenario_promotions audit row (migration 052) and emits a\n'scenario_merge' event.\n\nTwo authorization floors stack (#392): the token SCOPE recommend:approve\n(checked by the dependency above, always on the real token's actor_kind)\nAND the Decision Ladder human gate (checked below on ``resolve_gate_kind``\n— see auth.py, #392 defect 9). For a MINTED token the gate always decides\non the token's real actor_kind; for the LEGACY token, if the body still\ndeclares an actor_kind, the gate decides on THAT value instead — the exact\npre-#392 self-declared-gate behaviour, preserved for the shared token\nuntil PR2 mints per-agent tokens (otherwise an honestly agent-declaring\ncaller on the shared legacy token would gain the ability to promote a\nscenario to baseline, which it never had before #392).",
         "operationId": "promote_scenario_v1_scenarios__scenario_id__promote_post",
         "security": [
           {
@@ -7176,7 +7312,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "description": "Source file (TSV/CSV/XLSX/JSON)"
           },
@@ -7965,7 +8101,7 @@
           },
           "violations": {
             "items": {
-              "$ref": "#/components/schemas/CapacityViolationOut"
+              "$ref": "#/components/schemas/ootils_core__mps__api__CapacityViolationOut"
             },
             "type": "array",
             "title": "Violations"
@@ -7992,77 +8128,6 @@
         ],
         "title": "CapacityCheckResponse",
         "description": "Response from capacity check endpoint."
-      },
-      "CapacityViolationOut": {
-        "properties": {
-          "violation_type": {
-            "type": "string",
-            "title": "Violation Type"
-          },
-          "resource_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Resource Id"
-          },
-          "resource_external_id": {
-            "type": "string",
-            "title": "Resource External Id"
-          },
-          "resource_name": {
-            "type": "string",
-            "title": "Resource Name"
-          },
-          "period_start": {
-            "type": "string",
-            "format": "date",
-            "title": "Period Start"
-          },
-          "period_end": {
-            "type": "string",
-            "format": "date",
-            "title": "Period End"
-          },
-          "required_capacity": {
-            "type": "string",
-            "title": "Required Capacity"
-          },
-          "available_capacity": {
-            "type": "string",
-            "title": "Available Capacity"
-          },
-          "overload_pct": {
-            "type": "string",
-            "title": "Overload Pct"
-          },
-          "affected_mps_ids": {
-            "items": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": "array",
-            "title": "Affected Mps Ids"
-          },
-          "severity": {
-            "type": "string",
-            "title": "Severity"
-          }
-        },
-        "type": "object",
-        "required": [
-          "violation_type",
-          "resource_id",
-          "resource_external_id",
-          "resource_name",
-          "period_start",
-          "period_end",
-          "required_capacity",
-          "available_capacity",
-          "overload_pct",
-          "affected_mps_ids",
-          "severity"
-        ],
-        "title": "CapacityViolationOut",
-        "description": "Output model for capacity violation."
       },
       "CausalStepOut": {
         "properties": {
@@ -15354,6 +15419,7 @@
               "agent"
             ],
             "title": "Actor Kind",
+            "description": "DEPRECATED (#392): ignored for the human-gate decision — the actor kind is now sourced from the authenticated token (api_tokens.actor_kind). Kept for request-shape compatibility; a value that disagrees with the token is logged as a mis-migrated client.",
             "default": "human"
           },
           "reason": {
@@ -15450,6 +15516,13 @@
           "type": {
             "type": "string",
             "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
           }
         },
         "type": "object",
@@ -15613,6 +15686,77 @@
         ],
         "title": "CapacityViolationOut",
         "description": "Capacity violation details for API response."
+      },
+      "ootils_core__mps__api__CapacityViolationOut": {
+        "properties": {
+          "violation_type": {
+            "type": "string",
+            "title": "Violation Type"
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Resource Id"
+          },
+          "resource_external_id": {
+            "type": "string",
+            "title": "Resource External Id"
+          },
+          "resource_name": {
+            "type": "string",
+            "title": "Resource Name"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Period Start"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date",
+            "title": "Period End"
+          },
+          "required_capacity": {
+            "type": "string",
+            "title": "Required Capacity"
+          },
+          "available_capacity": {
+            "type": "string",
+            "title": "Available Capacity"
+          },
+          "overload_pct": {
+            "type": "string",
+            "title": "Overload Pct"
+          },
+          "affected_mps_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Affected Mps Ids"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          }
+        },
+        "type": "object",
+        "required": [
+          "violation_type",
+          "resource_id",
+          "resource_external_id",
+          "resource_name",
+          "period_start",
+          "period_end",
+          "required_capacity",
+          "available_capacity",
+          "overload_pct",
+          "affected_mps_ids",
+          "severity"
+        ],
+        "title": "CapacityViolationOut",
+        "description": "Output model for capacity violation."
       }
     },
     "securitySchemes": {

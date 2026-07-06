@@ -74,6 +74,11 @@ class DQIssuesResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # POST /v1/dq/run/{batch_id}
 # ─────────────────────────────────────────────────────────────
+# governance PR2: ingest scope — deferred. #392 security-review audit
+# (PR1): this runs deterministic L1/L2 checks and writes only into
+# data_quality_issues (staging-side diagnostics), never into canonical
+# master data — not an apply-to-baseline action, unlike staging/approve.py.
+# Left require_auth-only; not the L3 class this chantier targets.
 
 @router.post(
     "/run/{batch_id}",
@@ -326,6 +331,10 @@ class AgentRunsResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # POST /v1/dq/agent/run/{batch_id}
 # ─────────────────────────────────────────────────────────────
+# governance PR2: ingest scope — deferred. #392 security-review audit
+# (PR1): the agent enriches data_quality_issues (impact_score, LLM
+# insights) — staging-side diagnostics only, no canonical write. Same
+# reasoning as /run/{batch_id} above. Left require_auth-only.
 
 @router.post(
     "/agent/run/{batch_id}",

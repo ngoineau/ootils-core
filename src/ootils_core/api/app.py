@@ -14,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from anyio import to_thread
+import psycopg
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -115,6 +116,15 @@ def _should_audit_request(request: Request) -> bool:
     return True
 
 
+_AUDIT_INSERT_SQL = """
+    INSERT INTO api_request_log (
+        correlation_id, token_prefix, method, path,
+        status_code, latency_ms, client_ip,
+        token_id, actor_kind
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
 def _log_api_request(request: Request, status_code: int, latency_ms: int) -> None:
     if not _should_audit_request(request):
         return
@@ -123,26 +133,49 @@ def _log_api_request(request: Request, status_code: int, latency_ms: int) -> Non
     token_prefix = getattr(request.state, "client_id", None)
     correlation_id = getattr(request.state, "correlation_id", None)
 
+    # #392: stamp the authenticated principal's identity when present. Absent on
+    # an unauthenticated /health call or when a test overrides require_auth
+    # without setting a principal — both write NULL, which the migration-064
+    # columns allow.
+    principal = getattr(request.state, "principal", None)
+    token_id = getattr(principal, "token_id", None)
+    actor_kind = getattr(principal, "actor_kind", None)
+
+    params = (
+        correlation_id,
+        token_prefix,
+        request.method,
+        request.url.path,
+        status_code,
+        latency_ms,
+        client_ip,
+        token_id,
+        actor_kind,
+    )
+
     try:
         db_handle = _get_ootils_db()
         with db_handle.conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO api_request_log (
-                    correlation_id, token_prefix, method, path,
-                    status_code, latency_ms, client_ip
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    correlation_id,
-                    token_prefix,
-                    request.method,
-                    request.url.path,
-                    status_code,
-                    latency_ms,
-                    client_ip,
-                ),
-            )
+            try:
+                conn.execute(_AUDIT_INSERT_SQL, params)
+            except psycopg.errors.ForeignKeyViolation:
+                # #392 security-review fix: token_id can reference an
+                # api_tokens row that was HARD-DELETED after the in-process
+                # principal cache (30 s TTL) authenticated this request —
+                # the cache still vouches for the token, but the FK target
+                # is gone. Losing the WHOLE audit row over a dangling
+                # token_id would erase precisely the forensic window
+                # (the last ≤30 s of a since-deleted, possibly compromised
+                # token) that matters most. Retry once with token_id=NULL —
+                # actor_kind + token_prefix are still written, so the row
+                # stays attributable ("an agent-kind call happened, prefix
+                # ootk_XXXXXXX") even though the FK link is gone. Soft
+                # revoke (api_tokens.revoked_at) is the recommended
+                # lifecycle op for exactly this reason; hard-DELETE remains
+                # supported but must never puncture the audit trail.
+                conn.rollback()
+                fallback_params = params[:7] + (None, actor_kind)
+                conn.execute(_AUDIT_INSERT_SQL, fallback_params)
     except Exception as exc:
         logger.warning(
             "audit.log_failed path=%s status=%s error=%s",

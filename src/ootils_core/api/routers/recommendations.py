@@ -28,11 +28,12 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope, resolve_gate_kind, resolve_principal
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.recommendation.state_machine import (
     ALLOWED_TRANSITIONS,
+    HUMAN_ONLY_TARGETS,
     HumanGateError,
     InvalidTransitionError,
     RecommendationNotFoundError,
@@ -50,9 +51,11 @@ VALID_ACTIONS = frozenset({"EXPEDITE", "ORDER_RUSH", "ORDER_NOW"})
 # decisions — humans only. The rule itself lives in the state machine
 # (state_machine.HUMAN_ONLY_TARGETS / enforce_human_gate) so every consumer
 # — this router, the CLI, any future in-process caller — hits the same gate;
-# the router only maps HumanGateError to a 403. Transitional until per-token
-# agent scopes land (#350): actor_kind is self-declared, and once token
-# scopes exist an agent token will be structurally unable to claim 'human'.
+# the router only maps HumanGateError to a 403. As of #392 the actor_kind fed
+# to the gate is sourced from the authenticated Principal (the api_tokens row),
+# NOT the request body — an agent token cannot claim 'human'. Two independent
+# floors now stack: the token scope (recommend:approve for APPROVED/APPLIED)
+# AND the human gate on actor_kind.
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +115,15 @@ class RecommendationDetailOut(RecommendationOut):
 class TransitionRequest(BaseModel):
     to_status: Literal["DRAFT", "REVIEWED", "APPROVED", "REJECTED", "APPLIED", "EXPIRED"]
     actor: str = Field(min_length=1, max_length=200, description="Username or agent name")
-    actor_kind: Literal["human", "agent"] = "human"
+    actor_kind: Literal["human", "agent"] = Field(
+        default="human",
+        description=(
+            "DEPRECATED (#392): ignored for the human-gate decision — the actor "
+            "kind is now sourced from the authenticated token (api_tokens.actor_kind). "
+            "Kept for request-shape compatibility; a value that disagrees with the "
+            "token is logged as a mis-migrated client."
+        ),
+    )
     reason: Optional[str] = None
 
 
@@ -171,7 +182,7 @@ def _to_out(row: dict) -> RecommendationOut:
 @router.get("", response_model=RecommendationsListResponse)
 def list_recommendations(
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
     status_filter: Optional[str] = Query(default=None, alias="status"),
     action: Optional[str] = Query(default=None),
@@ -232,7 +243,7 @@ def list_recommendations(
 def get_recommendation(
     recommendation_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> RecommendationDetailOut:
     """Recommendation detail: evidence trail (explainability) + full transition history."""
     row = db.execute(
@@ -278,23 +289,72 @@ def transition_recommendation(
     recommendation_id: UUID,
     body: TransitionRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    principal: Principal = Depends(resolve_principal),
 ) -> TransitionResponse:
-    """Apply a governed state-machine transition to one recommendation."""
+    """Apply a governed state-machine transition to one recommendation.
+
+    Two authorization floors stack (#392): a token SCOPE (recommend:approve for
+    the human-only targets APPROVED/APPLIED, recommend:draft otherwise) AND the
+    Decision Ladder human gate. The SCOPE always decides on the authenticated
+    Principal's real actor_kind (never the body). The GATE decides on
+    ``resolve_gate_kind`` (see auth.py, #392 defect 9): for a MINTED token, that
+    is always ``principal.actor_kind`` — the body is never trusted. For the
+    LEGACY token ONLY, if the body still declares an actor_kind, the gate
+    decides on THAT value — preserving the exact pre-#392 self-declared-gate
+    behaviour for the shared token during the transition window before PR2
+    mints per-agent tokens (naively gating legacy on the synthetic 'human'
+    Principal would let an honestly-declared agent on the shared token sail
+    through a human-only transition it used to get 403 on).
+    """
+    # Scope floor — required scope depends on the target (runtime), so it is
+    # enforced here rather than as a static route dependency. approve is a
+    # superset of draft for this router's purposes; admin (legacy token) passes
+    # both via Principal.has_scope. The scope ALWAYS decides on the real
+    # token's actor_kind (resolve_gate_kind's legacy fallback applies to the
+    # human GATE only, never to scope — a legacy caller declaring 'agent' in
+    # the body still holds 'admin' and passes every scope check, unchanged).
+    required_scope = "recommend:approve" if body.to_status in HUMAN_ONLY_TARGETS else "recommend:draft"
+    if not principal.has_scope(required_scope):
+        logger.warning(
+            "recommendation.transition.missing_scope scope=%s to=%s actor_kind=%s token=%s",
+            required_scope,
+            body.to_status,
+            principal.actor_kind,
+            principal.token_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"missing scope '{required_scope}'",
+        )
+
+    gate_kind = resolve_gate_kind(principal, body.actor_kind)
+    if not principal.is_legacy and body.actor_kind != principal.actor_kind:
+        # A MINTED token's body disagreeing with its own token is a
+        # mis-migrated client signal (the token is the truth regardless, but
+        # this is worth surfacing). A LEGACY principal disagreeing is NOT an
+        # anomaly here — it is resolve_gate_kind's intended fallback, so no
+        # warning for that case.
+        logger.warning(
+            "recommendation.transition.actor_kind_mismatch body=%s token=%s reco=%s",
+            body.actor_kind,
+            principal.actor_kind,
+            recommendation_id,
+        )
+
     try:
         result = transition_one(
             db,
             recommendation_id,
             body.to_status,
             body.actor,
-            actor_kind=body.actor_kind,
+            actor_kind=gate_kind,
             reason=body.reason,
         )
     except HumanGateError as e:
         # Decision Ladder gate — enforced by the state machine itself (single
-        # source of truth); the router only maps it to HTTP. Transitional
-        # until per-token agent scopes land (#350): actor_kind is
-        # self-declared.
+        # source of truth); the router only maps it to HTTP. Since #392 the
+        # actor_kind reaching the gate is the token's, so an agent token that
+        # cleared the draft scope still cannot reach a human-only target.
         raise HTTPException(
             status_code=403,
             detail=(

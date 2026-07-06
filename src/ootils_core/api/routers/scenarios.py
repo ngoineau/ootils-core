@@ -36,7 +36,7 @@ from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_auth, require_scope, resolve_gate_kind
 from ootils_core.api.dependencies import get_db, BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.recommendation.state_machine import (
@@ -293,7 +293,7 @@ def promote_scenario(
     scenario_id: UUID,
     body: PromoteRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    principal: Principal = Depends(require_scope("recommend:approve")),
 ) -> PromoteResponse:
     """Promote a scenario's overrides onto the baseline (L3+ decision).
 
@@ -302,15 +302,36 @@ def promote_scenario(
     conflict list — nothing is written. Success writes the
     scenario_promotions audit row (migration 052) and emits a
     'scenario_merge' event.
+
+    Two authorization floors stack (#392): the token SCOPE recommend:approve
+    (checked by the dependency above, always on the real token's actor_kind)
+    AND the Decision Ladder human gate (checked below on ``resolve_gate_kind``
+    — see auth.py, #392 defect 9). For a MINTED token the gate always decides
+    on the token's real actor_kind; for the LEGACY token, if the body still
+    declares an actor_kind, the gate decides on THAT value instead — the exact
+    pre-#392 self-declared-gate behaviour, preserved for the shared token
+    until PR2 mints per-agent tokens (otherwise an honestly agent-declaring
+    caller on the shared legacy token would gain the ability to promote a
+    scenario to baseline, which it never had before #392).
     """
+    gate_kind = resolve_gate_kind(principal, body.actor_kind)
+    if not principal.is_legacy and body.actor_kind != principal.actor_kind:
+        # A MINTED token's body disagreeing with its own token is a
+        # mis-migrated client signal. A LEGACY principal disagreeing is NOT
+        # an anomaly — it's resolve_gate_kind's intended fallback.
+        logger.warning(
+            "scenario.promote.actor_kind_mismatch body=%s token=%s scenario_id=%s",
+            body.actor_kind,
+            principal.actor_kind,
+            scenario_id,
+        )
     # Decision Ladder gate — promoting IS applying a scenario to the
     # baseline, i.e. the 'APPLIED' human-only action class. The rule lives
     # in engine/recommendation/state_machine (single source of truth,
     # shared with the recommendation router/CLI); this router only maps
-    # HumanGateError to a 403. Transitional until per-token agent scopes
-    # land (#350): actor_kind is self-declared.
+    # HumanGateError to a 403.
     try:
-        enforce_human_gate("APPLIED", body.actor_kind)
+        enforce_human_gate("APPLIED", gate_kind)
     except HumanGateError:
         raise HTTPException(
             status_code=403,
