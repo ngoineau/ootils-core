@@ -4534,6 +4534,526 @@
         }
       }
     },
+    "/v1/drp/run": {
+      "post": {
+        "tags": [
+          "drp"
+        ],
+        "summary": "Run DRP (inter-site transfer planning)",
+        "description": "Deterministic DRP fair-share transfer planner. Computes projected per-site deficits vs linked-source excess and emits inter-site TRANSFER moves as governed L1 DRAFT recommendations (idempotent: an unchanged plan re-run emits zero new rows). Read-only on the graph; writes only into `recommendations`, never `shortages` (ADR-021). Scenario-scoped (forkable).",
+        "operationId": "run_drp_v1_drp_run_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrpRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrpRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/snapshots": {
+      "post": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Capture inventory snapshots",
+        "description": "Scan on-hand per (item, location) for a scenario and upsert one `inventory_snapshots` row per coordinate for `as_of` (default CURRENT_DATE), source='api'. Idempotent: a re-capture of the same scenario/day overwrites, never duplicates. Per-site, never pooled. Requires the `ingest` scope (a write of persistent operational rows).",
+        "operationId": "capture_snapshots_v1_snapshots_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotCaptureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotCaptureResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Query inventory snapshots",
+        "description": "Read captured snapshots filtered by scenario (required, forkable), optional as_of day and item_id. Fully parameterized SQL.",
+        "operationId": "list_snapshots_v1_snapshots_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to a single capture day (YYYY-MM-DD).",
+              "title": "As Of"
+            },
+            "description": "Filter to a single capture day (YYYY-MM-DD)."
+          },
+          {
+            "name": "item_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to a single item.",
+              "title": "Item Id"
+            },
+            "description": "Filter to a single item."
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/recommendations/{recommendation_id}/outcome": {
+      "get": {
+        "tags": [
+          "outcomes"
+        ],
+        "summary": "Get a recommendation's observed outcome",
+        "description": "The latest observed outcome of one recommendation: its deterministic verdict (AVOIDED / MATERIALIZED / PARTIAL / NOT_APPLICABLE / INDETERMINATE) plus the NULL-honest predicted/observed/avoided $ figures. 404 if the reco has no outcome yet.",
+        "operationId": "get_recommendation_outcome_v1_recommendations__recommendation_id__outcome_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "recommendation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The recommendation UUID.",
+              "title": "Recommendation Id"
+            },
+            "description": "The recommendation UUID."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/outcomes/summary": {
+      "get": {
+        "tags": [
+          "outcomes"
+        ],
+        "summary": "Proof-of-value KPI summary",
+        "description": "The five proof KPIs for a scenario: pct_shortages_avoided, avoided_severity_usd_total, avg_fva_wape (see FVA caveat), reco_approval_rate, cost_of_inaction_usd. Every KPI is NULL/0-honest (NULL = no data, 0 = genuine zero). Fully parameterized SQL, scenario-scoped. `from`/`to` window recommendation_outcomes.evaluated_as_of and therefore filter ONLY KPIs 1/2/5 (avoided rate, avoided $, cost of inaction); KPI 3 (Pyramide run accuracy) and KPI 4 (reco approval rate) have no evaluated_as_of of their own and are ALWAYS scenario-scope-lifetime, window or not.",
+        "operationId": "outcomes_summary_v1_outcomes_summary_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window start (inclusive) on the OUTCOME observation date (recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — KPI 3/4 have no evaluated_as_of and ignore this filter (always scenario-scope-lifetime).",
+              "title": "From"
+            },
+            "description": "Window start (inclusive) on the OUTCOME observation date (recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — KPI 3/4 have no evaluated_as_of and ignore this filter (always scenario-scope-lifetime)."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window end (inclusive) on the OUTCOME observation date (recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — KPI 3/4 have no evaluated_as_of and ignore this filter (always scenario-scope-lifetime).",
+              "title": "To"
+            },
+            "description": "Window end (inclusive) on the OUTCOME observation date (recommendation_outcomes.evaluated_as_of). Filters KPIs 1/2/5 only — KPI 3/4 have no evaluated_as_of and ignore this filter (always scenario-scope-lifetime)."
+          },
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeSummaryOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/outcomes/evaluate": {
+      "post": {
+        "tags": [
+          "outcomes"
+        ],
+        "summary": "Evaluate recommendation outcomes",
+        "description": "Classify every eligible recommendation's observed outcome for `as_of` (default CURRENT_DATE) and upsert the verdicts (idempotent: a re-run for the same day overwrites, never duplicates). Read-only on recommendations/shortages/inventory_snapshots (ADR-021); writes only recommendation_outcomes. Requires the `ingest` scope.",
+        "operationId": "evaluate_outcomes_v1_outcomes_evaluate_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scenario_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Scenario UUID or 'baseline'",
+              "title": "Scenario Id"
+            },
+            "description": "Scenario UUID or 'baseline'"
+          },
+          {
+            "name": "X-Scenario-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Scenario-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutcomeEvaluateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeEvaluateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/demand/forecast/generate": {
       "post": {
         "tags": [
@@ -4913,6 +5433,53 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PyramideRunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/forecast/hierarchical-runs": {
+      "post": {
+        "tags": [
+          "pyramide"
+        ],
+        "summary": "Create a hierarchical (multi-level, reconciled) Pyramide forecast run",
+        "description": "Forecast and reconcile ONE summing block of the hierarchy registry\n(HierarchicalRunner, #348). Every level is persisted as its own\npyramide_runs row (aggregates carry hierarchy_id/level/node_code, leaves\ncarry item/location); the response lists each run_id so the existing\nGET /runs/{run_id}/result endpoint reads any of them — leaf results carry\nconformal bounds, aggregate results carry NULL bounds (hierarchical\ninterval reconciliation is a documented V1 non-goal).\n\n``recon_method`` reflects the method EFFECTIVELY applied: a\n'mintrace_wls_shrink' request that fell back reports 'middleout' with the\nreason in ``warnings`` — provenance never lies.",
+        "operationId": "create_hierarchical_run_v1_forecast_hierarchical_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HierarchicalRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HierarchicalRunResultOut"
                 }
               }
             }
@@ -7312,7 +7879,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "Source file (TSV/CSV/XLSX/JSON)"
           },
@@ -7701,7 +8268,7 @@
           },
           "violations": {
             "items": {
-              "$ref": "#/components/schemas/ootils_core__atp__routers__CapacityViolationOut"
+              "$ref": "#/components/schemas/CapacityViolationOut"
             },
             "type": "array",
             "title": "Violations",
@@ -8128,6 +8695,46 @@
         ],
         "title": "CapacityCheckResponse",
         "description": "Response from capacity check endpoint."
+      },
+      "CapacityViolationOut": {
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "title": "Resource Id"
+          },
+          "resource_name": {
+            "type": "string",
+            "title": "Resource Name"
+          },
+          "violation_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Violation Date"
+          },
+          "required_capacity": {
+            "type": "number",
+            "title": "Required Capacity"
+          },
+          "available_capacity": {
+            "type": "number",
+            "title": "Available Capacity"
+          },
+          "overload_pct": {
+            "type": "number",
+            "title": "Overload Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "resource_id",
+          "resource_name",
+          "violation_date",
+          "required_capacity",
+          "available_capacity",
+          "overload_pct"
+        ],
+        "title": "CapacityViolationOut",
+        "description": "Capacity violation details for API response."
       },
       "CausalStepOut": {
         "properties": {
@@ -8947,6 +9554,81 @@
           "created_at"
         ],
         "title": "DemoRunSummary"
+      },
+      "DrpRunRequest": {
+        "properties": {
+          "horizon_days": {
+            "type": "integer",
+            "maximum": 1095.0,
+            "minimum": 1.0,
+            "title": "Horizon Days",
+            "default": 180
+          }
+        },
+        "type": "object",
+        "title": "DrpRunRequest",
+        "description": "Body of POST /v1/drp/run. scenario_id is resolved from the query param /\nX-Scenario-ID header (Depends(resolve_scenario_id)), NOT the body, matching\nthe forkable read-path convention of the other scenario-scoped routers."
+      },
+      "DrpRunResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "agent_run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Run Id"
+          },
+          "decision_level": {
+            "type": "string",
+            "title": "Decision Level"
+          },
+          "horizon_days": {
+            "type": "integer",
+            "title": "Horizon Days"
+          },
+          "signals": {
+            "type": "integer",
+            "title": "Signals"
+          },
+          "recommendations_emitted": {
+            "type": "integer",
+            "title": "Recommendations Emitted"
+          },
+          "recommendations_idempotent_noop": {
+            "type": "integer",
+            "title": "Recommendations Idempotent Noop"
+          },
+          "expired_stale_drafts": {
+            "type": "integer",
+            "title": "Expired Stale Drafts"
+          },
+          "unresolved_coords": {
+            "type": "integer",
+            "title": "Unresolved Coords"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "agent_run_id",
+          "decision_level",
+          "horizon_days",
+          "signals",
+          "recommendations_emitted",
+          "recommendations_idempotent_noop",
+          "expired_stale_drafts",
+          "unresolved_coords",
+          "message"
+        ],
+        "title": "DrpRunResponse",
+        "description": "Response from a DRP transfer run."
       },
       "EdgeOut": {
         "properties": {
@@ -10242,6 +10924,247 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HierarchicalRunRequest": {
+        "properties": {
+          "hierarchy_id": {
+            "type": "string",
+            "title": "Hierarchy Id"
+          },
+          "block_code": {
+            "type": "string",
+            "title": "Block Code"
+          },
+          "leaf_location_id": {
+            "type": "string",
+            "title": "Leaf Location Id"
+          },
+          "horizon_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Horizon Days",
+            "default": 90
+          },
+          "granularity": {
+            "type": "string",
+            "pattern": "^(daily|weekly|monthly)$",
+            "title": "Granularity",
+            "default": "daily"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "default": "AUTO_SELECT"
+          },
+          "method_params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Method Params"
+          },
+          "scenario_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario Id"
+          },
+          "model_strategy": {
+            "type": "string",
+            "pattern": "^(auto|stat|ml|fm|hybrid)$",
+            "title": "Model Strategy",
+            "default": "stat"
+          },
+          "recon_method": {
+            "type": "string",
+            "pattern": "^(middleout|mintrace_wls_shrink)$",
+            "title": "Recon Method",
+            "default": "middleout"
+          },
+          "block_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Level"
+          },
+          "recon_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recon Level"
+          },
+          "lookback_days": {
+            "type": "integer",
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Lookback Days",
+            "default": 365
+          },
+          "random_seed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Random Seed",
+            "default": 0
+          },
+          "code_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Code Version",
+            "default": "local"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hierarchy_id",
+          "block_code",
+          "leaf_location_id"
+        ],
+        "title": "HierarchicalRunRequest"
+      },
+      "HierarchicalRunResultOut": {
+        "properties": {
+          "hierarchy_id": {
+            "type": "string",
+            "title": "Hierarchy Id"
+          },
+          "block_code": {
+            "type": "string",
+            "title": "Block Code"
+          },
+          "block_level": {
+            "type": "string",
+            "title": "Block Level"
+          },
+          "recon_level": {
+            "type": "string",
+            "title": "Recon Level"
+          },
+          "recon_method": {
+            "type": "string",
+            "title": "Recon Method"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "horizon_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Horizon Start"
+          },
+          "horizon_end": {
+            "type": "string",
+            "format": "date",
+            "title": "Horizon End"
+          },
+          "granularity": {
+            "type": "string",
+            "title": "Granularity"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/HierarchicalSeriesOut"
+            },
+            "type": "array",
+            "title": "Series"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hierarchy_id",
+          "block_code",
+          "block_level",
+          "recon_level",
+          "recon_method",
+          "scenario_id",
+          "horizon_start",
+          "horizon_end",
+          "granularity",
+          "method",
+          "series",
+          "warnings"
+        ],
+        "title": "HierarchicalRunResultOut"
+      },
+      "HierarchicalSeriesOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Level"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "forecast_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Forecast Id"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "key",
+          "run_id",
+          "forecast_id"
+        ],
+        "title": "HierarchicalSeriesOut"
       },
       "IngestBOMRequest": {
         "properties": {
@@ -12012,6 +12935,277 @@
         ],
         "title": "OnHandRow"
       },
+      "OutcomeEvaluateRequest": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of",
+            "description": "Observation day (YYYY-MM-DD). Defaults to the DB CURRENT_DATE."
+          }
+        },
+        "type": "object",
+        "title": "OutcomeEvaluateRequest",
+        "description": "Body of POST /v1/outcomes/evaluate. scenario_id is resolved from the query\nparam / X-Scenario-ID header (Depends(resolve_scenario_id)), NOT the body."
+      },
+      "OutcomeEvaluateResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "evaluated_as_of": {
+            "type": "string",
+            "format": "date",
+            "title": "Evaluated As Of"
+          },
+          "evaluated": {
+            "type": "integer",
+            "title": "Evaluated"
+          },
+          "upserted": {
+            "type": "integer",
+            "title": "Upserted"
+          },
+          "with_avoided_usd": {
+            "type": "integer",
+            "title": "With Avoided Usd"
+          },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "evaluated_as_of",
+          "evaluated",
+          "upserted",
+          "with_avoided_usd",
+          "by_status"
+        ],
+        "title": "OutcomeEvaluateResponse",
+        "description": "Response from an evaluation pass."
+      },
+      "OutcomeOut": {
+        "properties": {
+          "outcome_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Outcome Id"
+          },
+          "recommendation_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Recommendation Id"
+          },
+          "evaluated_as_of": {
+            "type": "string",
+            "format": "date",
+            "title": "Evaluated As Of"
+          },
+          "evaluation_status": {
+            "type": "string",
+            "title": "Evaluation Status"
+          },
+          "predicted_shortage_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicted Shortage Date"
+          },
+          "predicted_deficit_qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicted Deficit Qty"
+          },
+          "observed_deficit_qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Deficit Qty"
+          },
+          "avoided_severity_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avoided Severity Usd"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Evaluated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "outcome_id",
+          "recommendation_id",
+          "evaluated_as_of",
+          "evaluation_status",
+          "evaluated_at"
+        ],
+        "title": "OutcomeOut",
+        "description": "One recommendation-outcome verdict.\n\nNULL-honest: ``avoided_severity_usd`` is None when NOT computable (no cost\nbasis / INDETERMINATE / a reco that never acted), never a masked 0. The\n``predicted_*`` are None when the reco carried no such figure."
+      },
+      "OutcomeSummaryOut": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "from_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Date"
+          },
+          "to_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Date"
+          },
+          "pct_shortages_avoided": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct Shortages Avoided"
+          },
+          "avoided_basis_count": {
+            "type": "integer",
+            "title": "Avoided Basis Count",
+            "description": "AVOIDED+MATERIALIZED+PARTIAL on acted recos (KPI 1 denominator)."
+          },
+          "avoided_severity_usd_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avoided Severity Usd Total"
+          },
+          "avg_fva_wape": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Fva Wape"
+          },
+          "fva_basis_count": {
+            "type": "integer",
+            "title": "Fva Basis Count",
+            "description": "Non-NULL aggregate WAPE rows averaged (KPI 3 denominator)."
+          },
+          "reco_approval_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reco Approval Rate"
+          },
+          "reco_total_count": {
+            "type": "integer",
+            "title": "Reco Total Count",
+            "description": "Total recos emitted in scope (KPI 4 denominator)."
+          },
+          "cost_of_inaction_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Of Inaction Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "avoided_basis_count",
+          "fva_basis_count",
+          "reco_total_count"
+        ],
+        "title": "OutcomeSummaryOut",
+        "description": "The five proof KPIs over a scenario. ``from_date``/``to_date`` echo the\nOUTCOME observation window applied to KPI 1/2/5 only — KPI 3/4 are always\nscenario-scope-lifetime regardless of the window (see the router docstring).\n\nEvery field is NULL/0-honest: None means \"no data to compute this KPI\"\n(e.g. zero acted recos for the rate, no WAPE rows for the accuracy), a real\nnumber (including 0) means the KPI computed to that value. The ``*_basis``\ncounters make the denominators explicit so a consumer can tell a genuine 0\nfrom an empty set."
+      },
       "OverloadOut": {
         "properties": {
           "work_center_id": {
@@ -13368,6 +14562,54 @@
           "n_observations": {
             "type": "integer",
             "title": "N Observations"
+          },
+          "naive_wape": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Naive Wape"
+          },
+          "naive_mase": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Naive Mase"
+          },
+          "fva_wape": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fva Wape"
+          },
+          "fva_mase": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fva Mase"
           }
         },
         "type": "object",
@@ -13903,6 +15145,30 @@
           "method": {
             "type": "string",
             "title": "Method"
+          },
+          "confidence_lower": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Lower"
+          },
+          "confidence_upper": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Upper"
           }
         },
         "type": "object",
@@ -15122,6 +16388,157 @@
         ],
         "title": "SimulateResponse"
       },
+      "SnapshotCaptureRequest": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of",
+            "description": "Capture day (YYYY-MM-DD). Defaults to the DB CURRENT_DATE."
+          }
+        },
+        "type": "object",
+        "title": "SnapshotCaptureRequest",
+        "description": "Body of POST /v1/snapshots. scenario_id is resolved from the query param /\nX-Scenario-ID header (Depends(resolve_scenario_id)), NOT the body — matching\nthe forkable read-path convention of the other scenario-scoped routers."
+      },
+      "SnapshotCaptureResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "as_of_date": {
+            "type": "string",
+            "format": "date",
+            "title": "As Of Date"
+          },
+          "snapshots_captured": {
+            "type": "integer",
+            "title": "Snapshots Captured"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "as_of_date",
+          "snapshots_captured"
+        ],
+        "title": "SnapshotCaptureResponse",
+        "description": "Response from a snapshot capture."
+      },
+      "SnapshotListResponse": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotOut"
+            },
+            "type": "array",
+            "title": "Snapshots"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "snapshots",
+          "total"
+        ],
+        "title": "SnapshotListResponse"
+      },
+      "SnapshotOut": {
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot Id"
+          },
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Item Id"
+          },
+          "location_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Location Id"
+          },
+          "as_of_date": {
+            "type": "string",
+            "format": "date",
+            "title": "As Of Date"
+          },
+          "on_hand_qty": {
+            "type": "number",
+            "title": "On Hand Qty"
+          },
+          "first_shortage_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Shortage Date"
+          },
+          "shortage_severity_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shortage Severity Usd"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Captured At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "scenario_id",
+          "item_id",
+          "location_id",
+          "as_of_date",
+          "on_hand_qty",
+          "source",
+          "captured_at"
+        ],
+        "title": "SnapshotOut",
+        "description": "One captured coordinate row.\n\n``first_shortage_date`` / ``shortage_severity_usd`` are NULL-honest: None\nmeans no projected shortage at this coordinate on as_of_date (enrichment is\ndeferred to a later PR — captured None in PR1; the two are None together)."
+      },
       "SupplierItemRow": {
         "properties": {
           "supplier_external_id": {
@@ -15516,13 +16933,6 @@
           "type": {
             "type": "string",
             "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
           }
         },
         "type": "object",
@@ -15646,46 +17056,6 @@
           "non_working_days_skipped"
         ],
         "title": "WorkingDaysResponse"
-      },
-      "ootils_core__atp__routers__CapacityViolationOut": {
-        "properties": {
-          "resource_id": {
-            "type": "string",
-            "title": "Resource Id"
-          },
-          "resource_name": {
-            "type": "string",
-            "title": "Resource Name"
-          },
-          "violation_date": {
-            "type": "string",
-            "format": "date",
-            "title": "Violation Date"
-          },
-          "required_capacity": {
-            "type": "number",
-            "title": "Required Capacity"
-          },
-          "available_capacity": {
-            "type": "number",
-            "title": "Available Capacity"
-          },
-          "overload_pct": {
-            "type": "number",
-            "title": "Overload Pct"
-          }
-        },
-        "type": "object",
-        "required": [
-          "resource_id",
-          "resource_name",
-          "violation_date",
-          "required_capacity",
-          "available_capacity",
-          "overload_pct"
-        ],
-        "title": "CapacityViolationOut",
-        "description": "Capacity violation details for API response."
       },
       "ootils_core__mps__api__CapacityViolationOut": {
         "properties": {

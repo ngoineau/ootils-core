@@ -88,6 +88,12 @@ class PyramideForecastValue:
     forecast_date: date
     quantity: Decimal
     method: str
+    # Bornes conformal du bucket (confidence_interval_lower/upper, migration
+    # 026). None = NULL en base = pas de calibration honnête (pas de backtest
+    # déterministe, ou trop peu de résidus pour la garantie finite-sample) —
+    # jamais 0, jamais des bornes inventées. Voir engines.conformal_bounds.
+    confidence_lower: Decimal | None = None
+    confidence_upper: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1185,8 @@ def fetch_run_values(db: DictRowConnection, run_id: UUID) -> list[PyramideForeca
 
     rows = db.execute(
         """
-        SELECT value_id, forecast_date, quantity, method
+        SELECT value_id, forecast_date, quantity, method,
+               confidence_interval_lower, confidence_interval_upper
         FROM forecast_values
         WHERE forecast_id = %s
         ORDER BY forecast_date ASC, value_id ASC
@@ -1192,6 +1199,8 @@ def fetch_run_values(db: DictRowConnection, run_id: UUID) -> list[PyramideForeca
             forecast_date=row["forecast_date"],
             quantity=Decimal(str(row["quantity"])),
             method=row["method"],
+            confidence_lower=_optional_decimal(row["confidence_interval_lower"]),
+            confidence_upper=_optional_decimal(row["confidence_interval_upper"]),
         )
         for row in rows
     ]
