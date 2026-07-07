@@ -25,7 +25,7 @@ We will acknowledge receipt within 72 hours and provide a timeline for resolutio
 ## Built-in Controls
 
 - **Authentication.** Every `/v1/*` endpoint requires a Bearer token (`OOTILS_API_TOKEN`); `/health` is the only unauthenticated route. Token comparison uses `hmac.compare_digest` to avoid timing leaks. The API fails closed at startup if `OOTILS_API_TOKEN` is unset.
-- **SQL.** All queries are parameterised via psycopg3 (`%s` placeholders) or `psycopg.sql.SQL` / `sql.Identifier` for dynamic identifiers. No f-string SQL.
+- **SQL.** Every runtime **value** is parameterised via psycopg3 (`%s` placeholders) — never string-formatted into the query. The only text ever interpolated into a SQL string (a handful of sites, e.g. `engine/scenario/manager.py`, `engine/scenario/param_overlay.py`) is a **column/table identifier drawn from a fixed application-side allowlist** (a whitelisted field name, never client input); the associated values stay bound parameters. Dynamic identifiers may also go through `psycopg.sql.SQL` / `sql.Identifier`. Rule: allowlisted identifiers may be interpolated, values never.
 - **Transport headers.** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Strict-Transport-Security` (HTTPS only), and a restrictive `Content-Security-Policy` (with a `/docs` carve-out for Swagger UI) are emitted on every response unless `OOTILS_DISABLE_SECURITY_HEADERS=1`.
 - **CORS.** Disabled by default. Configure with `OOTILS_CORS_ALLOWED_ORIGINS=https://example.com,https://app.example.com`. Wildcard is intentionally not the default.
 - **Container.** The Docker runtime image runs as a non-root user (`ootils`); no secrets in image layers.

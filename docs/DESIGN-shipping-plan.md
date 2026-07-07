@@ -48,7 +48,7 @@ Par mois cible : (1) poser le plancher must-ship (SLA + fermes), valorisé à l'
 
 ## 6. Stockage
 
-**Deux tables typées, scenario-scoped** (pas de JSONB — forme bornée) ; **migration `049_shipping_plan.sql`** (idempotente) :
+**Deux tables typées, scenario-scoped** (pas de JSONB — forme bornée) ; **migration `<numéro à attribuer à l'ouverture du chantier (071+)>_shipping_plan.sql`** (idempotente ; le `049` initialement pressenti est déjà pris par `049_item_asp.sql`) :
 
 - `shipping_plan_run` : run_id, scenario_id, org_id, plan_month, adhoc_target_value ($ net), asp_snapshot, calc_run_id, confidence, freshness, created_at/by, policy_result.
 - `shipping_plan_line` : run_id, scenario_id, item_id, warehouse_id, ship_month, order_type, planned_ship_qty, planned_ship_value, source (`must_ship`|`flexible_reservoir`|`forecast`), reason. = **independent demand en tête de DRP**.
@@ -67,7 +67,7 @@ Forkable ✓ · Déterministe ✓ (greedy ordonné, no LLM, no aléa) · Queryab
 
 - **PAS 0 — ADR-021** « Shipping Plan layer » (greedy-déterministe, budget-as-scenario, tête de DRP). Ce DESIGN en est le brouillon.
 - **PAS 1 — dépendances amont (GATE, bloquant)** : **ASP calculée** (rolling T12M value÷units hors-warranty — pas encore implémenté) + **série returns matérialisée** (pour le « net » de l'Ad'hoc).
-- **PAS 2 — schéma** : migration `049_shipping_plan.sql` (2 tables typées, scenario-scoped).
+- **PAS 2 — schéma** : migration `shipping_plan.sql` — **numéro à attribuer à l'ouverture du chantier (071+)**, le `049` d'origine étant déjà pris par `049_item_asp.sql` (2 tables typées, scenario-scoped).
 - **PAS 3 — moteur de règles** : module pur DB-free (style `mrp_core`) — règles par programme + greedy reservoir, paramétré par scenario_id.
 - **PAS 4 — scenario + variance** : budget figé, working rolling, diff 3-voies.
 - **PAS 5 — gouvernance/stream** : delta `shipping_plan_changed`, state machine L1→L3, audit, kill-switch.
