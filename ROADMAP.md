@@ -4,9 +4,11 @@
 
 ---
 
-## Current Status: V1 Alpha — Hardening
+## Current Status: V1 Alpha — agent-native operating substrate
 
-All seven V1 milestones (M1–M7) are implemented and shipping in the runtime. The repository contains a working `ootils-core` service: 32 SQL migrations, ~50 `/v1/*` REST endpoints, an LLM agent tool surface, and live Phase 1 demo endpoints. The current focus is hardening (security headers, observability, scalability against the breaking points in `docs/SCALABILITY.md`) and the items tracked in [REVIEW-2026-05](docs/REVIEW-2026-05.md).
+All seven V1 milestones (M1–M7) shipped long ago; the project has moved well past them. The runtime is a working `ootils-core` service with **70 SQL migrations** (`ls src/ootils_core/db/migrations/*.sql`), the full `/v1/*` REST surface (canonical count = `docs/openapi.json`), and an LLM agent tool surface. Delivered since the milestones below: **DRP runtime** (fair-share inter-site transfers, ADR-028), **SSE `/v1/stream`** for agent subscriptions (ADR-027), the **proof machine** (inventory snapshots + reco→outcome chaining + FVA, ADR-030), **scenario-scoped planning-param overlay** (ADR-025), **reschedule messages + Firm Planned Orders** (ADR-026), **per-agent API tokens + scopes + kill switch** (migration 064, ADR-029), and **location aliases** (ADR-031).
+
+> **Sequencing is no longer driven by this file.** The living, dated plan (H0–H4 phasing, the "designed by AI, for AI" bet, per-chantier acceptance criteria) lives in **[`docs/ROADMAP-AGENTS-2026-H2.md`](docs/ROADMAP-AGENTS-2026-H2.md)** and epic **#397**. The milestone list below is kept for historical record of the V1 thesis.
 
 We are still building in public — architectural decisions go through ADRs (see [`docs/INDEX.md`](docs/INDEX.md) for the ADR map).
 
@@ -19,7 +21,7 @@ We are still building in public — architectural decisions go through ADRs (see
 ### Milestones
 
 - [x] **M1 — Data Model**
-  - SQL schema: nodes, edges, events, scenarios, explanations (32 migrations)
+  - SQL schema: nodes, edges, events, scenarios, explanations (M1 shipped the initial schema; the migration set has since grown to 70)
   - Node/edge type registry (`docs/node-dictionary.md`, `docs/edge-dictionary.md`)
   - Ingestion from flat files (CSV/JSON) via `/v1/ingest/*`
 
@@ -101,4 +103,4 @@ Not based on: feature requests without justification, vendor pressure, or hype c
 
 ---
 
-*Last updated: 2026-05-22 — V1 alpha hardening pass.*
+*Last updated: 2026-07-07 — status figures corrected (70 migrations; DRP / stream / proof machine / aliases shipped); live sequencing delegated to `docs/ROADMAP-AGENTS-2026-H2.md`. The V1 milestone list below is historical.*

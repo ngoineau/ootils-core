@@ -41,6 +41,45 @@ Operational concerns:
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
 - [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009.
 
+### Full ADR register (001 → 031, chronological)
+
+Every ADR under `docs/`, numbered. The curated "read first" lists above are the entry points; this is the complete map.
+
+- [`ADR-001-graph-model.md`](ADR-001-graph-model.md) — Graph-based domain model: the node/edge taxonomy the whole engine is built on.
+- [`ADR-002-elastic-time.md`](ADR-002-elastic-time.md) — Object-local ("elastic") time model — initial proposal.
+- [`ADR-002b-elastic-time-design.md`](ADR-002b-elastic-time-design.md) — Elastic time, complete design iteration.
+- [`ADR-002c-elastic-time-layered.md`](ADR-002c-elastic-time-layered.md) — Elastic time, layered-grain model iteration.
+- [`ADR-002d-elastic-time-final.md`](ADR-002d-elastic-time-final.md) — Elastic time, **final/authoritative** decision.
+- [`ADR-003-incremental-propagation.md`](ADR-003-incremental-propagation.md) — Deterministic incremental propagation (dirty-flag + topo order).
+- [`ADR-004-explainability.md`](ADR-004-explainability.md) — Native explainability: root-cause causal chains.
+- [`ADR-005-storage-layer.md`](ADR-005-storage-layer.md) — Storage layer and data model (**superseded** — runtime is Postgres/psycopg3).
+- [`ADR-006-blockers-resolution.md`](ADR-006-blockers-resolution.md) — QC blockers resolution during hardening.
+- [`ADR-007-showstoppers-resolution.md`](ADR-007-showstoppers-resolution.md) — Conceptual showstoppers resolution.
+- [`ADR-008-agent-operability-fixes.md`](ADR-008-agent-operability-fixes.md) — Agent operability fixes.
+- [`ADR-009-import-pipeline.md`](ADR-009-import-pipeline.md) — Import pipeline architecture: staging + DQ + core.
+- [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghosts and tags: virtual supply + ad-hoc groupings.
+- [`ADR-011-scenario-retention.md`](ADR-011-scenario-retention.md) — Scenario retention policy: FK `RESTRICT`, soft-delete only.
+- [`ADR-012-scenario-fork-bulk.md`](ADR-012-scenario-fork-bulk.md) — Scenario fork via bulk `INSERT…SELECT` (27.5× faster).
+- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — External interfaces: file formats, full reload, mandatory approval.
+- [`ADR-014-resources-units-scd2.md`](ADR-014-resources-units-scd2.md) — Merge resources/work_centers, typed capacity units, transparent SCD2.
+- [`ADR-015-rust-readiness.md`](ADR-015-rust-readiness.md) — Rust readiness: prepare kernel portability without porting yet.
+- [`ADR-016-rust-engine-foundation.md`](ADR-016-rust-engine-foundation.md) — Rust engine foundation (Architecture A, tight scope).
+- [`ADR-017-architecture-b-rust-engine-service.md`](ADR-017-architecture-b-rust-engine-service.md) — Architecture B: Rust in-memory engine service.
+- [`ADR-018-per-scenario-propagation.md`](ADR-018-per-scenario-propagation.md) — Per-scenario propagation (engine RPC extension).
+- [`ADR-019-demand-model-pyramide.md`](ADR-019-demand-model-pyramide.md) — Unified demand model (Pyramide): booking / shipping / backlog.
+- [`ADR-020-mrp-consolidation.md`](ADR-020-mrp-consolidation.md) — Consolidate the two MRP engines into one source of truth.
+- [`ADR-021-shortage-truth.md`](ADR-021-shortage-truth.md) — Single shortage truth: `mrp_core` math + the `shortages` table system.
+- [`ADR-022-pyramide-reconciliation.md`](ADR-022-pyramide-reconciliation.md) — Hierarchical reconciliation: deterministic middle-out core, MinT-shrink at the edge.
+- [`ADR-023-forecast-confidence.md`](ADR-023-forecast-confidence.md) — Forecast confidence score: deterministic accuracy × depth × freshness composition.
+- [`ADR-024-foundation-model-routing.md`](ADR-024-foundation-model-routing.md) — Foundation model + head/tail routing: real Chronos-2, sealed provenance, native quantiles refused.
+- [`ADR-025-scenario-param-overlay.md`](ADR-025-scenario-param-overlay.md) — Scenario-scoped planning-param overlay: single resolver, never promoted.
+- [`ADR-026-reschedule-fpo.md`](ADR-026-reschedule-fpo.md) — Reschedule messages for open orders + Firm Planned Orders.
+- [`ADR-027-streamchanges-sse.md`](ADR-027-streamchanges-sse.md) — StreamChanges: replayable SSE stream over `events`.
+- [`ADR-028-drp-fair-share-rounding.md`](ADR-028-drp-fair-share-rounding.md) — DRP proportional fair-share + logistic down-rounding.
+- [`ADR-029-agent-enterprise-floor.md`](ADR-029-agent-enterprise-floor.md) — Agent enterprise floor: cryptographic actor identity, per-agent tokens, scopes, kill switch.
+- [`ADR-030-proof-machine.md`](ADR-030-proof-machine.md) — The proof machine: inventory snapshots, FVA, reco → outcome chaining.
+- [`ADR-031-location-aliases.md`](ADR-031-location-aliases.md) — Location aliases: multi-code resolution of one warehouse.
+
 ## Feature specs (SPEC-*)
 
 Read the SPEC matching the feature you are touching. SPECs are written before or during implementation; some have drifted from code — when in doubt, the code is authoritative.
