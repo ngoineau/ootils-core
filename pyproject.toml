@@ -39,7 +39,7 @@ dependencies = [
     # client.py / generated _grpc stubs import grpc + protobuf at module level;
     # stubs are generated with protobuf 6.31, so pin the 6.x runtime.
     "grpcio ~= 1.71",
-    "protobuf ~= 6.31",
+    "protobuf >= 6.31,< 8.0",
 ]
 
 [project.optional-dependencies]
