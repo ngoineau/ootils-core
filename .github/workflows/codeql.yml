@@ -1,0 +1,47 @@
+name: CodeQL
+
+# Static application security testing (PROD-QW). Standard GitHub CodeQL setup
+# for Python: analyzes the source on push/PR to main and on a weekly schedule,
+# reporting findings to the repository's Security tab (code scanning alerts).
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # Weekly, Monday 03:27 UTC — catches newly-published query updates against
+    # code that hasn't changed.
+    - cron: "27 3 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # security-and-quality adds maintainability/quality queries on top of
+          # the default security suite.
+          queries: security-and-quality
+
+      # Python needs no compilation; CodeQL analyzes the source directly. The
+      # autobuild step is a documented no-op for interpreted languages, kept for
+      # parity with the standard template.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

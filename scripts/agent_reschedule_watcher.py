@@ -58,7 +58,11 @@ from psycopg.types.json import Jsonb
 import mrp_core as core
 from agent_governance import decision_level, governed_run
 
-from ootils_core.engine.recommendation.reschedule import build_recommendation
+from ootils_core.engine.recommendation.reschedule import (
+    RescheduleRecommendation,
+    build_recommendation,
+)
+from ootils_core.notifications.l3_webhook import notify_l3_pending
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("reschedule_watcher")
@@ -89,17 +93,20 @@ _COLUMNS = (
 )
 
 
-def _upsert(conn: psycopg.Connection, rows: list[tuple]) -> tuple[int, list]:
+def _upsert(conn: psycopg.Connection, rows: list[tuple]) -> tuple[list, list]:
     """Idempotent insert of reschedule recommendations.
 
     ON CONFLICT (recommendation_id) DO NOTHING: a re-emitted identical signal
-    (same deterministic id) is a no-op. Returns (inserted_count, affirmed_ids)
-    where affirmed_ids is EVERY id we tried to write (inserted or already
-    present) — the caller uses it to NOT expire the still-valid prior DRAFTs.
-    SQL is composed via psycopg.sql (no f-strings in the SQL path).
+    (same deterministic id) is a no-op. Returns (inserted_ids, affirmed_ids):
+    inserted_ids are the rows ACTUALLY written this run (RETURNING yields a row
+    only on a real insert, not on a conflict no-op) — used to fire the L3
+    webhook exactly once per genuinely-new row; affirmed_ids is EVERY id we
+    tried to write (inserted or already present) — the caller uses it to NOT
+    expire the still-valid prior DRAFTs. SQL is composed via psycopg.sql (no
+    f-strings in the SQL path).
     """
     if not rows:
-        return 0, []
+        return [], []
     col_ids = sql.SQL(", ").join(sql.Identifier(c) for c in _COLUMNS)
     placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in _COLUMNS)
     query = sql.SQL(
@@ -107,14 +114,25 @@ def _upsert(conn: psycopg.Connection, rows: list[tuple]) -> tuple[int, list]:
         "ON CONFLICT (recommendation_id) DO NOTHING "
         "RETURNING recommendation_id"
     ).format(cols=col_ids, vals=placeholders)
-    inserted = 0
+    inserted_ids: list = []
     cur = conn.cursor()
     for r in rows:
         got = cur.execute(query, r).fetchone()
         if got is not None:
-            inserted += 1
+            inserted_ids.append(got[0])
     affirmed = [r[0] for r in rows]
-    return inserted, affirmed
+    return inserted_ids, affirmed
+
+
+def _l3_message(reco: RescheduleRecommendation) -> str:
+    """Human-readable one-liner for the L3 webhook (no secret)."""
+    prop = reco.proposed_date.isoformat() if reco.proposed_date is not None else "cancel"
+    return (
+        f"{reco.action} firm receipt {reco.target_node_id} "
+        f"(item {reco.item_external_id}) qty {reco.recommended_qty}, "
+        f"current date {reco.current_receipt_date.isoformat()} -> {prop}. "
+        f"L3 human approval required."
+    )
 
 
 def _expire_stale_drafts(
@@ -177,6 +195,8 @@ def main(argv=None) -> int:
         display: list[dict] = []
         by_action: defaultdict[str, int] = defaultdict(int)
         by_level: defaultdict[str, int] = defaultdict(int)
+        recos_by_id: dict = {}
+        l3_pending: list[RescheduleRecommendation] = []
 
         with governed_run(conn, AGENT_NAME, scenario, t0=t0) as run:
             for sig in signals:
@@ -202,6 +222,7 @@ def main(argv=None) -> int:
                     reco.current_receipt_date, reco.proposed_date, "DRAFT",
                     reco.confidence, Jsonb(reco.evidence),
                 ))
+                recos_by_id[reco.recommendation_id] = reco
                 by_action[action] += 1
                 by_level[reco.decision_level] += 1
                 delta = (
@@ -215,8 +236,16 @@ def main(argv=None) -> int:
                     "delta": delta, "qty": sig.qty,
                 })
 
-            inserted, affirmed = _upsert(conn, rows)
+            inserted_ids, affirmed = _upsert(conn, rows)
+            inserted = len(inserted_ids)
             expired = _expire_stale_drafts(conn, scenario, affirmed)
+            # Collect the genuinely-new recos for the L3 webhook (fired AFTER
+            # commit, below). notify_l3_pending self-gates to L3+ so only CANCEL
+            # rows actually notify; a re-run on an unchanged plan inserts nothing
+            # and therefore pings nothing.
+            l3_pending = [
+                recos_by_id[rid] for rid in inserted_ids if rid in recos_by_id
+            ]
             metrics = {
                 "signals": len(signals),
                 "recommendations_affirmed": len(affirmed),
@@ -227,6 +256,27 @@ def main(argv=None) -> int:
                 "by_decision_level": dict(by_level),
             }
             run.set_metrics(metrics)
+
+    # Best-effort L3 webhook, POST-COMMIT (the recommendations are durably
+    # persisted by governed_run's commit before we ping): the exception finds
+    # the human without a UI. Never raises — a webhook failure is swallowed and
+    # logged inside notify_l3_pending, so it cannot affect the completed run.
+    notified = 0
+    for reco in l3_pending:
+        if notify_l3_pending(
+            recommendation_id=reco.recommendation_id,
+            action=reco.action,
+            decision_level=reco.decision_level,
+            message=_l3_message(reco),
+            item_external_id=reco.item_external_id,
+            location_external_id=None,
+        ):
+            notified += 1
+    if l3_pending:
+        logger.info(
+            "L3 webhook: %d/%d new L3+ recommendation(s) notified",
+            notified, len(l3_pending),
+        )
 
     m = metrics
     elapsed = round(time.perf_counter() - t0, 2)

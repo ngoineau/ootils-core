@@ -43,10 +43,14 @@ dependencies = [
     # stubs are generated with protobuf 6.31, so pin the 6.x runtime.
     "grpcio ~= 1.71",
     "protobuf >= 6.31,< 8.0",
+    # L3 outbound webhook (notifications/l3_webhook.py): the human-in-the-loop
+    # ping must work in a LEAN watcher install, not only under [dev] — a core
+    # runtime dependency by design (PROD-QW review finding).
+    "httpx ~= 0.28",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest ~= 9.0", "pytest-cov ~= 7.1", "httpx ~= 0.28"]
+dev = ["pytest ~= 9.0", "pytest-cov ~= 7.1"]
 forecast = [
     "statsforecast ~= 2.0",
     "mlforecast ~= 1.0",
