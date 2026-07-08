@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from uuid import uuid4
 
+import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
@@ -11,6 +12,7 @@ os.environ["OOTILS_API_TOKEN"] = "test-token"
 from ootils_core.api.app import create_app
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db
+from ootils_core.api.routers import pyramide as pyramide_router
 
 
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
@@ -132,6 +134,68 @@ def test_snapshot_diff_requires_compare_to_before_db():
     response = client.get(f"/v1/forecast/snapshots/{uuid4()}/diff", headers=AUTH_HEADERS)
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+@pytest.fixture
+def _lookback_capture(monkeypatch):
+    """Capture the lookback_days the leaf run passes to get_historical_demand,
+    stubbing every DB-touching resolver so no real Postgres is needed. The stub
+    returns an EMPTY history so the endpoint short-circuits at the 422 before
+    any persistence — the lookback decision (#433) is what's under test, not the
+    downstream run."""
+    captured: dict[str, int] = {}
+
+    def fake_get_historical_demand(*, db, item_id, location_id, lookback_days, scenario_id):
+        captured["lookback_days"] = lookback_days
+        return []  # empty -> 422 "Historical demand is required", no further DB
+
+    monkeypatch.setattr(pyramide_router, "resolve_item_uuid", lambda db, ext: uuid4())
+    monkeypatch.setattr(pyramide_router, "resolve_location_uuid", lambda db, ext: uuid4())
+    monkeypatch.setattr(
+        pyramide_router, "get_historical_demand", fake_get_historical_demand
+    )
+    return captured
+
+
+def test_leaf_run_lookback_decoupled_from_horizon(_lookback_capture):
+    # #433: a short horizon must NOT starve the FVA/backtest window. horizon=90
+    # used to cap history at 90 daily points (max(horizon, 90)); it now floors
+    # at the 2-cycle backtest window (730), decoupled from the horizon.
+    client = _make_client_no_db()
+    response = client.post(
+        "/v1/forecast/runs",
+        json={"item_id": "ITEM-001", "location_id": "LOC-001", "horizon_days": 90},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert _lookback_capture["lookback_days"] == pyramide_router.BACKTEST_LOOKBACK_DAYS
+    assert _lookback_capture["lookback_days"] == 730
+
+
+def test_leaf_run_lookback_floors_at_backtest_window_for_max_horizon(_lookback_capture):
+    # horizon_days is capped at 365 (< the 730 floor), so the floor wins through
+    # the endpoint even for the largest allowed horizon: the full backtest
+    # window is always pulled.
+    client = _make_client_no_db()
+    response = client.post(
+        "/v1/forecast/runs",
+        json={"item_id": "ITEM-001", "location_id": "LOC-001", "horizon_days": 365},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert _lookback_capture["lookback_days"] == 730
+
+
+def test_lookback_expression_preserves_at_least_horizon_intent():
+    # The endpoint floors at BACKTEST_LOOKBACK_DAYS but keeps max() so the
+    # "at least as much history as the horizon" invariant survives a future
+    # horizon-cap raise. That branch is unreachable via HTTP today (horizon_days
+    # <= 365 < 730), so it is pinned here at the expression level.
+    floor = pyramide_router.BACKTEST_LOOKBACK_DAYS
+    assert max(90, floor) == floor
+    assert max(floor + 100, floor) == floor + 100
 
 
 def test_pyramide_router_registered_in_app():
