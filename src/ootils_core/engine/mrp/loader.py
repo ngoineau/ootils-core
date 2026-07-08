@@ -72,13 +72,15 @@ def load_planning_data(conn, horizon_days=540, scenario=BASELINE) -> PlanningDat
     # graph topology (excluded by design from a purely parametric overlay)
     # and order_multiple is the pre-021 legacy column the resolver
     # deliberately does not cover. This core-A loader reads `order_multiple`
-    # (the legacy column) straight off base — byte-identical to the pre-PR2
-    # `MAX(order_multiple)` — while the APICS engine reads the modern
-    # `order_multiple_qty`; that column divergence between the two MRP engines
-    # predates #347 and PR2 preserves it exactly. Both `order_multiple` and
-    # `is_make` are read straight off the base table here, unresolved, joined
-    # back on param_id (the resolver's one row per current item_planning_params
-    # row).
+    # (the legacy column) straight off base — byte-identical to the pre-#347
+    # `MAX(order_multiple)`. Since #423 PR2 the APICS write-path engine
+    # DELEGATES to this loader, so both MRP truths now share this legacy-column
+    # choice (the only surviving reader of the modern `order_multiple_qty` is
+    # the standalone LotSizingEngine calculator behind /v1/mrp/lot-sizing,
+    # which keeps its own COALESCE(order_multiple_qty, order_multiple)
+    # fallback). Both `order_multiple` and `is_make` are read straight off the
+    # base table here, unresolved, joined back on param_id (the resolver's one
+    # row per current item_planning_params row).
     #
     # lead_time_total_days is a GENERATED column on the base table and is NOT
     # in ALLOWED_PARAM_FIELDS either (only its 3 components are overlay-able)

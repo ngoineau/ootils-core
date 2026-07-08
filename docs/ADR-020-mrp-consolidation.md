@@ -80,7 +80,7 @@ deux échelons d'une seule cascade.
 | **1** | Garde-fou : durcir `parity_mrp_engines.py` en test de non-régression CI ; oracle = `test_mrp_core_golden.py` (A) ; parité B-vs-A en `xfail` documentant la dérive jusqu'au fix | à faire |
 | **2** | **Fix du bug de netting de B** (chaînage des ordres planifiés dans le PAB) | ✅ **fait + validé** (`mrp_apics_engine.py:_apply_lot_sizing_and_fences`) — voir ci-dessous |
 | 3 | Déplacer la maths de A dans `engine/mrp/core.py` (cœur DB-free) + `loader.py` (DB) ; `scripts/mrp_core.py` = shim de ré-export (21 consommateurs inchangés) ; golden-master re-ciblé sur le package + garde-fou shim≡package (`test_mrp_shim_compat.py`) | ✅ **fait** (byte-identique : 99 765 ordres avant/après, 31 tests verts) |
-| 4 | Refondre B en surcouche write au-dessus du cœur ; ajouter l'échelon DRP (cascade sur arcs de distribution) ; corriger la lecture on-hand en baseline dur (`gross_to_net.py:352` — fuite cross-scénario) | gated : demande **per-site** livrée par Pyramide |
+| 4 | Refondre B en surcouche write au-dessus du cœur ; ajouter l'échelon DRP (cascade sur arcs de distribution) ; corriger la lecture on-hand en baseline dur (`gross_to_net.py:352` — fuite cross-scénario) | **délégation ✅ fait (#423 PR2)** : `MrpApicsEngine.run()` appelle `loader.load_planning_data → consume_demand → run_timephased` et ne fait plus que matérialiser (`GrossToNetCalculator`/`forecast_consumer`/`lot_sizing`/`time_fences` sortis du chemin write ; `gross_to_net.py` réduit aux DTO). Parité B-vs-A **vert dur 0.05** en CI. La lecture on-hand passe désormais par le loader scenario-scopé (le hardcode `BASELINE` de `gross_to_net.py:352` a disparu avec `GrossToNetCalculator`). **Encore gated** : échelon DRP (demande **per-site** de Pyramide) et couverture d'intégration fork explicite (PR3). |
 | 5 | Déprécier `/v1/mrp/apics/run` : `deprecated=True` (OpenAPI) + headers RFC 8594 (`Deprecation: true`, `Link: successor-version` → `/v1/mrp/run`), sans date de sunset (TBD) ; `apics_mode` conservé sur `/v1/mrp/run` | ✅ **fait** |
 
 ## Validation du fix de netting (PAS 2)
@@ -179,11 +179,26 @@ Golden : `test_golden_frozen_fence_option_a_ignores_forecast_but_emits_order`
 sur l'ordre concerné, jamais par suppression muette (le signal de besoin doit
 rester visible).
 
-**Clôture de section.** Le cap CI de parité actuel (`--max-median-drift 0.30`)
-sera **resserré à ~0.05 / vert dur en PR2**, une fois B délégué au cœur A (fin de
-l'écart de règles). Le PAS 3 (PR3) scénarise l'on-hand de B — il ferme le risque
-« les scénarios mentiraient » noté au PAS 4 (B lit l'on-hand en `BASELINE` en
-dur, `gross_to_net.py:352`).
+**Clôture de section — #423 PR2 livré.** Le cap CI de parité a été **resserré de
+0.30 à 0.05 / vert dur**, B étant désormais délégué au cœur A (fin de l'écart de
+règles : c'est *le même* `consume_demand → run_timephased`, résidu 0 par
+construction). La lecture on-hand de B passe par `loader.load_planning_data`
+(scenario-scopée), donc le risque « les scénarios mentiraient » du PAS 4 est déjà
+refermé — le hardcode `BASELINE`/`gross_to_net.py:352` a disparu avec
+`GrossToNetCalculator`. Le reliquat PR3 se réduit à la **couverture d'intégration
+explicite** (un run MRP sur fork ne lit/écrit que le fork) et à l'échelon DRP.
+
+**Effet de bord assumé — taxonomie `mrp_action_messages` effondrée.** La
+délégation réduit la surface des messages d'exception APICS à un seul type,
+`RELEASE`/`MEDIUM`, un par ordre planifié (`GraphIntegration.persist_action_messages`
+n'a plus les cas `EXPEDITE`/`DEFER`/`CANCEL`/`RESCHEDULE` que les time-fences et
+le netting par bucket de B fabriquaient) — vérifié : aucun consommateur ne
+branche sur `message_type` (`ActionMessageResponse` dans `mrp_apics.py` est un
+modèle mort, jamais retourné par un endpoint). La voie canonique des exceptions
+gouvernées est `recommendations` (#341), pas `mrp_action_messages`. Si une
+taxonomie riche redevient nécessaire, elle se dérivera du cœur (ex. exposer les
+signaux de `reschedule_signals`/`first_shortage` par type), jamais d'une
+réimplémentation locale à B.
 
 ## Conséquences
 

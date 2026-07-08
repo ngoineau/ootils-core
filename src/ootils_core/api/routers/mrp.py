@@ -45,12 +45,39 @@ class MrpRunRequest(BaseModel):
         default=False,
         description="Enable full APICS multi-level MRP with BOM explosion and forecast consumption"
     )
-    bucket_grain: str = Field(default="week", pattern="^(day|week|month)$")
+    bucket_grain: str = Field(
+        default="week",
+        pattern="^(day|week|month)$",
+        description=(
+            "APICS mode only. The consolidated MRP core plans exclusively in "
+            "weekly buckets (ADR-020); day/month grains were removed with the "
+            "#423 delegation and are rejected with 422 when apics_mode=true "
+            "(the pattern still accepts them so the 422 carries an explicit "
+            "message instead of a generic schema-validation error)."
+        ),
+    )
     forecast_strategy: str = Field(
         default="MAX",
-        pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$"
+        pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$",
+        description=(
+            "ADVISORY since #423 (APICS mode): the delegated core reads "
+            "forecast_consumption_strategy from each item's "
+            "item_planning_params row, not this field. Kept for backward "
+            "compatibility; explicitly setting it is echoed as a warning in "
+            "the response."
+        ),
     )
-    consumption_window_days: int = Field(default=7, ge=1, le=90)
+    consumption_window_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description=(
+            "ADVISORY since #423 (APICS mode): the delegated core reads "
+            "consumption_window_days from each item's item_planning_params "
+            "row, not this field. Kept for backward compatibility; explicitly "
+            "setting it is echoed as a warning in the response."
+        ),
+    )
     recalculate_llc: bool = False
 
 
@@ -88,6 +115,7 @@ class MrpRunResponseApics(BaseModel):
     edges_created: int
     elapsed_ms: float
     errors: List[str] = []
+    warnings: List[str] = []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -478,10 +506,24 @@ def _run_apics_mrp(
     scenario_uuid: UUID,
 ) -> MrpRunResponseApics:
     """Execute full APICS multi-level MRP."""
-    from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
-    
+    from ootils_core.engine.mrp.mrp_apics_engine import (
+        ADVISORY_CONSUMPTION_WARNING,
+        MrpApicsEngine,
+        MrpRunConfig,
+        UnsupportedBucketGrainError,
+    )
+
     start_time = time.monotonic()
-    
+
+    # Advisory since #423 (review fix): forecast_strategy/consumption_window_days
+    # are no longer fed to the delegated core, but callers that still send them
+    # get a warning back instead of silent no-op — model_fields_set (not the
+    # value) tells us the caller explicitly set the field, as opposed to it
+    # simply defaulting to "MAX"/7.
+    advisory_warnings: List[str] = []
+    if body.model_fields_set & {"forecast_strategy", "consumption_window_days"}:
+        advisory_warnings.append(ADVISORY_CONSUMPTION_WARNING)
+
     try:
         # Resolve location UUID
         location_uuid = _resolve_location_uuid(db, body.location_id)
@@ -490,7 +532,7 @@ def _run_apics_mrp(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Location '{body.location_id}' not found",
             )
-        
+
         # Resolve item IDs if provided
         item_ids = None
         if body.item_id:
@@ -501,7 +543,7 @@ def _run_apics_mrp(
                     detail=f"Item '{body.item_id}' not found",
                 )
             item_ids = [item_uuid]
-        
+
         config = MrpRunConfig(
             scenario_id=scenario_uuid,
             location_id=location_uuid,
@@ -512,21 +554,22 @@ def _run_apics_mrp(
             recalculate_llc=body.recalculate_llc,
             forecast_strategy=body.forecast_strategy,
             consumption_window_days=body.consumption_window_days,
+            advisory_warnings=advisory_warnings,
         )
-        
+
         engine = MrpApicsEngine(db)
         result = engine.run(config)
-        
+
         db.commit()
-        
+
         elapsed_ms = (time.monotonic() - start_time) * 1000
-        
+
         logger.info(
             "mrp.run.apics scenario=%s items=%d records=%d nodes=%d edges=%d elapsed=%.2fms",
             scenario_uuid, result.items_processed, result.total_records,
             result.nodes_created, result.edges_created, elapsed_ms,
         )
-        
+
         return MrpRunResponseApics(
             run_id=str(result.run_id),
             scenario_id=str(result.scenario_id),
@@ -538,10 +581,16 @@ def _run_apics_mrp(
             edges_created=result.edges_created,
             elapsed_ms=elapsed_ms,
             errors=result.errors,
+            warnings=result.warnings,
         )
-        
+
     except HTTPException:
         raise
+    except UnsupportedBucketGrainError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(e),
+        )
     except Exception as e:
         db.rollback()
         logger.exception("MRP APICS run failed: %s", e)
