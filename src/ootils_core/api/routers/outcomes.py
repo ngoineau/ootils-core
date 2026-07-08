@@ -72,6 +72,7 @@ from pydantic import BaseModel, Field
 from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
+from ootils_core.engine.events import emit_stream_event
 from ootils_core.engine.outcome import evaluate_and_persist
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,21 @@ def evaluate_outcomes(
     idempotent writer of ``recommendation_outcomes``."""
     summary = evaluate_and_persist(db, str(scenario_id), body.as_of)
     evaluated_as_of = _dt.date.fromisoformat(summary["evaluated_as_of"])
+
+    # Fleet emission (#401 AN-1): ONE outcome_evaluated per evaluation batch on
+    # the request connection — atomic with the upserted verdicts (get_db owns
+    # commit/rollback). source='api'. Skipped when the batch classified nothing.
+    evaluated = int(summary["evaluated"])
+    if evaluated > 0:
+        emit_stream_event(
+            db,
+            "outcome_evaluated",
+            str(scenario_id),
+            field_changed="outcome_evaluated",
+            new_date=evaluated_as_of,
+            new_quantity=evaluated,
+            source="api",
+        )
 
     logger.info(
         "outcomes.evaluate scenario_id=%s as_of=%s evaluated=%d upserted=%d",

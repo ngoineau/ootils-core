@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
+from ootils_core.engine.events import emit_stream_event
 from ootils_core.engine.snapshot import capture_snapshot, persist_snapshot
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,21 @@ def capture_snapshots(
         if current is None:
             raise RuntimeError("snapshots.capture: SELECT CURRENT_DATE yielded no row")
         as_of_date = current["d"]
+
+    # Fleet emission (#401 AN-1): ONE snapshot_captured per capture batch on the
+    # request connection — atomic with the upserted rows (get_db owns
+    # commit/rollback). source='api' (the API request path). Skipped on an
+    # empty capture (nothing persisted, nothing to announce).
+    if written > 0:
+        emit_stream_event(
+            db,
+            "snapshot_captured",
+            scenario_str,
+            field_changed="snapshot_captured",
+            new_date=as_of_date,
+            new_quantity=written,
+            source="api",
+        )
 
     logger.info(
         "snapshots.capture scenario_id=%s as_of=%s captured=%d",

@@ -35,6 +35,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 import mrp_core as core
 import agent_simulation
+import agent_subscribe
 from agent_governance import decision_level, governed_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -58,6 +59,13 @@ def main(argv=None) -> int:
     p.add_argument("--horizon-days", type=int, default=540)
     p.add_argument("--top", type=int, default=15)
     p.add_argument("--allow-dev", action="store_true")
+    p.add_argument(
+        "--subscribe", action="store_true",
+        help="Event-driven mode (#401): drain the events stream from this "
+             "agent's last cursor and run ONLY if a relevant event "
+             "(calc_run_finished / shortage_detected) fired since. Without this "
+             "flag: full scan every run (byte-identical to the legacy behaviour).",
+    )
     args = p.parse_args(argv)
     if not args.dsn:
         logger.error("DATABASE_URL not set")
@@ -65,6 +73,29 @@ def main(argv=None) -> int:
     db = core.guard_db(args.dsn, args.allow_dev)
     logger.info("Material Watcher running on DB=%s", db)
     t0 = time.perf_counter()
+
+    # Event-driven gate (#401 AN-1). Resolve the cursor + drain BEFORE opening a
+    # governed_run so a skipped tick leaves NO agent_runs row. seed_cursor is what
+    # this run persists (the drained high-water mark, or the from-now seed on the
+    # first subscribed run), stamped into the run metrics below.
+    seed_cursor: int | None = None
+    if args.subscribe:
+        with psycopg.connect(args.dsn) as gate_conn:
+            prior = agent_subscribe.fetch_stream_cursor(gate_conn, AGENT_NAME, core.BASELINE)
+            base_cursor = prior if prior is not None else agent_subscribe.current_max_seq(
+                gate_conn, core.BASELINE)
+            seed_cursor, relevant = agent_subscribe.drain_stream(
+                gate_conn, core.BASELINE, base_cursor)
+        if prior is not None and relevant == 0:
+            logger.info(
+                "Material Watcher --subscribe: no relevant event since cursor=%s "
+                "(drained to %s) — skipping run.", base_cursor, seed_cursor)
+            return 0
+        logger.info(
+            "Material Watcher --subscribe: cursor %s -> %s, relevant=%d (%s) — running.",
+            base_cursor, seed_cursor, relevant,
+            "first subscribed run, seeded from now" if prior is None else "relevant events",
+        )
 
     with psycopg.connect(args.dsn) as conn:
         d = core.load_planning_data(conn, args.horizon_days)
@@ -158,13 +189,19 @@ def main(argv=None) -> int:
                  "action", "decision_level", "status", "confidence", "evidence"],
                 recs,
             )
-            run.set_metrics({
+            run_metrics = {
                 "component_recommendations": len(recs), "po": n_po, "wo": n_wo,
                 "superseded": superseded,
                 "estimated_spend": {k: round(v, 2) for k, v in spend.items()},
                 "max_llc": d.max_llc,
                 "simulation": sim_summary,
-            })
+            }
+            # Persist the drained cursor (#401 --subscribe) so the next tick
+            # resumes from it. Only in subscribe mode — a plain run stores no
+            # cursor, keeping its metrics byte-identical to the legacy shape.
+            if seed_cursor is not None:
+                run_metrics[agent_subscribe.STREAM_CURSOR_KEY] = seed_cursor
+            run.set_metrics(run_metrics)
             metrics = run.metrics
 
     elapsed = round(time.perf_counter() - t0, 2)
