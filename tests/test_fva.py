@@ -178,6 +178,37 @@ def test_fva_none_when_history_shorter_than_one_season_at_first_origin():
     assert result.fva_mase is None
 
 
+def test_fva_weekly_threshold_none_below_104_computable_at_104():
+    # #433 regression, pinned to literals: the weekly seasonal-naive threshold.
+    # With season_length=52 and a 52-origin backtest (n_cutoffs=52), the guard
+    # in _backtest_seasonal_naive is min_train = len(history) - n_cutoffs, and
+    # it demands min_train >= season_length, i.e.
+    #   len(history) >= season_length + n_cutoffs = 52 + 52 = 104.
+    # This is the exact arithmetic that made the weekly FVA structurally None
+    # under the old max(horizon_days, 90) lookback (<= 90 daily points) —
+    # issue #433. Positive, non-constant seasonal series so WAPE is defined
+    # once the baseline clears the guard.
+    season, cutoffs = 52, 52
+
+    def series_of(length: int) -> list[Decimal]:
+        return [D(10 + (i % season)) for i in range(length)]
+
+    stat = _stat_report(wape=D("0.2"), mase=D("1.0"), n_cutoffs=cutoffs, horizon=1)
+
+    # 103 points: min_train = 103 - 52 = 51 < 52 -> baseline undefined at the
+    # first shared origin -> None (None-honest, never a fabricated 0).
+    below = compute_fva(series_of(103), season, stat_report=stat)
+    assert below.naive_wape is None
+    assert below.fva_wape is None
+
+    # 104 points: min_train = 104 - 52 = 52 == season -> baseline computable,
+    # aligned to the 52 stat cutoffs -> a real, comparable FVA number.
+    at = compute_fva(series_of(104), season, stat_report=stat)
+    assert at.naive_wape is not None
+    assert at.fva_wape is not None
+    assert at.fva_wape == at.naive_wape - D("0.2")
+
+
 def test_fva_none_when_stat_operand_none_but_naive_stays_computable():
     # The distinctive None-honest case: the stat WAPE is None (migration 055
     # — e.g. an all-zero pooled window), yet the naive baseline IS computable.

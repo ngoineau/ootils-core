@@ -41,6 +41,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/forecast", tags=["pyramide"])
 
+# Lookback window for the backtest + FVA seasonal-naive, DECOUPLED from the
+# forecast horizon (#433). The seasonal-naive baseline (pyramide/fva.py) is
+# only computable when len(history) >= season_length + n_cutoffs measured at
+# the history's REAL cadence — get_historical_demand returns DAILY rows and
+# never re-aggregates to the requested granularity (that re-aggregation is the
+# separate DEM-1 grain/routing chantier). A weekly run therefore needs
+# season_length=52 + a 52-origin backtest tail = 104 daily points just to clear
+# fva._backtest_seasonal_naive's `min_train < season_length` guard; the old
+# max(horizon_days, 90) capped history at <= 90 points, so the FVA was
+# structurally None for every weekly item (measured: run cbee7f04, fva_basis=0).
+# 730 daily points = 2 full seasonal cycles at daily cadence: it clears the
+# guard AND gives the AUTO_SELECT 52-origin backtest a real training window so
+# the seasonality is actually LEARNED, not merely defined. Perf: 730 daily
+# points on the largest pilot series is ~2300 rows — trivial for the read, and
+# the deeper backtest is the POINT (it was previously starved by the coupling).
+BACKTEST_LOOKBACK_DAYS = 730
+
 
 class PyramideRunRequest(BaseModel):
     item_id: str
@@ -321,11 +338,18 @@ def create_pyramide_run(
     # The reader falls back to past CustomerOrderDemand nodes (scoped to
     # scenario_uuid) when demand_history is empty — so this runs BEFORE the
     # history-empty 422 below.
+    #
+    # lookback is decoupled from the horizon (#433): the FVA/backtest needs a
+    # window sized by the seasonal cycle, NOT by how far ahead we forecast.
+    # max() keeps the historical "at least as much history as horizon"
+    # intent while flooring at BACKTEST_LOOKBACK_DAYS; with horizon_days
+    # capped at 365 the floor always wins today — the max stays as the honest
+    # invariant should the horizon cap ever be raised.
     history = get_historical_demand(
         db=db,
         item_id=item_uuid,
         location_id=location_uuid,
-        lookback_days=max(body.horizon_days, 90),
+        lookback_days=max(body.horizon_days, BACKTEST_LOOKBACK_DAYS),
         scenario_id=scenario_uuid,
     )
     if not history:
