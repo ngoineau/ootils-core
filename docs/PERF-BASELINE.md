@@ -261,6 +261,16 @@ conditions réseau non contrôlées entre les deux mesures — pas un A/B strict
 Le levier suivant reste côté load, pas côté cascade. Mesure prise pendant
 l'exécution pilote du runbook (`docs/DEMO-RUNBOOK.md`, step 9).
 
+### Première propagation pilote — chemin API (2026-07-07, #414 / RUNBOOK-pilot-propagation)
+
+Détail dans `docs/SCALABILITY.md` §« Measured — FIRST pilot-scale run over the
+API path ». Chiffres bruts : fork baseline 211 K nodes **23,8 s** ; bootstrap
+856 items × 120 j → **220 440 PI en 66,4 s** ; **full recompute API
+464,4 s → 475 nps** (~8× sous le bench engine-direct synthétique — la
+différence EST le coût du chemin HTTP + DB LAN, cf. #193 workers async) ;
+174 769 pénuries item-jour sur le fork ; baseline intacte (0 PI). Exécuté
+fork-first, fork archivé — reproductible via le runbook.
+
 ## Hardware / contexte
 
 - Postgres 16.13 sur VM Debian (192.168.1.176:5432) — infra refondue 2026-05-24
