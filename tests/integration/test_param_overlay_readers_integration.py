@@ -21,7 +21,6 @@ from uuid import uuid4
 from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
 from ootils_core.engine.mrp.loader import load_planning_data
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
-from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine
 from ootils_core.engine.scenario.param_overlay import set_param_override
 
 from .conftest import requires_db
@@ -159,95 +158,15 @@ def test_loader_lead_time_null_component_matches_generated_column(conn):
 
 
 # ---------------------------------------------------------------------------
-# 2. mrp_apics_engine.py — MrpApicsEngine._batch_load_planning_params
+# 2. mrp_apics_engine.py — the APICS write path no longer has its own param
+# reader. Since #423 PR2 (ADR-020 PAS 4) MrpApicsEngine delegates to the core
+# loader (section 1 above), so MrpApicsEngine._batch_load_planning_params was
+# removed; its four cases (baseline-unchanged, scenario-override,
+# NULL-component lead-time recompute, no-legacy-order_multiple-fallback) are
+# subsumed by the load_planning_data tests above — the loader IS the APICS
+# engine's param reader now. The legacy-order_multiple-fallback asymmetry is
+# still pinned on the surviving reader in section 3.
 # ---------------------------------------------------------------------------
-
-
-def test_batch_load_lead_time_null_component_matches_generated_column(conn):
-    """Same NULL-component baseline-parity regression for the APICS reader's
-    lead_time_total_days recompute (#347 PR2)."""
-    item_id = _seed_item(conn)
-    location_id = _seed_location(conn, "readers-apics-lt-null")
-    _seed_planning_params(
-        conn, item_id, location_id,
-        lead_time_sourcing_days=30,
-        lead_time_manufacturing_days=None,
-        lead_time_transit_days=None,
-    )
-    conn.commit()
-
-    engine = MrpApicsEngine(conn)
-    result = engine._batch_load_planning_params(
-        {item_id}, location_id, scenario_id=None
-    )
-
-    assert result[item_id]["lead_time_total_days"] == 30
-
-
-def test_batch_load_planning_params_baseline_unchanged(conn):
-    item_id, location_id = _seed_item_loc_params(conn, safety_stock_qty=10)
-    conn.commit()
-
-    engine = MrpApicsEngine(conn)
-    result = engine._batch_load_planning_params({item_id}, location_id, scenario_id=None)
-
-    assert result[item_id]["safety_stock_qty"] == 10
-
-
-def test_batch_load_planning_params_sees_scenario_override(conn):
-    item_id, location_id = _seed_item_loc_params(conn, safety_stock_qty=10)
-    scenario_id = _seed_scenario(conn)
-    conn.commit()
-
-    set_param_override(
-        conn, scenario_id, item_id, "safety_stock_qty", "99", "watcher-test",
-    )
-    conn.commit()
-
-    engine = MrpApicsEngine(conn)
-    resolved = engine._batch_load_planning_params(
-        {item_id}, location_id, scenario_id=scenario_id
-    )
-    baseline = engine._batch_load_planning_params(
-        {item_id}, location_id, scenario_id=None
-    )
-
-    assert resolved[item_id]["safety_stock_qty"] == Decimal("99")
-    assert baseline[item_id]["safety_stock_qty"] == 10
-
-
-def test_batch_load_does_not_apply_legacy_order_multiple_fallback(conn):
-    """Baseline-parity regression (#347 PR2): the APICS reader selects
-    order_multiple_qty RAW, exactly as the pre-PR2 query did. It must NOT
-    fall back to the legacy `order_multiple` column when order_multiple_qty
-    is NULL — doing so would silently start rounding planned orders on
-    baseline for items whose modern column is unset. The legacy cross-column
-    fallback lives ONLY in LotSizingEngine.get_planning_params (where it
-    predates #347); the two MRP engines' column choice diverges by design."""
-    item_id, location_id = _seed_item_loc_params(
-        conn, order_multiple_qty=None,
-    )
-    conn.execute(
-        "UPDATE item_planning_params SET order_multiple = 6 WHERE item_id = %s",
-        (item_id,),
-    )
-    scenario_id = _seed_scenario(conn)
-    conn.commit()
-
-    set_param_override(
-        conn, scenario_id, item_id, "safety_stock_qty", "50", "watcher-test",
-    )
-    conn.commit()
-
-    engine = MrpApicsEngine(conn)
-    resolved = engine._batch_load_planning_params(
-        {item_id}, location_id, scenario_id=scenario_id
-    )
-
-    # No legacy fallback: order_multiple_qty stays NULL even though the legacy
-    # `order_multiple` column holds 6. The unrelated overlay still applies.
-    assert resolved[item_id]["order_multiple_qty"] is None
-    assert resolved[item_id]["safety_stock_qty"] == Decimal("50")
 
 
 # ---------------------------------------------------------------------------

@@ -123,7 +123,14 @@ class GraphIntegration:
             receipt_node_ids.append(receipt_node_id)
 
             # --- Release node (offset by lead time) ---
-            release_date = record.period_start - timedelta(days=lead_time_days)
+            # The core (#423 PR2) already computed the release bucket, past-due
+            # clamping included, and hands it over on the record; honour it so
+            # the graph matches the core's schedule exactly. Fall back to the
+            # lead-time offset only when no explicit release date is supplied.
+            if record.release_period_start is not None:
+                release_date = record.release_period_start
+            else:
+                release_date = record.period_start - timedelta(days=lead_time_days)
             release_node_id = uuid4()
             self.db.execute(
                 """

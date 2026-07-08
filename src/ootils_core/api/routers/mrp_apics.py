@@ -27,7 +27,12 @@ from pydantic import BaseModel, Field
 from ootils_core.api.auth import require_auth
 from ootils_core.api.dependencies import get_db, resolve_scenario_id, BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
-from ootils_core.engine.mrp.mrp_apics_engine import MrpApicsEngine, MrpRunConfig
+from ootils_core.engine.mrp.mrp_apics_engine import (
+    ADVISORY_CONSUMPTION_WARNING,
+    MrpApicsEngine,
+    MrpRunConfig,
+    UnsupportedBucketGrainError,
+)
 from ootils_core.engine.mrp.forecast_consumer import ForecastConsumer
 from ootils_core.engine.mrp.lot_sizing import LotSizingEngine
 from ootils_core.engine.mrp.llc_calculator import LLCCalculator
@@ -44,11 +49,39 @@ class MrpApicsRunRequest(BaseModel):
     location_id: str = Field(..., min_length=1)
     item_ids: Optional[List[str]] = None
     horizon_days: int = Field(default=90, ge=7, le=365)
-    bucket_grain: str = Field(default="week", pattern="^(day|week|month)$")
+    bucket_grain: str = Field(
+        default="week",
+        pattern="^(day|week|month)$",
+        description=(
+            "The consolidated MRP core plans exclusively in weekly buckets "
+            "(ADR-020); day/month grains were removed with the #423 "
+            "delegation and are rejected with 422 (the pattern still accepts "
+            "them so the 422 carries an explicit message)."
+        ),
+    )
     start_date: Optional[str] = None  # ISO date string
     recalculate_llc: bool = False
-    forecast_strategy: str = Field(default="MAX", pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$")
-    consumption_window_days: int = Field(default=7, ge=1, le=90)
+    forecast_strategy: str = Field(
+        default="MAX",
+        pattern="^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$",
+        description=(
+            "ADVISORY since #423: the delegated core reads "
+            "forecast_consumption_strategy from each item's "
+            "item_planning_params row, not this field. Kept for backward "
+            "compatibility; explicitly setting it is echoed as a warning."
+        ),
+    )
+    consumption_window_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description=(
+            "ADVISORY since #423: the delegated core reads "
+            "consumption_window_days from each item's item_planning_params "
+            "row, not this field. Kept for backward compatibility; "
+            "explicitly setting it is echoed as a warning."
+        ),
+    )
 
 
 class BucketRecordResponse(BaseModel):
@@ -91,6 +124,7 @@ class MrpApicsRunResponse(BaseModel):
     edges_created: int
     elapsed_ms: float
     errors: List[str] = []
+    warnings: List[str] = []
 
 
 class ConsumptionRequest(BaseModel):
@@ -170,9 +204,10 @@ def run_mrp_apics(
     release (date TBD). The route is flagged `deprecated` in the OpenAPI schema
     and every response carries RFC 8594 deprecation headers.
 
-    Processes items from LLC 0 (finished goods) through LLC N (raw materials),
-    consuming forecast, calculating gross-to-net, applying lot sizing and time fences,
-    and exploding dependent demand through the BOM.
+    Since #423 (ADR-020 PAS 4) the underlying engine DELEGATES its whole
+    calculation to the consolidated core (forecast consumption, gross-to-net
+    LLC cascade, lot sizing, BOM explosion); this endpoint only wires the
+    request through and materializes the core's plan into the graph.
     """
     # RFC 8594 — signal deprecation to programmatic clients (the docstring/log
     # only reach humans). No `Sunset` date: removal is not yet scheduled.
@@ -181,6 +216,13 @@ def run_mrp_apics(
     logger.warning(
         "DEPRECATED: /v1/mrp/apics/run called. Use /v1/mrp/run with apics_mode=true instead."
     )
+
+    # Advisory since #423 (review fix): forecast_strategy/consumption_window_days
+    # are no longer fed to the delegated core — warn instead of silently no-op.
+    advisory_warnings: List[str] = []
+    if request.model_fields_set & {"forecast_strategy", "consumption_window_days"}:
+        advisory_warnings.append(ADVISORY_CONSUMPTION_WARNING)
+
     try:
         # Parse scenario
         scenario_id = BASELINE_SCENARIO_ID
@@ -201,6 +243,7 @@ def run_mrp_apics(
             recalculate_llc=request.recalculate_llc,
             forecast_strategy=request.forecast_strategy,
             consumption_window_days=request.consumption_window_days,
+            advisory_warnings=advisory_warnings,
         )
 
         engine = MrpApicsEngine(db)
@@ -219,8 +262,14 @@ def run_mrp_apics(
             edges_created=result.edges_created,
             elapsed_ms=result.elapsed_ms,
             errors=result.errors,
+            warnings=result.warnings,
         )
 
+    except UnsupportedBucketGrainError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=str(e),
+        )
     except Exception as e:
         db.rollback()
         logger.exception("MRP APICS run failed: %s", e)

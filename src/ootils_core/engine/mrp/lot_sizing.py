@@ -339,7 +339,7 @@ class LotSizingEngine:
         - Sets planned_order_releases (same as receipts, offset happens later)
 
         Args:
-            records: List of BucketRecord (from GrossToNetCalculator)
+            records: List of BucketRecord
             planning_params: Planning parameters dict
             lead_time_days: Lead time for release offset
             start_date: Reference date for time fence checks
@@ -459,10 +459,10 @@ class LotSizingEngine:
         without the `_qty` suffix, never added to the overlay whitelist —
         migration 060 decision), not a second scenario resolution. This
         fallback predates #347 in this method and is kept verbatim for
-        baseline parity. It is deliberately NOT mirrored into
-        mrp_apics_engine._batch_load_planning_params (whose pre-PR2 query
-        selected order_multiple_qty raw) — the two engines' column choice
-        diverges by design.
+        baseline parity. Since #423 PR2 this standalone calculator (behind
+        /v1/mrp/lot-sizing) is the ONLY remaining reader of order_multiple_qty:
+        the MRP write path now delegates to the core loader, which reads the
+        legacy `order_multiple` column (see loader.py).
 
         reorder_point_qty, planning_horizon_days: not in ALLOWED_PARAM_FIELDS
         (reorder_point_qty would change graph topology, out of scope for a
@@ -476,12 +476,12 @@ class LotSizingEngine:
         COALESCE(component,0) summed, byte-for-byte the base column's own
         generation expression (a NULL component must not NULL the total).
 
-        NOTE: this method currently has no caller (calculate_lot_size is what
-        mrp_apics_engine.py actually wires); scenario_id is threaded so a
-        future caller resolves overlay-aware by default. This is a stable,
-        intentional state — NOT #347 debt (the chantier's live read paths are
-        all wired; see ADR-025). Kept overlay-composed for parity with its
-        siblings should a caller appear.
+        NOTE: since #423 PR2 the MRP write path delegates to the core, so this
+        method has no production caller; scenario_id is threaded so a future
+        caller (or the /v1/mrp/lot-sizing endpoint, should it start loading DB
+        params) resolves overlay-aware by default. This is a stable, intentional
+        state — NOT #347 debt (the chantier's live read paths are all wired; see
+        ADR-025). Kept overlay-composed for parity with its siblings.
         """
         resolved_ipp_sql = resolved_params_sql("ipp")
         loc_filter = "AND rp.location_id = %(location_id)s" if location_id else ""
