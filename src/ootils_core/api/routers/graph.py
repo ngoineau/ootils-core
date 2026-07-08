@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.store import GraphStore
@@ -60,7 +60,7 @@ def get_graph(
     from_date: Optional[date] = Query(default=None, alias="from"),
     to_date: Optional[date] = Query(default=None, alias="to"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> GraphResponse:
     """Return nodes and edges for the planning graph at (item, location, scenario)."""
@@ -210,7 +210,7 @@ def list_nodes(
     scenario_id: Optional[UUID] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> NodeListResponse:
     """List nodes with optional filters — used for UI dropdowns (e.g. Simulate page)."""
     effective_scenario_id = scenario_id or UUID("00000000-0000-0000-0000-000000000001")
@@ -306,9 +306,11 @@ def list_nodes(
 # reversed by DELETE) — no approval gate for V1, audited via `events` is
 # sufficient. Revisit if firm/unfirm ever needs L2+ governance.
 #
-# governance PR2: not a silent gap re-audited under #392 — this pre-existing
-# decision (reversible, event-audited, deliberately gate-free) stands. Left
-# require_auth-only; explicitly reviewed, not deferred by oversight.
+# governance AN-2 (#392): firm/unfirm now require the `graph:write` scope
+# (they mutate nodes.is_firm). No Decision Ladder HUMAN gate is added: this
+# pre-existing decision (reversible via DELETE, event-audited, deliberately
+# gate-free) stands — the scope floor is the right control level for an L1-class
+# reversible node mutation. Explicitly reviewed, not deferred by oversight.
 # ---------------------------------------------------------------------------
 
 class FirmRequest(BaseModel):
@@ -425,7 +427,7 @@ def firm_node(
     node_id: UUID,
     body: FirmRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("graph:write")),
 ) -> FirmResponse:
     """Firm a PlannedSupply into a Firm Planned Order (is_firm=TRUE, #346).
 
@@ -441,7 +443,7 @@ def unfirm_node(
     node_id: UUID,
     actor: str = Query(..., min_length=1, max_length=200),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("graph:write")),
 ) -> FirmResponse:
     """Un-firm a Firm Planned Order back into an ordinary PlannedSupply
     (is_firm=FALSE, #346).

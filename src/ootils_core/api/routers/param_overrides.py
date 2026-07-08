@@ -32,7 +32,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.db.types import DictRowConnection
 from ootils_core.api.dependencies import get_db
 from ootils_core.engine.scenario.param_overlay import (
@@ -54,8 +54,8 @@ def _param_overlay_enabled() -> bool:
 
 
 def require_param_overlay_enabled() -> None:
-    """FastAPI dependency — checked AFTER ``Depends(require_auth)`` but BEFORE
-    ``Depends(get_db)`` in every endpoint's signature below (FastAPI resolves
+    """FastAPI dependency — checked AFTER ``Depends(require_scope(...))`` but
+    BEFORE ``Depends(get_db)`` in every endpoint's signature below (FastAPI resolves
     synchronous dependencies in signature order and short-circuits on the first
     HTTPException). Auth-first ensures an unauthenticated caller always gets 401
     and cannot distinguish 503-vs-401 to probe the kill switch's operational
@@ -118,7 +118,7 @@ def _row_to_out(row: dict) -> ParamOverrideOut:
 def set_param_override_endpoint(
     scenario_id: UUID,
     body: ParamOverrideIn,
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
     _enabled: None = Depends(require_param_overlay_enabled),
     db: DictRowConnection = Depends(get_db),
 ) -> ParamOverrideOut:
@@ -170,7 +170,7 @@ def set_param_override_endpoint(
 )
 def list_param_overrides_endpoint(
     scenario_id: UUID,
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     _enabled: None = Depends(require_param_overlay_enabled),
     db: DictRowConnection = Depends(get_db),
 ) -> ParamOverridesListResponse:
@@ -199,7 +199,7 @@ def clear_param_override_endpoint(
     field_name: str,
     item_id: UUID = Query(...),
     location_id: Optional[UUID] = Query(default=None),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
     _enabled: None = Depends(require_param_overlay_enabled),
     db: DictRowConnection = Depends(get_db),
 ) -> None:

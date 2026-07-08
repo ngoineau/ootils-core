@@ -41,12 +41,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Deque, Optional
 from uuid import UUID
 
 from anyio import to_thread
@@ -97,6 +98,39 @@ _ADMIN_SCOPE = "admin"
 # path (issue_agent_token.py, PR2) validates against this before insert.
 VALID_ACTOR_KINDS: frozenset[str] = frozenset({"agent", "human", "service"})
 
+# The application-code scope whitelist (ADR-029: "the set of valid scope
+# strings is validated in APPLICATION code, never by a SQL CHECK" — see
+# migration 064's header). This is the single source of truth for what a
+# `scopes TEXT[]` grant is allowed to contain and for what a route may
+# `require_scope(...)`. Deliberately NOT enforced by a DB CHECK so new scopes
+# ship with the code that enforces them, at the same review boundary, with no
+# schema churn. ``admin`` is the superset that satisfies every require_scope
+# check (see ``Principal.has_scope``). Kept in sync with the token-minting
+# path (scripts/demo_e2e.py, issue_agent_token.py) and ROADMAP AN-2 (#392).
+VALID_SCOPES: frozenset[str] = frozenset(
+    {
+        "read",
+        "ingest",
+        "calc:run",
+        "graph:write",
+        "scenario:write",
+        "recommend:draft",
+        "recommend:approve",
+        "admin",
+    }
+)
+
+# Sliding-window length for the per-token rate limit (api_tokens.rate_per_min).
+_RATE_WINDOW_SECONDS = 60.0
+
+# Hard cap on the number of token_id buckets the rate counter tracks. Same
+# rationale as _CACHE_MAX_ENTRIES: a bounded memory ceiling with LRU eviction,
+# not a security control. Sized well above realistic live-token churn; if more
+# than this many DISTINCT tokens are rate-tracked concurrently, the
+# least-recently-seen bucket is evicted (its window resets — a mild
+# under-count, never unbounded growth).
+_RATE_MAX_ENTRIES = 10_000
+
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -107,6 +141,8 @@ class Principal:
     ``token_id`` is None for the legacy single token (it has no DB row).
     ``is_legacy`` distinguishes that synthetic principal from a minted one.
     ``scopes`` is the authoritative capability set; ``'admin'`` is a superset.
+    ``rate_per_min`` is the per-token budget (api_tokens.rate_per_min); None
+    means no cap (and the legacy token is always None → uncapped).
     """
 
     token_id: Optional[UUID]
@@ -114,6 +150,7 @@ class Principal:
     actor_kind: str  # 'agent' | 'human' | 'service'
     scopes: frozenset[str]
     is_legacy: bool
+    rate_per_min: Optional[int] = None
 
     def has_scope(self, scope: str) -> bool:
         return _ADMIN_SCOPE in self.scopes or scope in self.scopes
@@ -169,12 +206,14 @@ def principal_from_row(row: dict) -> Principal:
     revoked_at IS NULL AND not-expired by the SELECT). ``scopes`` may arrive as
     a Python list (psycopg maps ``TEXT[]``) or None → empty frozenset."""
     raw_scopes = row.get("scopes") or []
+    raw_rate = row.get("rate_per_min")
     return Principal(
         token_id=UUID(str(row["token_id"])),
         name=row["name"],
         actor_kind=row["actor_kind"],
         scopes=frozenset(raw_scopes),
         is_legacy=False,
+        rate_per_min=int(raw_rate) if raw_rate is not None else None,
     )
 
 
@@ -188,6 +227,7 @@ def legacy_principal() -> Principal:
         actor_kind="human",
         scopes=frozenset({_ADMIN_SCOPE}),
         is_legacy=True,
+        rate_per_min=None,
     )
 
 
@@ -308,6 +348,87 @@ _token_cache = _TokenCache()
 
 
 # ---------------------------------------------------------------------------
+# Per-token sliding-window rate counter (clock injectable for tests)
+# ---------------------------------------------------------------------------
+
+
+class _RateCounter:
+    """Sliding-window request counter keyed by ``token_id`` (api_tokens.
+    rate_per_min, #392 AN-2).
+
+    Records one monotonic timestamp per allowed request in a per-token deque,
+    drops timestamps older than ``window_seconds`` on each touch, and refuses
+    once the surviving count reaches the token's limit — returning the seconds
+    until the oldest in-window request ages out (the ``Retry-After`` value).
+
+    PER-WORKER, NOT GLOBAL: like ``_TokenCache``, this lives in one process's
+    memory. Under N uvicorn workers a token's effective ceiling is N ×
+    rate_per_min, because each worker counts only the requests it served. This
+    is a deliberate V1 trade-off (no shared store on the hot auth path); a
+    global limiter would need Redis/DB coordination. Documented so the budget
+    is understood as approximate, not exact.
+
+    SIZE-bounded (``max_entries``, LRU eviction) for the same reason the cache
+    is: the keyspace (token_id) is bounded by live tokens, but eviction caps
+    worst-case memory regardless. Evicting an active token's bucket resets its
+    window (a mild under-count), never unbounded growth — a memory ceiling,
+    not a security control.
+
+    Guarded by a plain ``threading.Lock`` because enforcement runs inside
+    ``resolve_principal``, itself reachable from the worker threadpool (a
+    minted-token cache-miss dispatches to ``to_thread``). The clock is injected
+    (``time.monotonic`` by default) so tests drive the window without sleeping.
+    """
+
+    __slots__ = ("_store", "_lock", "_window", "_clock", "_max_entries")
+
+    def __init__(
+        self,
+        window_seconds: float = _RATE_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        max_entries: int = _RATE_MAX_ENTRIES,
+    ) -> None:
+        self._store: OrderedDict[UUID, Deque[float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self._window = window_seconds
+        self._clock = clock
+        self._max_entries = max_entries
+
+    def check(self, token_id: UUID, limit: int) -> Optional[float]:
+        """Record one request for ``token_id`` under ``limit`` requests per
+        window. Return None when the request is allowed; otherwise the seconds
+        until a slot frees (Retry-After), never negative.
+
+        A rejected request is NOT recorded (it does not extend the window), so
+        a caller that backs off exactly ``Retry-After`` seconds is admitted."""
+        now = self._clock()
+        cutoff = now - self._window
+        with self._lock:
+            bucket = self._store.get(token_id)
+            if bucket is None:
+                bucket = deque()
+                self._store[token_id] = bucket
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= limit:
+                self._store.move_to_end(token_id)
+                return max(bucket[0] + self._window - now, 0.0)
+            bucket.append(now)
+            self._store.move_to_end(token_id)
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)
+            return None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+
+# Module-level counter, same non-anti-pattern rationale as _token_cache.
+_rate_counter = _RateCounter()
+
+
+# ---------------------------------------------------------------------------
 # Minted-token DB lookup (rare — cache-miss only)
 # ---------------------------------------------------------------------------
 
@@ -394,7 +515,7 @@ def _select_token_row(conn: DictRowConnection, token_hash: str) -> Optional[dict
     """SELECT the live token row (not revoked, not expired) for a hash."""
     return conn.execute(
         """
-        SELECT token_id, name, actor_kind, scopes, token_prefix
+        SELECT token_id, name, actor_kind, scopes, token_prefix, rate_per_min
         FROM api_tokens
         WHERE token_hash = %s
           AND revoked_at IS NULL
@@ -474,6 +595,39 @@ def _enforce_fleet_kill_switch(principal: Principal, client_id: str) -> None:
         )
 
 
+def _enforce_rate_limit(principal: Principal, client_id: str) -> None:
+    """429 when a minted token exceeds its ``rate_per_min`` budget (#392 AN-2).
+
+    Exemptions, both fail-open by design (a missing budget is "uncapped", never
+    "blocked"):
+      * the legacy token (``token_id is None``) — the shared bootstrap
+        credential is never rate-limited, preserving pre-#392 behaviour;
+      * any minted token whose ``rate_per_min`` is NULL — no cap configured.
+
+    The Retry-After header is whole seconds (HTTP spec), floored at 1 so a
+    sub-second remainder never advertises "retry immediately". Per-worker, not
+    global — see ``_RateCounter``."""
+    if principal.token_id is None or principal.rate_per_min is None:
+        return
+    retry_after = _rate_counter.check(principal.token_id, principal.rate_per_min)
+    if retry_after is None:
+        return
+    retry_seconds = max(1, math.ceil(retry_after))
+    logger.warning(
+        "auth.rate_limited name=%s token_id=%s prefix=%s limit=%s retry_after=%s",
+        principal.name,
+        principal.token_id,
+        client_id,
+        principal.rate_per_min,
+        retry_seconds,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Rate limit exceeded",
+        headers={"Retry-After": str(retry_seconds)},
+    )
+
+
 async def resolve_principal(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
     request: Request = None,  # type: ignore[assignment]  # FastAPI injects; Optional confuses dep resolver
@@ -532,6 +686,10 @@ async def resolve_principal(
         request.state.client_id = client_id
 
     _enforce_fleet_kill_switch(principal, client_id)
+    # Rate limit LAST — after the kill switch (a disabled fleet answers 503
+    # without spending a rate slot) and after request.state is posed (a 429 is
+    # audited with full attribution, same as the kill-switch 503).
+    _enforce_rate_limit(principal, client_id)
 
     return principal
 
@@ -543,10 +701,13 @@ async def require_auth(
     """Backward-compatible dependency — resolves the principal (populating
     ``request.state``) and RETURNS THE TOKEN STRING, exactly as before #392.
 
-    Every one of the ~24 ``_token: str = Depends(require_auth)`` routers keeps
-    its return contract; the new capability (principal on request.state) rides
-    alongside it. Kept as a thin alias over ``resolve_principal`` so there is a
-    single authentication implementation.
+    As of AN-2 (#392, PR2a) every mounted ``/v1/*`` endpoint has migrated to
+    ``Depends(require_scope("..."))``; ``require_auth`` is retained as a thin
+    alias over ``resolve_principal`` for the remaining callers (tests that
+    override it via ``dependency_overrides``, and the unmounted models module
+    ``atp/api.py``). It preserves the token-string return contract. New code
+    should depend on ``require_scope`` (or ``resolve_principal`` directly), not
+    on this alias.
     """
     await resolve_principal(credentials=credentials, request=request)
     # credentials is non-None here (resolve_principal raises 401 otherwise).
@@ -566,7 +727,15 @@ def require_scope(scope: str) -> Callable[..., Awaitable[Principal]]:
     An overridden ``resolve_principal`` (as tests do for ``require_auth``) that
     returns a Principal flows straight through; only a None/absent principal
     yields 401.
+
+    ``scope`` is validated against ``VALID_SCOPES`` at factory-call time —
+    routers wire ``Depends(require_scope("..."))`` at import, so a typo'd or
+    retired scope fails LOUDLY at app import, never silently at request time.
     """
+    if scope not in VALID_SCOPES:
+        raise ValueError(
+            f"unknown scope {scope!r}; valid scopes are {sorted(VALID_SCOPES)}"
+        )
 
     async def _dependency(
         principal: Optional[Principal] = Depends(resolve_principal),

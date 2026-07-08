@@ -17,7 +17,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.dq.engine import run_dq
@@ -74,11 +74,11 @@ class DQIssuesResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # POST /v1/dq/run/{batch_id}
 # ─────────────────────────────────────────────────────────────
-# governance PR2: ingest scope — deferred. #392 security-review audit
-# (PR1): this runs deterministic L1/L2 checks and writes only into
-# data_quality_issues (staging-side diagnostics), never into canonical
-# master data — not an apply-to-baseline action, unlike staging/approve.py.
-# Left require_auth-only; not the L3 class this chantier targets.
+# governance AN-2 (#392, PR2a): scoped `calc:run`. This runs deterministic
+# L1/L2 checks and writes only into data_quality_issues (staging-side
+# diagnostics), never into canonical master data — no Decision Ladder human
+# gate. But a DQ scan is a costly run ("deterministic != free"), so it sits
+# behind calc:run, not read: a read-only token cannot launch a scan.
 
 @router.post(
     "/run/{batch_id}",
@@ -89,7 +89,7 @@ class DQIssuesResponse(BaseModel):
 def run_dq_batch(
     batch_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> DQRunResponse:
     # Verify batch exists
     batch = db.execute(
@@ -140,7 +140,7 @@ def list_issues(
     limit: int = Query(default=200, ge=1, le=1000, description="Max results"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> DQIssuesResponse:
     conditions: list[str] = ["i.resolved = FALSE"]
     params: list[Any] = []
@@ -219,7 +219,7 @@ def list_issues(
 def get_batch_dq(
     batch_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> DQBatchResponse:
     batch = db.execute(
         "SELECT batch_id, entity_type, dq_status, total_rows FROM ingest_batches WHERE batch_id = %s",
@@ -331,10 +331,10 @@ class AgentRunsResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # POST /v1/dq/agent/run/{batch_id}
 # ─────────────────────────────────────────────────────────────
-# governance PR2: ingest scope — deferred. #392 security-review audit
-# (PR1): the agent enriches data_quality_issues (impact_score, LLM
-# insights) — staging-side diagnostics only, no canonical write. Same
-# reasoning as /run/{batch_id} above. Left require_auth-only.
+# governance AN-2 (#392, PR2a): scoped `calc:run`. The agent enriches
+# data_quality_issues (impact_score, LLM insights) — staging-side diagnostics
+# only, no canonical write, so no human gate. Same "deterministic != free"
+# reasoning as /run/{batch_id} above: a costly run, behind calc:run.
 
 @router.post(
     "/agent/run/{batch_id}",
@@ -348,7 +348,7 @@ class AgentRunsResponse(BaseModel):
 def run_agent_batch(
     batch_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> AgentRunResponse:
     # Verify batch exists
     batch = db.execute(
@@ -392,7 +392,7 @@ def run_agent_batch(
 def get_agent_report(
     batch_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> AgentReportResponse:
     batch = db.execute(
         "SELECT batch_id, entity_type FROM ingest_batches WHERE batch_id = %s",
@@ -494,7 +494,7 @@ def list_agent_runs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> AgentRunsResponse:
     count_row = db.execute(
         "SELECT COUNT(*) AS cnt FROM dq_agent_runs"

@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.pyramide import PyramideError, PyramideRunConfig, PyramideRunner, SUPPORTED_METHODS
@@ -293,7 +293,7 @@ class PyramideSnapshotDiffOut(BaseModel):
 def create_pyramide_run(
     body: PyramideRunRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> PyramideRunOut:
     body.method = body.method.upper()
     if body.method not in SUPPORTED_METHODS:
@@ -411,7 +411,7 @@ def create_pyramide_run(
 def create_hierarchical_run(
     body: HierarchicalRunRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> HierarchicalRunResultOut:
     """Forecast and reconcile ONE summing block of the hierarchy registry
     (HierarchicalRunner, #348). Every level is persisted as its own
@@ -519,7 +519,7 @@ def create_hierarchical_run(
 def get_pyramide_run(
     run_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> PyramideRunOut:
     summary = fetch_run_summary(db, run_id)
     if summary is None:
@@ -540,7 +540,7 @@ def get_pyramide_run(
 def get_pyramide_run_result(
     run_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> PyramideRunResultOut:
     summary = fetch_run_summary(db, run_id)
     values = fetch_run_values(db, run_id)
@@ -560,7 +560,7 @@ def get_pyramide_run_result(
 def commit_pyramide_run(
     run_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> PyramideCommitOut:
     try:
         summary = commit_run(db, run_id)
@@ -586,7 +586,7 @@ def commit_pyramide_run(
 def list_pyramide_snapshots(
     limit: int = Query(default=100, ge=1, le=500),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> PyramideSnapshotListOut:
     snapshots = list_snapshots(db, limit=limit)
     return PyramideSnapshotListOut(
@@ -604,7 +604,7 @@ def diff_pyramide_snapshots(
     snapshot_id: UUID,
     compare_to: UUID = Query(...),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> PyramideSnapshotDiffOut:
     base_values = fetch_snapshot_values(db, snapshot_id)
     compare_values = fetch_snapshot_values(db, compare_to)

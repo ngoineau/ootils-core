@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from psycopg import sql
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 
@@ -41,7 +41,7 @@ def get_planning_params(
     item_id: Optional[str] = Query(default=None, description="Filter by item UUID"),
     location_id: Optional[str] = Query(default=None, description="Filter by location UUID"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> PlanningParamsResponse:
     """Return the latest active planning parameters per (item, location)."""
     # Build query — get most recent params per (item_id, location_id)

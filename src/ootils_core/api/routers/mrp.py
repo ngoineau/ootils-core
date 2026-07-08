@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
@@ -322,7 +322,7 @@ def _clear_existing_planned_supply(
 def run_mrp(
     body: MrpRunRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> MrpRunResponse | MrpRunResponseApics:
     """
     Unified MRP endpoint with optional APICS mode.

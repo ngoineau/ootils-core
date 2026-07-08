@@ -67,9 +67,10 @@ class TestATPCheckValidation:
     """422 boundary tests for POST /v1/atp/check."""
 
     def test_atp_check_requires_auth_dependency_configured(self):
-        """ATP routers module exposes require_auth — used as endpoint dependency."""
+        """ATP routers module exposes require_scope — the AN-2 (#392) scope
+        dependency wired on every endpoint (calc:run for the ATP/CTP compute)."""
         from ootils_core.atp import routers
-        assert hasattr(routers, "require_auth")
+        assert hasattr(routers, "require_scope")
 
     def test_atp_check_validation_quantity_zero(self):
         client = _make_client_no_db()
@@ -114,7 +115,7 @@ class TestATPCheckValidation:
 class TestCTPCheckValidation:
     def test_ctp_check_requires_auth_dependency_configured(self):
         from ootils_core.atp import routers
-        assert hasattr(routers, "require_auth")
+        assert hasattr(routers, "require_scope")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -125,7 +126,7 @@ class TestCTPCheckValidation:
 class TestCTPSimulateValidation:
     def test_ctp_simulate_requires_auth_dependency_configured(self):
         from ootils_core.atp import routers
-        assert hasattr(routers, "require_auth")
+        assert hasattr(routers, "require_scope")
 
     def test_ctp_simulate_validation_max_days_too_high(self):
         client = _make_client_no_db()

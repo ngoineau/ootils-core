@@ -16,7 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Path
 from pydantic import BaseModel, ConfigDict, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.crp.engine import CRPEngine
 from ootils_core.db.types import DictRowConnection
@@ -120,7 +120,7 @@ async def calculate_crp(
     body: CRPCalculateRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> CRPCalculateResponse:
     """
     Calculate CRP load profiles and detect overloads.
@@ -235,7 +235,7 @@ async def get_load_profile(
     horizon_days: int = Query(default=90, ge=1, le=365, description="Planning horizon in days"),
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> LoadProfileOut:
     """
     Get load profile for a specific work center.
@@ -313,7 +313,7 @@ async def get_overloads(
     work_center_ids: Optional[str] = Query(None, description="Comma-separated list of work center IDs to filter"),
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> CRPOverloadsResponse:
     """
     List all detected overloads.
@@ -434,7 +434,7 @@ async def suggest_resolutions(
     body: CRPSuggestResolutionsRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> CRPSuggestResolutionsResponse:
     """
     Suggest resolutions for CRP overloads.

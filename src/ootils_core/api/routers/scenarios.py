@@ -36,7 +36,7 @@ from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import Principal, require_auth, require_scope, resolve_gate_kind
+from ootils_core.api.auth import Principal, require_scope, resolve_gate_kind
 from ootils_core.api.dependencies import get_db, BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.recommendation.state_machine import (
@@ -70,7 +70,7 @@ class ScenariosListResponse(BaseModel):
 @router.get("", response_model=ScenariosListResponse)
 def list_scenarios(
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     status_filter: Optional[str] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -115,7 +115,7 @@ def list_scenarios(
 def get_scenario(
     scenario_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> ScenarioOut:
     row = db.execute("SELECT * FROM scenarios WHERE scenario_id = %s", (scenario_id,)).fetchone()
     if not row:
@@ -135,7 +135,7 @@ def get_scenario(
 def delete_scenario(
     scenario_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
 ) -> None:
     if scenario_id == BASELINE_SCENARIO_ID:
         raise HTTPException(status_code=400, detail="Cannot delete the baseline scenario")
@@ -234,7 +234,7 @@ def _load_scenario_or_404(scenario_id: UUID, db: DictRowConnection) -> dict:
 def diff_scenario(
     scenario_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     baseline_id: UUID = Query(default=BASELINE_SCENARIO_ID),
 ) -> ScenarioDiffResponse:
     """Field-level diff of a scenario vs a baseline (latest completed calc_runs).
@@ -470,7 +470,7 @@ def _engine_unavailable_response(exc: Exception) -> HTTPException:
 )
 def create_sandbox_scenario(
     body: SandboxScenarioCreateRequest,
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
 ) -> SandboxScenarioOut:
     """Create a fresh ephemeral what-if scenario in the engine.
 
@@ -525,7 +525,7 @@ def create_sandbox_scenario(
     response_model=SandboxScenariosListResponse,
 )
 def list_sandbox_scenarios(
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> SandboxScenariosListResponse:
     """List all ephemeral scenarios currently in the engine's RAM.
 
@@ -560,7 +560,7 @@ def list_sandbox_scenarios(
 @router.delete("/sandbox/{scenario_id}", status_code=204)
 def delete_sandbox_scenario(
     scenario_id: UUID,
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
 ) -> None:
     """Drop an ephemeral scenario from the engine's RAM immediately.
 

@@ -10,7 +10,20 @@ import psycopg
 import pytest
 from fastapi import HTTPException
 
+from ootils_core.api.auth import Principal
 from ootils_core.mps.api import ApproveMPSRequest, approve_mps_node
+
+# AN-2 (#392): approve_mps_node now takes a Principal (require_scope
+# "recommend:approve") instead of a raw token string. Its `name` is used as the
+# audit actor fallback when the body carries no approved_by — mirroring the old
+# `token` value so these unit tests keep their exact assertions.
+_HUMAN_PRINCIPAL = Principal(
+    token_id=None,
+    name="token-user",
+    actor_kind="human",
+    scopes=frozenset({"recommend:approve"}),
+    is_legacy=False,
+)
 
 
 def _make_result(row):
@@ -50,7 +63,7 @@ def test_approve_draft_records_review_and_approval():
         mps_id=mps_id,
         body=ApproveMPSRequest(approved_by="director", notes="go"),
         db=db,
-        token="token-user",
+        principal=_HUMAN_PRINCIPAL,
     ))
 
     assert resp.mps_id == mps_id
@@ -88,7 +101,7 @@ def test_approve_reviewed_preserves_reviewer():
         mps_id=mps_id,
         body=ApproveMPSRequest(approved_by="director"),
         db=db,
-        token="token-user",
+        principal=_HUMAN_PRINCIPAL,
     ))
 
     assert resp.previous_status == "REVIEWED"
@@ -116,7 +129,7 @@ def test_approve_already_approved_is_idempotent():
         mps_id=mps_id,
         body=ApproveMPSRequest(),
         db=db,
-        token="token-user",
+        principal=_HUMAN_PRINCIPAL,
     ))
 
     assert resp.previous_status == "APPROVED"
@@ -134,7 +147,7 @@ def test_approve_not_found_returns_404():
             mps_id=mps_id,
             body=ApproveMPSRequest(),
             db=db,
-            token="token-user",
+            principal=_HUMAN_PRINCIPAL,
         ))
 
     assert exc.value.status_code == 404
@@ -157,7 +170,7 @@ def test_approve_released_returns_409():
             mps_id=mps_id,
             body=ApproveMPSRequest(),
             db=db,
-            token="token-user",
+            principal=_HUMAN_PRINCIPAL,
         ))
 
     assert exc.value.status_code == 409

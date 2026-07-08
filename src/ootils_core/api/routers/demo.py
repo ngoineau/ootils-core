@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.demo.phase1 import run_phase1_demo_from_env
@@ -66,7 +66,9 @@ def _json_safe(value: Any) -> Any:
     summary="Run Phase 1 planning demo",
     description="Run the live Forecast -> MPS -> Approve -> MRP -> CRP -> ATP demo flow with unique seeded demo data.",
 )
-def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
+def run_phase1_demo_endpoint(
+    _principal: Principal = Depends(require_scope("admin")),
+) -> dict:
     """Run the executable Phase 1 demo flow."""
     try:
         return _json_safe(run_phase1_demo_from_env())
@@ -87,7 +89,7 @@ def run_phase1_demo_endpoint(token: str = Depends(require_auth)) -> dict:
 def list_phase1_demo_runs(
     limit: int = Query(default=5, ge=1, le=50),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> DemoRunListResponse:
     rows = db.execute(
         """

@@ -285,11 +285,11 @@ class TestRouterConfiguration:
 
     def test_simulate_router_uses_auth(self):
         from ootils_core.api.routers import simulate
-        assert hasattr(simulate, "require_auth")
+        assert hasattr(simulate, "require_scope")
 
     def test_events_router_uses_auth(self):
         from ootils_core.api.routers import events
-        assert hasattr(events, "require_auth")
+        assert hasattr(events, "require_scope")
 
 
 if __name__ == "__main__":

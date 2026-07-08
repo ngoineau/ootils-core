@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from psycopg import sql
 from pydantic import BaseModel, Field, field_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.ghost.ghost_engine import run_ghost
@@ -157,7 +157,7 @@ def _validate_membership(ghost_type: str, members: list[GhostMemberInput]) -> li
 def ingest_ghost(
     body: IngestGhostRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> dict[str, Any]:
     """
     Upsert ghost + members. Validates membership constraints before any write.
@@ -323,7 +323,7 @@ def list_ghosts(
     scenario_id: Optional[UUID] = None,
     ghost_status: Optional[str] = None,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> dict[str, Any]:
     """Return all ghosts filtered by optional ghost_type, scenario_id, status.
 
@@ -422,7 +422,7 @@ def list_ghosts(
 def get_ghost(
     ghost_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> dict[str, Any]:
     """Return a single ghost with its members and graph node."""
     g = db.execute(
@@ -511,7 +511,7 @@ def run_ghost_endpoint(
     ghost_id: UUID,
     body: GhostRunRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> dict[str, Any]:
     """
     Execute ghost logic (phase_transition or capacity_aggregate) over [from_date, to_date].

@@ -21,7 +21,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.mps.engine import AggregateDemandEngine
@@ -271,7 +271,7 @@ def _resolve_scenario_uuid(db: DictRowConnection, scenario_id_str: str | None) -
 async def aggregate_demand(
     body: AggregateDemandRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> AggregateDemandResponse:
     """
     Aggregate demand and create MPS nodes.
@@ -430,7 +430,7 @@ async def list_mps_nodes(
     status: Optional[str] = Query(default=None, pattern="^(DRAFT|REVIEWED|APPROVED|RELEASED)$"),
     limit: int = Query(default=100, ge=1, le=1000),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> MPSNodeListResponse:
     """
     List MPS nodes with optional filters.
@@ -537,7 +537,7 @@ async def list_mps_nodes(
 async def get_mps_node(
     mps_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> MPSNodeDetailOut:
     """
     Retrieve a specific MPS node by ID.
@@ -629,7 +629,7 @@ async def get_mps_node(
 async def capacity_check(
     body: CapacityCheckRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> CapacityCheckResponse:
     """
     Check capacity feasibility for MPS nodes before release.
@@ -718,7 +718,7 @@ async def capacity_check(
 async def suggest_adjustments(
     mps_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> List[AdjustmentSuggestionOut]:
     """
     Get adjustment suggestions for a specific MPS node.
@@ -790,13 +790,13 @@ class ApproveMPSResponse(BaseModel):
     notes: Optional[str]
 
 
-# governance PR2: recommend:approve or a dedicated mps:approve scope —
-# deferred. #392 security-review audit (PR1): this transitions an MPS node
-# DRAFT/REVIEWED -> APPROVED, gating entry into /promote-to-mrp below. It does
-# NOT itself write canonical master data (unlike staging/approve.py, which is
-# gated in this same PR1) — the write-to-baseline happens one step later, at
-# promote-to-mrp. Scoped as require_auth-only for now; not a silent gap, an
-# explicitly deferred one, tracked alongside promote-to-mrp below.
+# governance AN-2 (#392, PR2a): now scoped `recommend:approve` — this
+# transitions an MPS node DRAFT/REVIEWED -> APPROVED, gating entry into
+# /promote-to-mrp below. It is an operational approval, so it rides the same
+# approval scope as scenarios/promote and recommendations' human-only targets;
+# an agent token (read + recommend:draft) is refused with 403. No separate
+# Decision Ladder human GATE is stacked here (the write-to-baseline happens one
+# step later, at promote-to-mrp) — the scope floor is the control level for V1.
 @router.post(
     "/{mps_id}/approve",
     response_model=ApproveMPSResponse,
@@ -813,7 +813,7 @@ async def approve_mps_node(
     mps_id: UUID,
     body: ApproveMPSRequest,
     db: DictRowConnection = Depends(get_db),
-    token: str = Depends(require_auth),
+    principal: Principal = Depends(require_scope("recommend:approve")),
 ) -> ApproveMPSResponse:
     """Approve an MPS node for MRP promotion."""
     row = db.execute(
@@ -844,7 +844,7 @@ async def approve_mps_node(
             detail=f"MPS node cannot be approved from status {previous_status}",
         )
 
-    approver = body.approved_by or token
+    approver = body.approved_by or principal.name
     reviewer = body.reviewed_by or row["reviewed_by"] or approver
     now = datetime.now(timezone.utc)
     notes = body.notes if body.notes is not None else row["notes"]
@@ -932,18 +932,16 @@ class PromoteToMRPResponse(BaseModel):
     crp_peak_load_date: Optional[date] = Field(None, description="Date of peak load (if CRP triggered)")
 
 
-# governance PR2: recommend:approve or a dedicated mps:approve scope +
-# Decision Ladder human gate — deferred. #392 security-review audit (PR1):
-# this DOES write planned_supply (creates a scheduled receipt on the MPS
-# node's own scenario — since #398, no longer forced onto baseline) and flips
-# the MPS node to the terminal RELEASED status, an apply-to-plan action in the
-# same family as staging/approve.py (gated in this PR1) and scenarios/promote
-# (gated in PR1's prior pass). A promotion of a baseline MPS still writes
-# baseline; a fork MPS writes its fork, so the governance gate matters equally
-# on both. Left require_auth-only here deliberately: closing it needs the same
-# scope+human-gate stacking pattern already applied to
-# staging/scenarios/recommendations, tracked as PR2 follow-up rather than
-# folded silently into this pass.
+# governance AN-2 (#392, PR2a): now scoped `recommend:approve`. This DOES
+# write planned_supply (creates a scheduled receipt on the MPS node's own
+# scenario — since #398, no longer forced onto baseline) and flips the MPS node
+# to the terminal RELEASED status, an apply-to-plan action in the same family
+# as staging/approve.py and scenarios/promote (both `recommend:approve`). A
+# promotion of a baseline MPS still writes baseline; a fork MPS writes its fork,
+# so the approval scope matters equally on both. A future Decision Ladder human
+# GATE (stacking the actor_kind check on top of the scope, as recommendations'
+# HUMAN_ONLY_TARGETS do) can be added if promote-to-mrp is reclassified L3+;
+# for V1 the approval scope is the control level.
 @router.post(
     "/{mps_id}/promote-to-mrp",
     response_model=PromoteToMRPResponse,
@@ -968,7 +966,7 @@ async def promote_to_mrp(
     mps_id: UUID,
     body: PromoteToMRPRequest,
     db: DictRowConnection = Depends(get_db),
-    token: str = Depends(require_auth),
+    principal: Principal = Depends(require_scope("recommend:approve")),
 ) -> PromoteToMRPResponse:
     """
     Promote MPS to MRP and trigger BOM explosion.
@@ -1005,7 +1003,7 @@ async def promote_to_mrp(
         mps_id=mps_id,
         explode_components=body.explode_components,
         dry_run=body.dry_run,
-        user_id=token,  # Use token as user identifier for audit
+        user_id=principal.name,  # principal identity for audit (AN-2 #392)
     )
     
     # CRP integration: trigger CRP calculation if requested

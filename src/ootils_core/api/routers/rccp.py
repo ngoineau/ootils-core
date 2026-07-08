@@ -37,7 +37,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 
@@ -188,7 +188,7 @@ def get_rccp(
     grain: str = Query(default="week", description="Granularité : day | week | month."),
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> RCCPResponse:
     """RCCP endpoint — charge vs capacité par bucket."""
 

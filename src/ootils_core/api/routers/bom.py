@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 
@@ -320,7 +320,7 @@ def _recalculate_llc(db: DictRowConnection, affected_item_ids: list[UUID]) -> in
 def ingest_bom(
     body: IngestBOMRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestBOMResponse:
     """Import a complete BOM for a parent item. Upsert with cycle detection."""
 
@@ -457,7 +457,7 @@ def ingest_bom(
 def get_bom(
     parent_external_id: str,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> BOMResponse:
     """Return the active BOM for a given item."""
     parent_item_id = _resolve_item_id(db, parent_external_id)
@@ -503,7 +503,7 @@ def get_bom(
 def explode_bom(
     body: ExplodeRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> ExplodeResponse:
     """
     MRP explosion: compute gross and net requirements for a given quantity of a parent item.
