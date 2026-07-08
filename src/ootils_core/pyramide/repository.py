@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Sequence
+from typing import Any, Sequence
 from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
@@ -16,7 +16,13 @@ from ootils_core.db.types import DictRowConnection
 from .accuracy import AccuracyReport
 from .fva import FvaResult, compute_fva, resolve_season_length
 from .models import PyramideRunResult
-from .routing import RoutingDecision
+from .routing import (
+    RoutingDecision,
+    RoutingThresholds,
+    SeriesFeatures,
+    route,
+    seasonal_strength,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +86,14 @@ class PyramideRunSummary:
     # demand_history ingest age exceeded the freshness SLA. FALSE means
     # "not proven stale at run time", never "proven fresh".
     stale_demand: bool
+    # Routing provenance (migration 058, DEM-1): the head/tail router's
+    # recommendation for this series when the run was auto-routed. All three
+    # are NULL together for a non-routed run (method requested explicitly) —
+    # migration 058's all-or-none CHECK. routed_method is the RECOMMENDATION,
+    # not necessarily what ran (``method`` stays the executed contract).
+    routed_method: str | None = None
+    routed_level: str | None = None
+    routing_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -645,6 +659,274 @@ def get_historical_demand_totals_by_items(
     return {str(row["item_id"]): Decimal(str(row["total_qty"])) for row in rows}
 
 
+# ---------------------------------------------------------------------------
+# Head/tail routing features (DEM-1) — the CALLER side of the DB-free router.
+# ---------------------------------------------------------------------------
+# routing.py is DB-free by contract: it only sees a SeriesFeatures computed by
+# the caller. These builders are that caller — the ONLY place that turns raw
+# demand_history / item_asp facts into the router's feature vector.
+_ZERO_DEC = Decimal("0")
+
+# Season length of the seasonal_strength probe (routing.seasonal_strength).
+# V1 APPROXIMATION: 7 = weekly seasonality on the DAILY booking series. The
+# series is sparse (missing days absent, not zero-filled) so the probe is
+# positional, not calendar-aligned — it UNDER-states the seasonal signal, which
+# only ever routes a series AWAY from the head branch (conservative: a real head
+# series is never mis-forecast as tail because of this). The honest annual
+# season needs the granularity re-aggregation of #433 (get_historical_demand
+# returns daily rows and never re-buckets); until then this is the documented
+# proxy the router feeds on.
+_ROUTING_SEASON_LENGTH = 7
+
+
+def _features_from_daily_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    annual_value: Decimal | None,
+    aggregate_signal_ok: bool,
+) -> SeriesFeatures:
+    """Turn a sparse daily booking series (rows of demand_date + total_qty,
+    date ASC) into the router's SeriesFeatures. Shared by the leaf and node
+    builders so the feature arithmetic is defined exactly once.
+
+    - history_depth_days: calendar span first..last booking (inclusive).
+    - zero_ratio: (span days − days that carry a booking) / span days — the
+      share of zero-demand days over the observed span. NOTE: bookings are
+      lumpy in calendar days even for high-volume items, so this daily ratio
+      runs high; RoutingThresholds.intermittent_zero_ratio is the calibration
+      knob, and the honest bucket-level intermittence awaits #433.
+    - seasonal_strength: routing.seasonal_strength over the quantities.
+    - lifecycle stays None: the schema carries no item-master lifecycle flag,
+      and inferring launch/end_of_life from a demand-recency cutoff would
+      hardcode a business constant the router deliberately keeps out of the
+      feature layer. classify() already routes a short history to cold-start
+      via history_depth_days, so nothing is lost by leaving it unknown.
+    - has_twin stays False: there is no twin/predecessor registry yet.
+    """
+    if not rows:
+        # No booking at all -> cold-start (classify() decides on
+        # history_depth_days=0 before any other axis). zero_ratio is a neutral
+        # 0: there is no span to measure intermittence over.
+        return SeriesFeatures(
+            history_depth_days=0,
+            zero_ratio=_ZERO_DEC,
+            annual_value=annual_value,
+            seasonal_strength=None,
+            aggregate_signal_ok=aggregate_signal_ok,
+        )
+    first_date = rows[0]["demand_date"]
+    last_date = rows[-1]["demand_date"]
+    span_days = (last_date - first_date).days + 1
+    demand_days = len(rows)
+    zero_ratio = (
+        Decimal(span_days - demand_days) / Decimal(span_days)
+        if span_days > 0
+        else _ZERO_DEC
+    )
+    quantities = [Decimal(str(row["total_qty"])) for row in rows]
+    strength = seasonal_strength(quantities, _ROUTING_SEASON_LENGTH)
+    return SeriesFeatures(
+        history_depth_days=span_days,
+        zero_ratio=zero_ratio,
+        annual_value=annual_value,
+        seasonal_strength=strength,
+        aggregate_signal_ok=aggregate_signal_ok,
+    )
+
+
+def _item_annual_value(db: DictRowConnection, item_id: UUID) -> Decimal | None:
+    """SUM(item_asp.value_12m) for one item (across orgs), or None.
+
+    DOCUMENTED FALLBACK: no item_asp row (or every value_12m NULL) -> None,
+    NOT 0. route() treats a None annual_value natively as an unknown ABC
+    class and stays conservative (tail / cheap aggregate path). A masked 0
+    would instead force C-class and could mis-rank a genuinely valuable item.
+    """
+    row = db.execute(
+        "SELECT SUM(value_12m) AS annual_value FROM item_asp WHERE item_id = %s",
+        (item_id,),
+    ).fetchone()
+    if row is None or row["annual_value"] is None:
+        return None
+    return Decimal(str(row["annual_value"]))
+
+
+def build_series_features(
+    db: DictRowConnection,
+    item_id: UUID,
+    location_id: UUID | None,
+    *,
+    aggregate_signal_ok: bool = False,
+) -> SeriesFeatures:
+    """Compute the head/tail router's SeriesFeatures for ONE leaf series.
+
+    ``location_id`` set = the series is site-scoped (single-series leaf run):
+    demand_history is filtered to that site's accepted warehouse codes through
+    the single-source ``_warehouse_codes_subquery`` (external_id ∪ aliases,
+    #414/ADR-031). ``location_id`` None = the item across ALL sites (the
+    hierarchy-leaf reading, site-agnostic like every hierarchy reader) — no
+    warehouse filter.
+
+    Source: demand_history bookings ONLY, same business predicates as the
+    forecast readers (stream='regular', inter-entity excluded, strict past).
+    No graph fallback: a degraded install whose demand_history is empty (orders
+    live only as CustomerOrderDemand nodes) yields an empty series here and
+    routes conservatively to cold-start — the routing provenance never invents
+    a history the fact table does not carry.
+
+    See ``_features_from_daily_rows`` and ``_item_annual_value`` for the exact
+    per-feature semantics (span, zero_ratio, annual_value fallback, seasonal
+    approximation, lifecycle/has_twin defaults).
+    """
+    params: dict[str, Any] = {"item_id": item_id}
+    site_filter = ""
+    if location_id is not None:
+        site_filter = f"AND dh.warehouse_id IN ({_warehouse_codes_subquery()})"
+        params["location_id"] = location_id
+
+    rows = db.execute(
+        f"""
+        SELECT dh.booked_date AS demand_date,
+               COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+        FROM demand_history dh
+        WHERE dh.item_id = %(item_id)s
+          {site_filter}
+          AND {_DEMAND_HISTORY_STREAM_PREDICATES}
+          AND dh.booked_date < CURRENT_DATE
+        GROUP BY dh.booked_date
+        ORDER BY dh.booked_date ASC
+        """,
+        params,
+    ).fetchall()
+    return _features_from_daily_rows(
+        rows,
+        annual_value=_item_annual_value(db, item_id),
+        aggregate_signal_ok=aggregate_signal_ok,
+    )
+
+
+# Subtree of a hierarchy node — SAME recursion contract as
+# get_historical_demand_by_node (UNION, not UNION ALL: hierarchy_node has no
+# self-FK, so dedup guarantees termination on a bad parent cycle).
+_NODE_SUBTREE_CTE = """
+        WITH RECURSIVE subtree AS (
+            SELECT code
+            FROM hierarchy_node
+            WHERE hierarchy_id = %(hierarchy_id)s AND code = %(node_code)s
+            UNION
+            SELECT hn.code
+            FROM hierarchy_node hn
+            JOIN subtree st ON hn.parent_code = st.code
+            WHERE hn.hierarchy_id = %(hierarchy_id)s
+        )
+"""
+
+
+def _build_node_features(
+    db: DictRowConnection,
+    hierarchy_id: str,
+    node_code: str,
+    *,
+    aggregate_signal_ok: bool = False,
+) -> SeriesFeatures:
+    """SeriesFeatures for an AGGREGATE (hierarchy-node) series: same feature
+    vector as ``build_series_features`` but summed over every item attached to
+    the node's subtree (item_hierarchy), across all sites — the reading the
+    hierarchical runner base-forecasts at the reconciliation level.
+
+    ``aggregate_signal_ok`` defaults False: an aggregate is forecast at its OWN
+    level by the runner, there is no higher node to defer to inside the block.
+    """
+    params: dict[str, Any] = {"hierarchy_id": hierarchy_id, "node_code": node_code}
+    rows = db.execute(
+        _NODE_SUBTREE_CTE
+        + f"""
+        SELECT dh.booked_date AS demand_date,
+               COALESCE(SUM(dh.ordered_quantity), 0) AS total_qty
+        FROM demand_history dh
+        JOIN item_hierarchy ih
+          ON ih.item_id = dh.item_id AND ih.hierarchy_id = %(hierarchy_id)s
+        JOIN subtree st ON st.code = ih.leaf_code
+        WHERE {_DEMAND_HISTORY_STREAM_PREDICATES}
+          AND dh.booked_date < CURRENT_DATE
+        GROUP BY dh.booked_date
+        ORDER BY dh.booked_date ASC
+        """,
+        params,
+    ).fetchall()
+    annual_row = db.execute(
+        _NODE_SUBTREE_CTE
+        + """
+        SELECT SUM(a.value_12m) AS annual_value
+        FROM item_asp a
+        JOIN item_hierarchy ih
+          ON ih.item_id = a.item_id AND ih.hierarchy_id = %(hierarchy_id)s
+        JOIN subtree st ON st.code = ih.leaf_code
+        """,
+        params,
+    ).fetchone()
+    annual_value = (
+        Decimal(str(annual_row["annual_value"]))
+        if annual_row is not None and annual_row["annual_value"] is not None
+        else None
+    )
+    return _features_from_daily_rows(
+        rows, annual_value=annual_value, aggregate_signal_ok=aggregate_signal_ok
+    )
+
+
+def build_routing_decisions(
+    db: DictRowConnection,
+    *,
+    hierarchy_id: str,
+    block_code: str,
+    block_level: str | None = None,
+    thresholds: RoutingThresholds | None = None,
+) -> dict[str, RoutingDecision]:
+    """Route EVERY series of a summing block: features -> route() -> decision,
+    keyed exactly like ``HierarchicalRunConfig.routing_decisions`` (aggregate =
+    hierarchy_node code, leaf = item UUID string). The runner consumes this map
+    to persist routed_method/routed_level/routing_reason on each series and to
+    drive the base-forecast method at the reconciliation level.
+
+    Aggregate series use ``_build_node_features`` (subtree demand); leaves use
+    ``build_series_features`` with no site filter and ``aggregate_signal_ok=True``
+    — in a summing block every leaf HAS a signal-bearing reconciliation parent,
+    so a tail/cold-start leaf routes to the aggregate level, exactly the
+    disaggregation the runner performs.
+
+    The block is (re)loaded here from the same registry the runner reads, so the
+    keys match by construction; the extra load of the small migration-047 tables
+    is negligible at demo scale.
+    """
+    # Local import: repository <-> hierarchy.runner is a genuine import cycle
+    # (runner imports the feature builders above). By call time both modules
+    # are fully initialised, so the deferred import is safe.
+    from .hierarchy.summing import AGGREGATE, load_summing_blocks
+
+    blocks = load_summing_blocks(
+        db, hierarchy_id=hierarchy_id, block_level=block_level
+    )
+    block = next((b for b in blocks if b.block_code == block_code), None)
+    if block is None:
+        raise ValueError(
+            f"block '{block_code}' not found at level '{block_level or 'root'}' "
+            f"of hierarchy '{hierarchy_id}' "
+            f"(blocks: {[b.block_code for b in blocks]})"
+        )
+
+    decisions: dict[str, RoutingDecision] = {}
+    for ref in block.series:
+        if ref.kind == AGGREGATE:
+            features = _build_node_features(db, hierarchy_id, ref.key)
+        else:
+            features = build_series_features(
+                db, UUID(ref.key), None, aggregate_signal_ok=True
+            )
+        decisions[ref.key] = route(features, thresholds=thresholds)
+    return decisions
+
+
 _ONE = Decimal("1")
 
 
@@ -1199,6 +1481,7 @@ def fetch_run_summary(db: DictRowConnection, run_id: UUID) -> PyramideRunSummary
             pr.source_history_count, pr.status,
             pr.deterministic_artifact, pr.created_at, pr.committed_at,
             pr.stale_demand,
+            pr.routed_method, pr.routed_level, pr.routing_reason,
             COALESCE(ps.value_count, vc.value_count) AS value_count,
             COALESCE(ps.total_quantity, vc.total_quantity) AS total_quantity
         FROM pyramide_runs pr
@@ -1374,6 +1657,9 @@ def _summary_from_row(row) -> PyramideRunSummary:
         created_at=row["created_at"],
         committed_at=row["committed_at"],
         stale_demand=row["stale_demand"],
+        routed_method=row["routed_method"],
+        routed_level=row["routed_level"],
+        routing_reason=row["routing_reason"],
     )
 
 
