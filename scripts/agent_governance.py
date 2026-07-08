@@ -95,6 +95,11 @@ _ACTION_DECISION_LEVELS: dict = {
     "STOP_BUY": "L1",
     "REVIEW": "L1",
     "HOLD": "L1",
+    # forecast watcher (DEM-1) — a demand-accuracy verdict (a proposal to
+    # re-forecast / review the drifted series). Nothing exists outside Ootils
+    # yet and the flag is freely reversible/low-risk, so it is the same L1 class
+    # as any other NEW-artifact draft.
+    "FORECAST_DRIFT": "L1",
 }
 
 

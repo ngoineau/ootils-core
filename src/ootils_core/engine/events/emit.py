@@ -155,14 +155,20 @@ def emit_stream_event(
 
 # The governed-RECOMMENDATION artifact tables — the ones whose rows are
 # "recommendation_created" in the migration-071 sense (a governed DRAFT action a
-# planner reviews): the procurement/reschedule/transfer queue (`recommendations`)
-# and the planning-parameter proposals (`parameter_recommendations`, the
-# scenario-backed lot_policy_watcher, ADR-025). Both carry agent_run_id (migrations
-# 039/041). DELIBERATELY EXCLUDES dq_findings and eando_recommendations: those are
-# data-quality findings / disposition changes, not governed action recommendations
-# (baseline-only by nature, out of the #340/#347 scenario-backed scope per
-# CLAUDE.md) — counting them here would mislabel a DQ scan as a recommendation run.
-_RECO_TABLES: tuple[str, ...] = ("recommendations", "parameter_recommendations")
+# planner reviews): the procurement/reschedule/transfer queue (`recommendations`),
+# the planning-parameter proposals (`parameter_recommendations`, the
+# scenario-backed lot_policy_watcher, ADR-025), and the demand-accuracy verdicts
+# (`forecast_drift_recommendations`, the DEM-1 forecast watcher, migration 072).
+# All three carry agent_run_id (migrations 039/041/072). DELIBERATELY EXCLUDES
+# dq_findings and eando_recommendations: those are data-quality findings /
+# disposition changes, not governed action recommendations (baseline-only by
+# nature, out of the #340/#347 scenario-backed scope per CLAUDE.md) — counting
+# them here would mislabel a DQ scan as a recommendation run.
+_RECO_TABLES: tuple[str, ...] = (
+    "recommendations",
+    "parameter_recommendations",
+    "forecast_drift_recommendations",
+)
 
 
 def emit_recommendation_created_for_run(
