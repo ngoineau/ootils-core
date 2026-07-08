@@ -673,6 +673,11 @@ def new_scenario(migrated_db):
             (sid,),
         )
         c.execute("DELETE FROM calc_runs WHERE scenario_id = %s", (sid,))
+        # AN-1 (#401): POST /v1/outcomes/evaluate now emits an outcome_evaluated
+        # stream event scoped to this scenario (TestEvaluatePost) — purge it
+        # before the scenario delete or events_scenario_id_fkey (ON DELETE
+        # RESTRICT, migration 032) blocks the teardown.
+        c.execute("DELETE FROM events WHERE scenario_id = %s", (sid,))
         c.execute("DELETE FROM scenarios WHERE scenario_id = %s", (sid,))
 
 
@@ -1075,6 +1080,11 @@ class TestOutcomesSummary:
             assert body["avg_fva_wape"] is None
         finally:
             with _db_conn(migrated_db) as c:
+                # `other` only ever receives a GET here (no emission), but this
+                # file's flow does emit (#401) — purge defensively so a future
+                # write against `other` never re-breaks the teardown on
+                # events_scenario_id_fkey.
+                c.execute("DELETE FROM events WHERE scenario_id = %s", (other,))
                 c.execute("DELETE FROM scenarios WHERE scenario_id = %s", (other,))
 
 

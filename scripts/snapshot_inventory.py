@@ -37,6 +37,7 @@ import psycopg
 
 import mrp_core as core
 
+from ootils_core.engine.events import emit_stream_event
 from ootils_core.engine.snapshot import capture_snapshot, persist_snapshot
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -78,6 +79,19 @@ def main(argv: list[str] | None = None) -> int:
     with psycopg.connect(args.dsn) as conn:
         rows = capture_snapshot(conn, scenario, as_of, source="cli")
         written = persist_snapshot(conn, rows, source="cli")
+        # Fleet emission (#401 AN-1): ONE snapshot_captured per capture batch, on
+        # this connection BEFORE commit — atomic with the persisted rows. new_date
+        # carries the resolved as_of; new_quantity the coordinate count. Skipped
+        # when nothing was captured (no as_of to stamp, nothing to announce).
+        if written > 0 and rows:
+            emit_stream_event(
+                conn,
+                "snapshot_captured",
+                scenario,
+                field_changed="snapshot_captured",
+                new_date=rows[0].as_of_date,
+                new_quantity=written,
+            )
         conn.commit()
 
     resolved_as_of = rows[0].as_of_date if rows else as_of

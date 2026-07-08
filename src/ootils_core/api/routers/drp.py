@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from ootils_core.api.auth import require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
+from ootils_core.engine.events import emit_recommendation_created_for_run
 from ootils_core.engine.recommendation.transfer import (
     TRANSFER_DECISION_LEVEL,
     emit_transfer_recommendations,
@@ -161,6 +162,17 @@ def run_drp(
         "UPDATE agent_runs SET status='COMPLETED', finished_at=now(), metrics=%s "
         "WHERE agent_run_id=%s",
         (Jsonb(metrics), agent_run_id),
+    )
+
+    # Fleet emission (#401 AN-1): the DRP endpoint does NOT go through
+    # governed_run (it drives its own agent_runs lifecycle above), so it emits
+    # its own recommendation_created — same RUN-level contract, same shared
+    # helper the watchers use through governed_run. One event iff this run
+    # inserted >=1 new recommendation (an idempotent no-op re-run emits nothing).
+    # source='api': this is the API request path. Same transaction as the reco
+    # writes (get_db owns commit/rollback).
+    emit_recommendation_created_for_run(
+        db, agent_run_id, scenario_str, _AGENT_NAME, source="api"
     )
 
     logger.info(

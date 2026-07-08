@@ -14,6 +14,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from ootils_core.db.types import DictRowConnection
+from ootils_core.engine.events import emit_stream_event
 from ootils_core.models import CalcRun, Scenario
 
 
@@ -154,11 +155,63 @@ class CalcRunManager:
                 (now, run.triggered_by_event_ids),
             )
 
+        # Fleet emission (#401 AN-1). GRANULARITY = RUN: exactly one
+        # calc_run_finished per terminal run, and one shortage_detected iff this
+        # run PERSISTED shortages. Both go on the SAME connection/transaction as
+        # the UPDATE above — atomic with the run's completion (a rolled-back
+        # completion emits nothing). The shortage count comes from the
+        # authoritative persistence system (the `shortages` table, ADR-021,
+        # ShortageDetector-owned) via COUNT WHERE calc_run_id: the propagator
+        # persists shortages one PI at a time and never aggregates a per-run
+        # count, so reading the table back here is the ONE place the run-level
+        # count exists without threading a counter through the (SQL AND Python)
+        # propagator public signatures. Works identically for both engines.
+        self._emit_run_events(run, final_status, db)
+
         # Release advisory lock (must use same hash as acquire)
         db.execute(
             "SELECT pg_advisory_unlock(hashtext(%s)::bigint)",
             (str(run.scenario_id),),
         )
+
+    def _emit_run_events(
+        self,
+        run: CalcRun,
+        final_status: str,
+        db: DictRowConnection,
+    ) -> None:
+        """Emit the RUN-level fleet events for a terminal calc run (#401 AN-1).
+
+        Always one ``calc_run_finished``; additionally one ``shortage_detected``
+        when this run persisted >=1 shortage row. The shortage count is read from
+        the ``shortages`` table (the canonical persistence system, ADR-021) by
+        this run's calc_run_id — the only place a per-run aggregate exists. Same
+        transaction as the completion write (atomic); never a swallowed except —
+        an emission failure must surface so the run is not silently unstreamed.
+        """
+        emit_stream_event(
+            db,
+            "calc_run_finished",
+            run.scenario_id,
+            field_changed=final_status,
+            new_text=str(run.calc_run_id),
+            new_quantity=run.nodes_recalculated,
+        )
+
+        shortage_row = db.execute(
+            "SELECT COUNT(*) AS n FROM shortages WHERE calc_run_id = %s",
+            (run.calc_run_id,),
+        ).fetchone()
+        shortage_count = int(shortage_row["n"]) if shortage_row else 0
+        if shortage_count > 0:
+            emit_stream_event(
+                db,
+                "shortage_detected",
+                run.scenario_id,
+                field_changed="shortage_detected",
+                new_quantity=shortage_count,
+                new_text=str(run.calc_run_id),
+            )
 
     def fail_calc_run(
         self,
@@ -170,6 +223,16 @@ class CalcRunManager:
 
         Uses autocommit on the failure UPDATE so the audit record is persisted
         even if the caller's transaction rolls back (HIGH-4).
+
+        No ``calc_run_finished`` fleet event is emitted here (#401 AN-1): this is
+        the EXCEPTION path — the propagator has already done ROLLBACK TO SAVEPOINT
+        and the caller re-raises, so the transaction is being torn down. An
+        ``events`` INSERT on a rolling-back transaction leaves no row (it only
+        burns a stream_seq, migration 063), so a failed-run event would be a
+        phantom the stream never sees. calc_run_finished is emitted only from
+        complete_calc_run, on the COMMITTED terminal path (completed |
+        completed_stale). Surfacing a run failure to the fleet is the caller's
+        job (the 503 the events router raises), not a best-effort stream write.
         """
         now = datetime.now(timezone.utc)
         run.status = "failed"

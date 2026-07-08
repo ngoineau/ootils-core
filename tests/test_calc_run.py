@@ -177,6 +177,16 @@ class TestStartCalcRun:
 class TestCompleteCalcRun:
     def test_completed_no_baseline(self):
         db = _mock_db()
+        # Sequence: UPDATE calc_runs, UPDATE events, SELECT COUNT shortages (0),
+        # INSERT calc_run_finished, advisory_unlock. Zero shortages -> NO
+        # shortage_detected emission (#401 AN-1).
+        _setup_execute_sequence(db, [
+            None,          # UPDATE calc_runs
+            None,          # UPDATE events
+            {"n": 0},      # SELECT COUNT(*) FROM shortages
+            None,          # INSERT calc_run_finished
+            None,          # advisory_unlock
+        ])
         run = CalcRun(
             calc_run_id=uuid4(),
             scenario_id=uuid4(),
@@ -196,8 +206,9 @@ class TestCompleteCalcRun:
 
         assert run.status == "completed"
         assert run.completed_at is not None
-        # 3 DB calls: UPDATE calc_runs, UPDATE events, advisory_unlock
-        assert db.execute.call_count == 3
+        # 5 DB calls: UPDATE calc_runs, UPDATE events, SELECT COUNT shortages,
+        # INSERT calc_run_finished, advisory_unlock (no shortage_detected: 0 rows).
+        assert db.execute.call_count == 5
 
     def test_completed_stale_with_baseline(self):
         db = _mock_db()
@@ -220,6 +231,15 @@ class TestCompleteCalcRun:
 
     def test_no_event_ids_skips_event_update(self):
         db = _mock_db()
+        # No triggered events -> the UPDATE events is skipped. Sequence: UPDATE
+        # calc_runs, SELECT COUNT shortages (0), INSERT calc_run_finished,
+        # advisory_unlock.
+        _setup_execute_sequence(db, [
+            None,          # UPDATE calc_runs
+            {"n": 0},      # SELECT COUNT(*) FROM shortages
+            None,          # INSERT calc_run_finished
+            None,          # advisory_unlock
+        ])
         run = CalcRun(
             calc_run_id=uuid4(),
             scenario_id=uuid4(),
@@ -231,8 +251,10 @@ class TestCompleteCalcRun:
         mgr = CalcRunManager()
         mgr.complete_calc_run(run, scenario, db)
 
-        # Only 2 calls: UPDATE calc_runs + advisory_unlock (no event update)
-        assert db.execute.call_count == 2
+        # 4 calls: UPDATE calc_runs, SELECT COUNT shortages, INSERT
+        # calc_run_finished, advisory_unlock (no event UPDATE, no
+        # shortage_detected: 0 rows). #401 AN-1.
+        assert db.execute.call_count == 4
 
 
 # ===========================================================================

@@ -36,8 +36,10 @@ from typing import Any, Generator, Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from ootils_core.engine.events import emit_recommendation_created_for_run
 from ootils_core.engine.recommendation.transfer import TRANSFER_DECISION_LEVEL
 
 logger = logging.getLogger(__name__)
@@ -197,6 +199,27 @@ class _Run:
             "WHERE agent_run_id=%s",
             (status, Jsonb(metrics), self._run_id),
         )
+        # Fleet emission (#401 AN-1): one recommendation_created per COMPLETED run
+        # that actually created >=1 recommendation row. Count is read back from
+        # the recommendations table by agent_run_id (robust across every watcher's
+        # metric-key convention AND insertion path — run.insert here, the
+        # deterministic-uuid _upsert in the transfer/reschedule watchers, which
+        # ALSO run inside governed_run). Same connection/transaction (atomic with
+        # the reco writes + this UPDATE); the caller's commit follows in __exit__.
+        # DELIBERATE: only COMPLETED emits. A FAILED run's writes are COMMITTED
+        # by the exception path of governed_run (so the FAILED status row
+        # survives) — recos inserted before the failure can therefore exist
+        # WITHOUT a stream event. Accepted: announcing a half-finished run
+        # would invite consumers to act on it; the next successful run of the
+        # same watcher supersedes and announces. Strictly better than pre-#401
+        # (nothing ever emitted).
+        if status == "COMPLETED":
+            emit_recommendation_created_for_run(
+                self._conn,
+                self._run_id,
+                self._scenario_id,
+                self._agent_name,
+            )
 
 
 @contextmanager
@@ -230,12 +253,15 @@ def governed_run(
                      the caller's t0 to include the full elapsed time.
     """
     _t0 = t0 if t0 is not None else time.perf_counter()
-    cur = conn.cursor()
+    # Row-factory agnostic: watchers pass tuple_row connections, the
+    # integration harness passes the dict_row fixture — an explicit dict_row
+    # cursor + access by name works under both (repo rule, cf. bootstrap_pi).
+    cur = conn.cursor(row_factory=dict_row)
     run_id = cur.execute(
         "INSERT INTO agent_runs (agent_name, scenario_id, status) "
         "VALUES (%s, %s, 'RUNNING') RETURNING agent_run_id",
         (agent_name, scenario_id),
-    ).fetchone()[0]
+    ).fetchone()["agent_run_id"]
     logger.debug("agent=%s scenario=%s run_id=%s status=RUNNING", agent_name, scenario_id, run_id)
 
     run = _Run(conn, run_id, _t0)

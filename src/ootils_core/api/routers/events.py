@@ -94,7 +94,8 @@ def _build_propagation_engine(db):
     )
 
 
-# Must stay in sync with events.event_type CHECK constraint in migrations 002 + 006 + 051 + 062.
+# Must stay in sync with events.event_type CHECK constraint in migrations
+# 002 + 006 + 051 + 062 + 071.
 # Any new event type requires both a DB migration (ALTER TABLE ... ADD CONSTRAINT)
 # and an addition here.
 VALID_EVENT_TYPES = {
@@ -116,6 +117,12 @@ VALID_EVENT_TYPES = {
     "recommendation_transition",
     # From migration 062 CHECK constraint extension (FPO firm/unfirm, #346)
     "node_firm_changed",
+    # From migration 071 CHECK constraint extension (#401 AN-1, fleet emission)
+    "recommendation_created",
+    "shortage_detected",
+    "calc_run_finished",
+    "snapshot_captured",
+    "outcome_evaluated",
 }
 
 

@@ -38,6 +38,7 @@ import psycopg
 
 import mrp_core as core
 
+from ootils_core.engine.events import emit_stream_event
 from ootils_core.engine.outcome import evaluate_and_persist
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -78,6 +79,21 @@ def main(argv: list[str] | None = None) -> int:
 
     with psycopg.connect(args.dsn) as conn:
         summary = evaluate_and_persist(conn, scenario, as_of)
+        # Fleet emission (#401 AN-1): ONE outcome_evaluated per evaluation batch,
+        # on this connection BEFORE commit — atomic with the upserted verdicts.
+        # new_quantity carries the count of recos classified in the run; the
+        # observation day travels in new_date (context, not identity). Skipped
+        # when the batch classified nothing (empty pass, nothing to announce).
+        evaluated = int(summary["evaluated"])
+        if evaluated > 0:
+            emit_stream_event(
+                conn,
+                "outcome_evaluated",
+                scenario,
+                field_changed="outcome_evaluated",
+                new_date=_dt.date.fromisoformat(summary["evaluated_as_of"]),
+                new_quantity=evaluated,
+            )
         conn.commit()
 
     elapsed = round(time.perf_counter() - t0, 2)
