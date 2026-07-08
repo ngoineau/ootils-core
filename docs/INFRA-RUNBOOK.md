@@ -654,12 +654,58 @@ ls -lah ~/ootils-backups/postgres
 crontab -l
 ```
 
+#### Restauration prouvee (#192)
+
+Un backup jamais restaure n'est pas un backup. `scripts/restore_postgres.sh`
+restaure un dump dans une base JETABLE (`ootils_restore_test` par defaut, jamais
+la base live) via le service compose `postgres`, verifie que la restauration est
+non vide (compte des tables du schema `public` + `SELECT` sur `schema_migrations`)
+puis DROP la base jetable. Le passer regulierement (idealement en cron, apres le
+backup) prouve que les dumps sont exploitables.
+
+```bash
+chmod +x scripts/restore_postgres.sh
+# Restaure le dump le plus recent, verifie, puis drop la base jetable:
+scripts/restore_postgres.sh
+# Ou un dump precis, en gardant la base restauree pour inspection:
+scripts/restore_postgres.sh ~/ootils-backups/postgres/ootils-postgres-<host>-<ts>.dump --keep
+```
+
+Sortie attendue en fin de run: `RESTORE OK: ... (<N> tables, <M> migrations).`
+
+#### Copie hors machine (#192)
+
+`scripts/backup_offhost.sh` mirroir le repertoire de backups vers une
+destination distante via `rsync` (ssh/rsync). La destination est fournie par le
+pilote via `OOTILS_BACKUP_REMOTE` (pas de defaut -- le script refuse de tourner
+sans). A enchainer apres le backup (meme cron):
+
+```bash
+chmod +x scripts/backup_offhost.sh
+OOTILS_BACKUP_REMOTE="user@host:/srv/ootils-backups" scripts/backup_offhost.sh
+# Cle/port ssh custom si besoin:
+OOTILS_BACKUP_REMOTE="user@host:/srv/ootils-backups" \
+  OOTILS_BACKUP_SSH_OPTS="-i ~/.ssh/backup_key -p 2222" \
+  scripts/backup_offhost.sh
+```
+
+#### Garde-fous du pool de connexions API (PROD-QW)
+
+Le pool psycopg de l'API applique des timeouts SERVEUR à ses seules connexions
+(les scripts/watchers en `psycopg.connect()` direct ne sont jamais plafonnés) :
+
+| Variable env | Défaut | Rôle |
+|---|---|---|
+| `OOTILS_DB_STATEMENT_TIMEOUT_MS` | `900000` (15 min) | Plafond par requête SQL du pool — calibré sur le pire calc run pilote mesuré (464 s) + marge. À relever si un fork plus gros dépasse ; le vrai fix est #193 (workers async). `0` = désactivé. |
+| `OOTILS_DB_IDLE_IN_TXN_TIMEOUT_MS` | `60000` | Tue une transaction laissée ouverte inactive. |
+| `OOTILS_DB_POOL_MAX_LIFETIME` / `OOTILS_DB_POOL_MAX_IDLE` | 1800 / 600 s | Recyclage des connexions (post-failover). |
+
 ## 12. Risques et points faibles restants
 
 1. VM 200 en DHCP: risque de changement d'IP si pas de reservation
 2. Tunnel Windows: solution pratique mais pas ideale structurellement
 3. Secrets distribues sur plusieurs emplacements: necessite un vrai coffre de secrets (issue ouverte)
-4. Dump Postgres quotidien local OK si `scripts/install_backup_cron.sh` est installe sur VM 201; la copie hors machine reste a faire.
+4. Dump Postgres quotidien local OK si `scripts/install_backup_cron.sh` est installe sur VM 201. Copie hors machine outillee (`scripts/backup_offhost.sh`, #192) : le pilote doit fournir la destination `OOTILS_BACKUP_REMOTE` et l'enchainer au cron de backup. Restauration prouvee outillee (`scripts/restore_postgres.sh`, #192) : a passer regulierement pour valider les dumps.
 5. Snapshots Proxmox VM 200 + VM 201 non encore automatises (a faire)
 
 ## 13. Checklist rapide post-reconstruction

@@ -54,6 +54,52 @@ jobs:
       - name: Run mypy
         run: python -m mypy src/ootils_core
 
+  security:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    # Blocking dependency-vulnerability gate (PROD-QW). Audits the RESOLVED
+    # dependency tree of the project (core + dev extras) against the OSV / PyPI
+    # advisory databases and FAILS the build on any known vulnerability.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit + project
+        run: |
+          pip install --upgrade pip
+          pip install pip-audit
+          pip install -e ".[dev]"
+
+      - name: Run pip-audit
+        # DOCUMENTED IGNORES — each is a vulnerability with NO fix reachable
+        # within our pinned constraints, so failing on it would be permanent
+        # noise, not an actionable signal. Keep this list SHORT and justified;
+        # anything else must be fixed by bumping the offending dependency.
+        #
+        #   starlette (CVE-2026-48817 / CVE-2026-48818 / PYSEC-2026-161 /
+        #   PYSEC-2026-248 / PYSEC-2026-249): all fixed only in starlette 1.x,
+        #   but fastapi ~= 0.128.0 pins starlette < 0.51 (see pyproject.toml:28
+        #   — bumping fastapi to a starlette-1.x line is a breaking major, out
+        #   of scope for this gate). Revisit when fastapi is upgraded.
+        #
+        # NO --strict: under --strict a SKIP (including --skip-editable on our
+        # own editable install) is promoted to a hard failure - the two flags
+        # are contradictory. Without it, found vulnerabilities still exit 1
+        # (the gate stays real); only collection skips are tolerated.
+        # If the first run surfaces additional constraint-locked CVEs, add them
+        # here WITH a one-line justification; do NOT silence a fixable one.
+        run: >-
+          pip-audit --skip-editable
+          --ignore-vuln CVE-2026-48817
+          --ignore-vuln CVE-2026-48818
+          --ignore-vuln PYSEC-2026-161
+          --ignore-vuln PYSEC-2026-248
+          --ignore-vuln PYSEC-2026-249
+
   test:
     name: pytest
     runs-on: ubuntu-latest
@@ -93,7 +139,23 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: python -m pytest tests/ -q --tb=short --ignore=tests/integration --ignore=tests/smoke
+        # Coverage gate (PROD-QW). pytest-cov is already a dev dependency, so
+        # this adds a measurement + a floor, not a new install. --cov-branch
+        # counts branch coverage; term-missing:skip-covered keeps the log short
+        # (only partially-covered files are listed).
+        #
+        # --cov-fail-under=40 is a DELIBERATELY CONSERVATIVE floor: this job
+        # runs the unit suite only (integration/ + smoke/ excluded), so a lot of
+        # integration-only code (seed/, staging/, tools/, deeper engine paths)
+        # is counted as source but exercised elsewhere, dragging the TOTAL down.
+        # The floor must never break a green build; ratchet it UP toward
+        # floor(measured - 2) once the first run reports the real percentage.
+        run: >-
+          python -m pytest tests/ -q --tb=short
+          --ignore=tests/integration --ignore=tests/smoke
+          --cov=ootils_core --cov-branch
+          --cov-report=term-missing:skip-covered
+          --cov-fail-under=40
 
   integration:
     name: pytest integration

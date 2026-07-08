@@ -54,6 +54,47 @@ def _env_float(name: str, default: float) -> float:
     return float(raw)
 
 
+# Server-side session guards applied to POOL connections ONLY (the API hot
+# path). Direct psycopg.connect() calls made by scripts/watchers (the heavy
+# offline MRP/calc runs) and by the migration runner deliberately do NOT
+# inherit these — they open their own connections outside the pool.
+#
+#   statement_timeout — kill a runaway query. TENSION with the calc-run path:
+#   an HTTP calc run (POST /v1/events, POST /v1/calc/...) borrows a POOL
+#   connection, so its statement_timeout is THIS value. The longest legitimate
+#   pilot calc run measured was 464 s; the ceiling is set to 900 s (15 min) so
+#   the worst observed run plus generous margin cannot be tripped, while a
+#   genuinely hung query still eventually dies. This is a stop-gap: the real
+#   fix is moving long calc runs off the synchronous request path onto async
+#   workers (#193) — once landed, the API pool can drop back to a tight ~5 min
+#   web timeout. The heavy offline runs invoked from scripts/*.py are NOT
+#   affected (they use their own psycopg.connect), so this ceiling never caps a
+#   batch/CLI run.
+#
+#   idle_in_transaction_session_timeout — a request that opens a transaction
+#   and then stalls (client gone, handler wedged) must not pin a pooled
+#   connection and its locks indefinitely. 60 s is well above any normal
+#   request-scoped transaction and reclaims a leaked one quickly.
+_DEFAULT_STATEMENT_TIMEOUT_MS = 900_000
+_DEFAULT_IDLE_IN_TXN_TIMEOUT_MS = 60_000
+
+
+def _pool_session_options() -> str:
+    """libpq ``options`` string of the per-connection session guards for the
+    pool. Both values are env-overridable (0 disables a guard, matching the
+    Postgres convention) but default to the documented ceilings above."""
+    statement_timeout = _env_int(
+        "OOTILS_DB_STATEMENT_TIMEOUT_MS", _DEFAULT_STATEMENT_TIMEOUT_MS
+    )
+    idle_in_txn_timeout = _env_int(
+        "OOTILS_DB_IDLE_IN_TXN_TIMEOUT_MS", _DEFAULT_IDLE_IN_TXN_TIMEOUT_MS
+    )
+    return (
+        f"-c statement_timeout={statement_timeout} "
+        f"-c idle_in_transaction_session_timeout={idle_in_txn_timeout}"
+    )
+
+
 def _make_connection_pool(database_url: str):
     try:
         from psycopg_pool import ConnectionPool
@@ -63,20 +104,40 @@ def _make_connection_pool(database_url: str):
     min_size = _env_int("OOTILS_DB_POOL_MIN_SIZE", 1)
     max_size = _env_int("OOTILS_DB_POOL_MAX_SIZE", 10)
     timeout = _env_float("OOTILS_DB_POOL_TIMEOUT_SECONDS", 10.0)
+    # Recycle long-lived / long-idle connections so a stale server-side
+    # connection (network blip, server restart, PgBouncer churn) is retired
+    # rather than handed to a request. max_lifetime caps total age; max_idle
+    # caps idle time in the pool.
+    max_lifetime = _env_float("OOTILS_DB_POOL_MAX_LIFETIME_SECONDS", 1800.0)
+    max_idle = _env_float("OOTILS_DB_POOL_MAX_IDLE_SECONDS", 600.0)
     if min_size < 1:
         raise ValueError("OOTILS_DB_POOL_MIN_SIZE must be >= 1")
     if max_size < min_size:
         raise ValueError("OOTILS_DB_POOL_MAX_SIZE must be >= OOTILS_DB_POOL_MIN_SIZE")
     if timeout <= 0:
         raise ValueError("OOTILS_DB_POOL_TIMEOUT_SECONDS must be > 0")
+    if max_lifetime <= 0:
+        raise ValueError("OOTILS_DB_POOL_MAX_LIFETIME_SECONDS must be > 0")
+    if max_idle <= 0:
+        raise ValueError("OOTILS_DB_POOL_MAX_IDLE_SECONDS must be > 0")
 
     return ConnectionPool(
         conninfo=database_url,
         min_size=min_size,
         max_size=max_size,
         timeout=timeout,
+        # check=check_connection: run a lightweight liveness probe on every
+        # connection borrowed from the pool, so a connection the server closed
+        # under us is detected and replaced BEFORE a handler tries to use it
+        # (turns a mid-request OperationalError into a transparent reconnect).
+        check=ConnectionPool.check_connection,
+        max_lifetime=max_lifetime,
+        max_idle=max_idle,
         open=True,
-        kwargs={"row_factory": dict_row},
+        # options: server-side session guards (statement_timeout,
+        # idle_in_transaction_session_timeout) — POOL connections only, see
+        # _pool_session_options.
+        kwargs={"row_factory": dict_row, "options": _pool_session_options()},
     )
 
 

@@ -4271,6 +4271,162 @@
         }
       }
     },
+    "/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Read the API request audit trail",
+        "description": "List audit rows newest-first. All filters are optional and combine with\nAND; every value is bound as a parameter (never interpolated into SQL text).\nThe ``path_prefix`` filter uses ``starts_with`` (not LIKE) so a caller's\n``%``/``_`` are treated literally, not as wildcards.",
+        "operationId": "list_audit_log_v1_audit_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "actor_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by the denormalised actor_kind ('agent' | 'human' | 'service').",
+              "title": "Actor Kind"
+            },
+            "description": "Filter by the denormalised actor_kind ('agent' | 'human' | 'service')."
+          },
+          {
+            "name": "path_prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Return only rows whose request path starts with this prefix (e.g. '/v1/recommendations').",
+              "title": "Path Prefix"
+            },
+            "description": "Return only rows whose request path starts with this prefix (e.g. '/v1/recommendations')."
+          },
+          {
+            "name": "status_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 599,
+                  "minimum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by exact HTTP status code.",
+              "title": "Status Code"
+            },
+            "description": "Filter by exact HTTP status code."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window start (inclusive) on created_at (ISO 8601 date or datetime).",
+              "title": "From"
+            },
+            "description": "Window start (inclusive) on created_at (ISO 8601 date or datetime)."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window end (inclusive) on created_at (ISO 8601 date or datetime).",
+              "title": "To"
+            },
+            "description": "Window end (inclusive) on created_at (ISO 8601 date or datetime)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/calc/run": {
       "post": {
         "tags": [
@@ -7903,6 +8059,134 @@
         "title": "ApproveRequest",
         "description": "Body of POST /v1/staging/batches/{id}/approve.\n\n`force` is required (set to True) when the diff's deletion ratio\nexceeds the 20% threshold — see ADR-013 D4. `notes` is optional but\nstrongly recommended when forcing, as it becomes the audit trail\nrationale in staging.transform_runs.approval_notes."
       },
+      "AuditLogEntry": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "correlation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Id"
+          },
+          "token_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Prefix"
+          },
+          "token_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Id"
+          },
+          "actor_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Kind"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms"
+          },
+          "client_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Ip"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "method",
+          "path",
+          "status_code",
+          "latency_ms",
+          "created_at"
+        ],
+        "title": "AuditLogEntry",
+        "description": "One ``api_request_log`` row. Carries the non-secret ``token_prefix`` and\nthe denormalised ``actor_kind``/``token_id`` for attribution — never a token\nor a token hash (the table stores neither)."
+      },
+      "AuditLogListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLogEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "AuditLogListResponse"
+      },
       "BOMComponentInput": {
         "properties": {
           "component_external_id": {
@@ -8406,7 +8690,7 @@
           },
           "violations": {
             "items": {
-              "$ref": "#/components/schemas/CapacityViolationOut"
+              "$ref": "#/components/schemas/ootils_core__atp__routers__CapacityViolationOut"
             },
             "type": "array",
             "title": "Violations",
@@ -8806,7 +9090,7 @@
           },
           "violations": {
             "items": {
-              "$ref": "#/components/schemas/ootils_core__mps__api__CapacityViolationOut"
+              "$ref": "#/components/schemas/CapacityViolationOut"
             },
             "type": "array",
             "title": "Violations"
@@ -8836,43 +9120,74 @@
       },
       "CapacityViolationOut": {
         "properties": {
+          "violation_type": {
+            "type": "string",
+            "title": "Violation Type"
+          },
           "resource_id": {
             "type": "string",
+            "format": "uuid",
             "title": "Resource Id"
+          },
+          "resource_external_id": {
+            "type": "string",
+            "title": "Resource External Id"
           },
           "resource_name": {
             "type": "string",
             "title": "Resource Name"
           },
-          "violation_date": {
+          "period_start": {
             "type": "string",
             "format": "date",
-            "title": "Violation Date"
+            "title": "Period Start"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date",
+            "title": "Period End"
           },
           "required_capacity": {
-            "type": "number",
+            "type": "string",
             "title": "Required Capacity"
           },
           "available_capacity": {
-            "type": "number",
+            "type": "string",
             "title": "Available Capacity"
           },
           "overload_pct": {
-            "type": "number",
+            "type": "string",
             "title": "Overload Pct"
+          },
+          "affected_mps_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Affected Mps Ids"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
           }
         },
         "type": "object",
         "required": [
+          "violation_type",
           "resource_id",
+          "resource_external_id",
           "resource_name",
-          "violation_date",
+          "period_start",
+          "period_end",
           "required_capacity",
           "available_capacity",
-          "overload_pct"
+          "overload_pct",
+          "affected_mps_ids",
+          "severity"
         ],
         "title": "CapacityViolationOut",
-        "description": "Capacity violation details for API response."
+        "description": "Output model for capacity violation."
       },
       "CausalStepOut": {
         "properties": {
@@ -17490,76 +17805,45 @@
         ],
         "title": "WorkingDaysResponse"
       },
-      "ootils_core__mps__api__CapacityViolationOut": {
+      "ootils_core__atp__routers__CapacityViolationOut": {
         "properties": {
-          "violation_type": {
-            "type": "string",
-            "title": "Violation Type"
-          },
           "resource_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Resource Id"
-          },
-          "resource_external_id": {
-            "type": "string",
-            "title": "Resource External Id"
           },
           "resource_name": {
             "type": "string",
             "title": "Resource Name"
           },
-          "period_start": {
+          "violation_date": {
             "type": "string",
             "format": "date",
-            "title": "Period Start"
-          },
-          "period_end": {
-            "type": "string",
-            "format": "date",
-            "title": "Period End"
+            "title": "Violation Date"
           },
           "required_capacity": {
-            "type": "string",
+            "type": "number",
             "title": "Required Capacity"
           },
           "available_capacity": {
-            "type": "string",
+            "type": "number",
             "title": "Available Capacity"
           },
           "overload_pct": {
-            "type": "string",
+            "type": "number",
             "title": "Overload Pct"
-          },
-          "affected_mps_ids": {
-            "items": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": "array",
-            "title": "Affected Mps Ids"
-          },
-          "severity": {
-            "type": "string",
-            "title": "Severity"
           }
         },
         "type": "object",
         "required": [
-          "violation_type",
           "resource_id",
-          "resource_external_id",
           "resource_name",
-          "period_start",
-          "period_end",
+          "violation_date",
           "required_capacity",
           "available_capacity",
-          "overload_pct",
-          "affected_mps_ids",
-          "severity"
+          "overload_pct"
         ],
         "title": "CapacityViolationOut",
-        "description": "Output model for capacity violation."
+        "description": "Capacity violation details for API response."
       }
     },
     "securitySchemes": {

@@ -43,3 +43,4 @@ data-input-canonique-v1-*.zip
 
 # Data-delivery notes that point at private workspace paths
 /README.txt
+.coverage
