@@ -11479,6 +11479,11 @@
             "minLength": 1,
             "title": "Code Version",
             "default": "local"
+          },
+          "auto_route": {
+            "type": "boolean",
+            "title": "Auto Route",
+            "default": false
           }
         },
         "type": "object",
@@ -15327,6 +15332,39 @@
             "type": "boolean",
             "title": "Stale Demand",
             "default": false
+          },
+          "routed_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routed Method"
+          },
+          "routed_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routed Level"
+          },
+          "routing_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routing Reason"
           }
         },
         "type": "object",
@@ -15428,6 +15466,11 @@
             "minimum": 1.0,
             "title": "Freshness Sla Days",
             "default": 7
+          },
+          "auto_route": {
+            "type": "boolean",
+            "title": "Auto Route",
+            "default": false
           }
         },
         "type": "object",

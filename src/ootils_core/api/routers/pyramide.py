@@ -20,8 +20,11 @@ from ootils_core.pyramide.hierarchy import (
     HierarchicalRunConfig,
     HierarchicalRunner,
 )
+from ootils_core.pyramide.models import METHOD_AUTO_SELECT
 from ootils_core.pyramide.repository import (
     PyramideAggregateCommitError,
+    build_routing_decisions,
+    build_series_features,
     commit_run,
     fetch_accuracy_metrics,
     fetch_run_summary,
@@ -36,6 +39,7 @@ from ootils_core.pyramide.repository import (
     resolve_location_uuid,
     resolve_scenario_uuid,
 )
+from ootils_core.pyramide.routing import LEVEL_LEAF, RoutingDecision, route
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +87,12 @@ class PyramideRunRequest(BaseModel):
     # STALE_DEMAND row. A PARAMETER (pilot default 7 days), never a
     # hard-coded business constant.
     freshness_sla_days: int = Field(default=DEFAULT_SLA_DAYS, ge=1, le=365)
+    # Head/tail routing (DEM-1) — OPT-IN, default False = byte-identical to the
+    # historical behaviour (natural kill switch). When True the router computes
+    # this series' features and records its recommendation as routing
+    # provenance; the recommended method REPLACES ``method`` only when the
+    # caller left it AUTO_SELECT (an explicit method is never overwritten).
+    auto_route: bool = False
 
     @staticmethod
     def _method_error() -> str:
@@ -158,6 +168,14 @@ class PyramideRunOut(BaseModel):
     # demand_history ingest age exceeded the freshness SLA. Additive,
     # backward-compatible — agents must not auto-act (L0-L2) on TRUE.
     stale_demand: bool = False
+    # Routing provenance (migration 058, DEM-1). Populated when the run was
+    # auto-routed; all three NULL together for a non-routed run (migration
+    # 058's all-or-none CHECK). routed_method is the router's RECOMMENDATION —
+    # ``method`` above stays the executed contract (they differ when the caller
+    # forced an explicit method with auto_route on). Additive, backward-compatible.
+    routed_method: str | None = None
+    routed_level: str | None = None
+    routing_reason: str | None = None
 
 
 class PyramideValueOut(BaseModel):
@@ -220,6 +238,12 @@ class HierarchicalRunRequest(BaseModel):
     lookback_days: int = Field(default=365, ge=1, le=3650)
     random_seed: int = Field(default=0, ge=0)
     code_version: str = Field(default="local", min_length=1, max_length=64)
+    # Head/tail routing (DEM-1) — OPT-IN, default False = byte-identical to the
+    # historical behaviour (natural kill switch). When True the router computes
+    # a decision for EVERY series of the block (aggregates + leaves) and the
+    # runner persists routed_method/routed_level/routing_reason per series and
+    # drives the reconciliation-level base-forecast method from it.
+    auto_route: bool = False
 
     @staticmethod
     def _method_error() -> str:
@@ -358,6 +382,28 @@ def create_pyramide_run(
             detail="Historical demand is required to create a Pyramide forecast run",
         )
 
+    routing_decision: RoutingDecision | None = None
+    if body.auto_route:
+        features = build_series_features(db, item_uuid, location_uuid)
+        raw_decision = route(features)
+        # Single-series endpoint has NO hierarchy: the only honest forecast
+        # LEVEL is 'leaf' (nothing to disaggregate). aggregate_signal_ok
+        # defaults False here, so route() already returns leaf on every branch;
+        # we pin it explicitly rather than ever persist an 'aggregate'
+        # provenance that would be meaningless for a standalone series.
+        routing_decision = RoutingDecision(
+            method=raw_decision.method,
+            level=LEVEL_LEAF,
+            reason=raw_decision.reason,
+            features_used=raw_decision.features_used,
+        )
+        # Never overwrite an explicit method choice: the recommendation
+        # replaces the EXECUTED method only for an unopinionated AUTO_SELECT
+        # request. The provenance (routed_method) is recorded either way, so a
+        # forced explicit method still carries "the router would have picked X".
+        if body.method == METHOD_AUTO_SELECT:
+            body.method = routing_decision.method
+
     config = PyramideRunConfig(
         item_id=item_uuid,
         location_id=location_uuid,
@@ -398,7 +444,11 @@ def create_pyramide_run(
     # history feeds the FVA seasonal-naive baseline (migration 068): it is
     # the SAME series the run was computed on, so the naive is backtested on
     # identical cutoffs (methodological consistency — see fva.compute_fva).
-    persisted = persist_run(db, result, stale_demand=stale, history=history)
+    # routing_decision (DEM-1) is None unless auto_route was set — persist_run
+    # then writes the routed_method/routed_level/routing_reason provenance.
+    persisted = persist_run(
+        db, result, stale_demand=stale, routing=routing_decision, history=history
+    )
     if stale:
         # Exactly once per run (this endpoint is the only writer and the
         # run is created exactly once) — no spam, evidence carries run_id.
@@ -478,35 +528,50 @@ def create_hierarchical_run(
             detail=f"Invalid scenario_id '{body.scenario_id}'",
         ) from exc
 
-    config = HierarchicalRunConfig(
-        hierarchy_id=body.hierarchy_id,
-        block_code=body.block_code,
-        leaf_location_id=location_uuid,
-        scenario_id=scenario_uuid,
-        horizon_start=date.today() + timedelta(days=1),
-        horizon_days=body.horizon_days,
-        block_level=body.block_level,
-        recon_level=body.recon_level,
-        granularity=body.granularity,
-        method=body.method,
-        method_params=body.method_params,
-        model_strategy=body.model_strategy,
-        recon_method=body.recon_method,
-        lookback_days=body.lookback_days,
-        random_seed=body.random_seed,
-        code_version=body.code_version,
-    )
-
     try:
+        # Head/tail routing (DEM-1), opt-in: build a decision for EVERY series
+        # of the block BEFORE the run and inject it as routing_decisions, so
+        # the runner persists routed_method/routed_level/routing_reason per
+        # series and drives the reconciliation-level base-forecast method from
+        # it. Empty ({}) when not auto-routed = historical behaviour unchanged.
+        routing_decisions = (
+            build_routing_decisions(
+                db,
+                hierarchy_id=body.hierarchy_id,
+                block_code=body.block_code,
+                block_level=body.block_level,
+            )
+            if body.auto_route
+            else {}
+        )
+        config = HierarchicalRunConfig(
+            hierarchy_id=body.hierarchy_id,
+            block_code=body.block_code,
+            leaf_location_id=location_uuid,
+            scenario_id=scenario_uuid,
+            horizon_start=date.today() + timedelta(days=1),
+            horizon_days=body.horizon_days,
+            block_level=body.block_level,
+            recon_level=body.recon_level,
+            granularity=body.granularity,
+            method=body.method,
+            method_params=body.method_params,
+            model_strategy=body.model_strategy,
+            recon_method=body.recon_method,
+            lookback_days=body.lookback_days,
+            random_seed=body.random_seed,
+            code_version=body.code_version,
+            routing_decisions=routing_decisions,
+        )
         result = HierarchicalRunner().run(db, config)
     except (PyramideError, ValueError) as exc:
         # Typed domain-exception carve-out (cf. CLAUDE.md): hand-authored
-        # message from config validation (unknown block/level/method,
-        # empty node history) — DB-free, no SQL/DSN can reach this string.
-        # ValueError is included for the hierarchy registry validation layer
-        # (pyramide/hierarchy/summing.py: unknown hierarchy_id, no levels,
-        # duplicate codes...) which predates PyramideError and is asserted as
-        # ValueError by its own unit tests — its messages are equally
+        # message from config validation or the routing build (unknown block/
+        # level/method, empty node history) — DB-free, no SQL/DSN can reach
+        # this string. ValueError is included for the hierarchy registry
+        # validation layer (pyramide/hierarchy/summing.py: unknown
+        # hierarchy_id, no levels, duplicate codes...) and the block-not-found
+        # raised by build_routing_decisions — its messages are equally
         # hand-authored (they interpolate only caller-supplied identifiers).
         # Without this, an unknown hierarchy_id surfaced as a generic 500.
         raise HTTPException(
@@ -693,6 +758,9 @@ def _run_out(summary) -> PyramideRunOut:
         created_at=summary.created_at,
         committed_at=summary.committed_at,
         stale_demand=summary.stale_demand,
+        routed_method=summary.routed_method,
+        routed_level=summary.routed_level,
+        routing_reason=summary.routing_reason,
     )
 
 
