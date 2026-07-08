@@ -55,6 +55,7 @@ from anyio import to_thread
 from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from ootils_core.api import metrics
 from ootils_core.db.types import DictRowConnection
 
 logger = logging.getLogger(__name__)
@@ -347,6 +348,26 @@ class _TokenCache:
 _token_cache = _TokenCache()
 
 
+def invalidate_token_cache() -> None:
+    """Drop every memoised minted-token principal so the NEXT request for any
+    token re-resolves against the DB.
+
+    The single public seam the token-lifecycle path (``token_service.revoke_token``)
+    uses to make a revoke take effect immediately instead of lingering up to
+    ``_CACHE_TTL_SECONDS`` (30 s) behind a still-positive cache entry.
+
+    Why a GLOBAL clear rather than a targeted per-token eviction: ``_TokenCache``
+    is keyed by ``token_hash`` (the presented secret's hash), NOT by ``token_id``.
+    Revocation is addressed by ``token_id`` — the caller never holds the cleartext
+    (only its SHA-256 lives in the DB), so it CANNOT compute the hash to evict one
+    entry. A global ``clear()`` is the correct, simple choice: a revoke is a rare
+    administrative event, the cache is small (≤ ``_CACHE_MAX_ENTRIES``), and the
+    only cost of clearing it is a handful of cache misses that re-hit the DB once
+    each within the next TTL window. Correctness (a revoked token stops
+    authenticating at once) beats sparing those misses."""
+    _token_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Per-token sliding-window rate counter (clock injectable for tests)
 # ---------------------------------------------------------------------------
@@ -589,6 +610,7 @@ def _enforce_fleet_kill_switch(principal: Principal, client_id: str) -> None:
             principal.token_id,
             client_id,
         )
+        metrics.record_fleet_killswitch()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent fleet is disabled (OOTILS_AGENTS_ENABLED).",
@@ -621,6 +643,7 @@ def _enforce_rate_limit(principal: Principal, client_id: str) -> None:
         principal.rate_per_min,
         retry_seconds,
     )
+    metrics.record_rate_limited(principal.actor_kind)
     raise HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail="Rate limit exceeded",

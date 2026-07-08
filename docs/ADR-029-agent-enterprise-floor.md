@@ -49,20 +49,18 @@ Le token legacy résout vers un `Principal` synthétique `human` / `admin` (supe
 - **Auth / gouvernance, transverse aux scénarios.** Un token et son `actor_kind` sont une donnée d'infrastructure, invariante par scénario. Aucune forkabilité requise — un token n'est pas un levier de simulation.
 - **Le ledger d'audit survit à la suppression d'un token.** `api_request_log.token_id → api_tokens` est `ON DELETE SET NULL` (les lignes d'audit survivent à un hard-delete de token), et `actor_kind` est **dénormalisé** sur chaque ligne d'audit à l'écriture : la trace reste répondable (« agent ou humain ? ») même après suppression du token. La dénormalisation est le bon choix pour un log immuable — il enregistre ce qui était vrai à l'instant t, pas ce que le registre dit maintenant.
 
-## Décidé mais pas encore appliqué (honnêteté — dette tracée)
+## Décidé et désormais APPLIQUÉ (chantier AN-2 — voir ADR-032)
 
-L'étage entreprise est **posé** (le substrat existe et est enforçable) mais n'est **pas encore branché partout**. À ne pas re-claimer comme livré :
+L'étage entreprise était **posé** en PR1 (substrat enforçable) mais **pas encore branché partout**. Le chantier **AN-2** (`docs/ROADMAP-AGENTS-2026-H2.md` §4) a résorbé les trois trous ci-dessous. La doctrine, la grille des 8 scopes et les caveats sont actés dans **`docs/ADR-032-scope-grid-and-budgets.md`**.
 
-- **Scopes non appliqués sur ~24 routers.** `require_auth` résout le principal mais ne vérifie **aucun** scope ; seule une poignée de routers utilisent `require_scope`. Un token read-only peut aujourd'hui déclencher un write (`POST /v1/mrp/run`, mutation de graphe). Basculer **tous** les routers d'écriture vers `require_scope` est le chantier **AN-2** de `docs/ROADMAP-AGENTS-2026-H2.md` (§4).
-- **`api_tokens.rate_per_min` est du schéma mort.** La colonne existe (budget par token) mais **aucun code ne la lit** : aucun rate-limit par token n'est appliqué. Câblage prévu en AN-2 (middleware au checkout du Principal).
-- **Endpoints issue/revoke de tokens gouvernés** et **`/metrics`** : prévus en AN-2. L'émission passe aujourd'hui par un script CLI (`scripts/issue_agent_token.py`).
-
-Ces items ne sont **pas** de la dette silencieuse : ils sont ici pour que l'écart entre « le substrat est en place » et « il est enforcé partout » soit explicite.
+- **Scopes appliqués sur 102/102 routes montées (PR2a, [#434](https://github.com/ngoineau/ootils-core/pull/434)).** Tous les routers d'écriture sont passés à `require_scope` — il ne subsiste **aucun** `require_auth` sur une route montée (`require_auth` n'est plus qu'un alias fin conservé pour les tests et le module non-monté `atp/api.py`, cf. sa docstring `api/auth.py`). La doctrine appliquée : **coût ≠ réversibilité** — un endpoint qui invoque un moteur (MRP, propagation, Pyramide, DQ…) exige `calc:run`, `graph:write` est réservé aux mutations directes de master-data (firm/unfirm). Détail et grille : ADR-032 §1–2.
+- **`api_tokens.rate_per_min` est lu et appliqué (PR2b).** `_RateCounter` + `_enforce_rate_limit` (`api/auth.py`) enforcent le budget par token (fenêtre glissante 60 s per-worker, 429 + `Retry-After`, refus non consommant, legacy/NULL exemptés). Caveat per-worker documenté : ADR-032 §4.
+- **Émission/révocation par l'API + `/metrics` (PR2b).** `POST/GET/DELETE /v1/tokens` (admin ; cleartext montré une fois ; soft-revoke + invalidation globale du cache ; 204 idempotent) via `api/token_service.py` + `api/routers/tokens.py`. `GET /metrics` (admin, hors `/v1`, hors OpenAPI, cardinalité bornée) via `api/metrics.py`. Détail : ADR-032 §5–6.
 
 ## Conséquences
 
 - **Positif :** la Decision Ladder et le gate humain #341 deviennent **réellement enforçables** — `actor_kind` n'est plus usurpable par un payload. Le kill-switch `OOTILS_AGENTS_ENABLED` donne un interrupteur global sur la flotte. L'audit reste répondable pour toujours, immunisé contre la suppression de token. Aucun appelant pré-#392 ne régresse (chemin legacy préservé à l'octet près).
-- **Négatif / dette assumée en V1 :** l'enforcement des scopes et des budgets n'est pas encore généralisé (§ ci-dessus) — un token peut, aujourd'hui, dépasser ses scopes sur les routers non encore basculés. C'est le périmètre exact d'AN-2. Le token legacy `admin`-superset reste un contournement tant qu'il n'est pas retiré.
+- **Négatif / dette assumée en V1 :** l'enforcement des scopes et des budgets est désormais généralisé (chantier AN-2, § ci-dessus / ADR-032), mais deux dettes subsistent — le rate-limit est **per-worker** (plafond effectif N × `rate_per_min` sous N workers, pas de store partagé) et le token legacy `admin`-superset reste un contournement de la grille tant qu'il n'est pas retiré.
 
 ## Références
 
@@ -71,4 +69,5 @@ Ces items ne sont **pas** de la dette silencieuse : ils sont ici pour que l'éca
 - `src/ootils_core/db/migrations/064_api_tokens_and_scopes.sql` — table `api_tokens` (SHA-256, `actor_kind` CHECK, `scopes TEXT[]`), binding audit, élargissement `recommendation_transitions.actor_kind` ; source de vérité du schéma, header détaillé.
 - `src/ootils_core/api/auth.py` — `resolve_principal`, `resolve_gate_kind`, `require_scope`, cache TTL-30 s borné LRU, kill-switch `OOTILS_AGENTS_ENABLED`, principal legacy synthétique.
 - `docs/ROADMAP-AGENTS-2026-H2.md` §4 — chantier **AN-2** (scopes bout-en-bout + budgets `rate_per_min` + endpoints issue/revoke + /metrics).
+- `docs/ADR-032-scope-grid-and-budgets.md` — l'ADR qui acte AN-2 : grille des 8 scopes, doctrine coût≠réversibilité, budgets par token, cycle de vie `/v1/tokens`, `/metrics`.
 - `docs/ADR-030-proof-machine.md` — même exigence North Star « déterministe / auditable » sur l'axe preuve ; convention FK `ON DELETE RESTRICT` explicite pour les FK vers `scenarios`.

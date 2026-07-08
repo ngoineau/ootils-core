@@ -4133,6 +4133,144 @@
         }
       }
     },
+    "/v1/tokens": {
+      "post": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Mint an API token",
+        "description": "Issue a new credential. Returns the cleartext token EXACTLY ONCE — it is never stored (only its SHA-256 hash) and cannot be recovered later. Requires the `admin` scope.",
+        "operationId": "create_token_v1_tokens_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "List API tokens",
+        "description": "List issued credentials WITHOUT any secret material (no cleartext, no hash). By default only live tokens are returned; pass `include_revoked=true` to include revoked rows. Requires the `admin` scope.",
+        "operationId": "list_tokens_v1_tokens_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include revoked tokens in the listing.",
+              "default": false,
+              "title": "Include Revoked"
+            },
+            "description": "Include revoked tokens in the listing."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Revoke an API token",
+        "description": "Soft-revoke a credential (sets `revoked_at`; the row is kept for audit). Idempotent: revoking an already-revoked token still returns 204. Returns 404 only when the token_id is unknown. Requires the `admin` scope.",
+        "operationId": "delete_token_v1_tokens__token_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Token Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/calc/run": {
       "post": {
         "tags": [
@@ -4347,7 +4485,7 @@
           "mrp-apics"
         ],
         "summary": "Run Mrp Apics",
-        "description": "[DEPRECATED] Execute a full APICS-compliant multi-level MRP run.\n\n⚠️  DEPRECATED: Use POST /v1/mrp/run with apics_mode=true instead.\nThis endpoint is a thin alias kept for backward compatibility; it has no\nbehaviour the unified endpoint lacks and will be removed in a future\nrelease (date TBD). The route is flagged `deprecated` in the OpenAPI schema\nand every response carries RFC 8594 deprecation headers.\n\nProcesses items from LLC 0 (finished goods) through LLC N (raw materials),\nconsuming forecast, calculating gross-to-net, applying lot sizing and time fences,\nand exploding dependent demand through the BOM.",
+        "description": "[DEPRECATED] Execute a full APICS-compliant multi-level MRP run.\n\n⚠️  DEPRECATED: Use POST /v1/mrp/run with apics_mode=true instead.\nThis endpoint is a thin alias kept for backward compatibility; it has no\nbehaviour the unified endpoint lacks and will be removed in a future\nrelease (date TBD). The route is flagged `deprecated` in the OpenAPI schema\nand every response carries RFC 8594 deprecation headers.\n\nSince #423 (ADR-020 PAS 4) the underlying engine DELEGATES its whole\ncalculation to the consolidated core (forecast consumption, gross-to-net\nLLC cascade, lot sizing, BOM explosion); this endpoint only wires the\nrequest through and materializes the core's plan into the graph.",
         "operationId": "run_mrp_apics_v1_mrp_apics_run_post",
         "requestBody": {
           "content": {
@@ -12536,6 +12674,7 @@
             "type": "string",
             "pattern": "^(day|week|month)$",
             "title": "Bucket Grain",
+            "description": "The consolidated MRP core plans exclusively in weekly buckets (ADR-020); day/month grains were removed with the #423 delegation and are rejected with 422 (the pattern still accepts them so the 422 carries an explicit message).",
             "default": "week"
           },
           "start_date": {
@@ -12558,6 +12697,7 @@
             "type": "string",
             "pattern": "^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$",
             "title": "Forecast Strategy",
+            "description": "ADVISORY since #423: the delegated core reads forecast_consumption_strategy from each item's item_planning_params row, not this field. Kept for backward compatibility; explicitly setting it is echoed as a warning.",
             "default": "MAX"
           },
           "consumption_window_days": {
@@ -12565,6 +12705,7 @@
             "maximum": 90.0,
             "minimum": 1.0,
             "title": "Consumption Window Days",
+            "description": "ADVISORY since #423: the delegated core reads consumption_window_days from each item's item_planning_params row, not this field. Kept for backward compatibility; explicitly setting it is echoed as a warning.",
             "default": 7
           }
         },
@@ -12619,6 +12760,14 @@
             },
             "type": "array",
             "title": "Errors",
+            "default": []
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings",
             "default": []
           }
         },
@@ -12678,12 +12827,14 @@
             "type": "string",
             "pattern": "^(day|week|month)$",
             "title": "Bucket Grain",
+            "description": "APICS mode only. The consolidated MRP core plans exclusively in weekly buckets (ADR-020); day/month grains were removed with the #423 delegation and are rejected with 422 when apics_mode=true (the pattern still accepts them so the 422 carries an explicit message instead of a generic schema-validation error).",
             "default": "week"
           },
           "forecast_strategy": {
             "type": "string",
             "pattern": "^(MAX|FORECAST_ONLY|ORDERS_ONLY|PRIORITY|max_only|consume_forward|consume_backward|consume_both)$",
             "title": "Forecast Strategy",
+            "description": "ADVISORY since #423 (APICS mode): the delegated core reads forecast_consumption_strategy from each item's item_planning_params row, not this field. Kept for backward compatibility; explicitly setting it is echoed as a warning in the response.",
             "default": "MAX"
           },
           "consumption_window_days": {
@@ -12691,6 +12842,7 @@
             "maximum": 90.0,
             "minimum": 1.0,
             "title": "Consumption Window Days",
+            "description": "ADVISORY since #423 (APICS mode): the delegated core reads consumption_window_days from each item's item_planning_params row, not this field. Kept for backward compatibility; explicitly setting it is echoed as a warning in the response.",
             "default": 7
           },
           "recalculate_llc": {
@@ -16735,6 +16887,252 @@
           "time_ref"
         ],
         "title": "SupplyDetail"
+      },
+      "TokenCreateRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name",
+            "description": "Human label, e.g. 'shortage-watcher'."
+          },
+          "actor_kind": {
+            "type": "string",
+            "title": "Actor Kind",
+            "description": "agent | human | service."
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes",
+            "description": "Granted scopes (subset of the auth whitelist)."
+          },
+          "rate_per_min": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Per Min",
+            "description": "Per-token request budget; null = uncapped."
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At",
+            "description": "Expiry timestamp (UTC); null = no expiry."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "actor_kind"
+        ],
+        "title": "TokenCreateRequest",
+        "description": "Body of POST /v1/tokens. ``actor_kind`` and ``scopes`` are validated in\n``token_service.mint_token`` against the auth whitelists — an invalid value\nsurfaces as a hand-authored 422, not a Pydantic-enum 422, so the message can\nname the full valid set."
+      },
+      "TokenCreateResponse": {
+        "properties": {
+          "token_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Token Id"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "actor_kind": {
+            "type": "string",
+            "title": "Actor Kind"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "rate_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Per Min"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token_id",
+          "token",
+          "prefix",
+          "name",
+          "actor_kind",
+          "scopes",
+          "rate_per_min",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "TokenCreateResponse",
+        "description": "Response of a mint. ``token`` is the CLEARTEXT, shown ONCE and never\nretrievable again — store it now or re-mint."
+      },
+      "TokenListResponse": {
+        "properties": {
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/TokenOut"
+            },
+            "type": "array",
+            "title": "Tokens"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tokens",
+          "total"
+        ],
+        "title": "TokenListResponse"
+      },
+      "TokenOut": {
+        "properties": {
+          "token_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Token Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix"
+          },
+          "actor_kind": {
+            "type": "string",
+            "title": "Actor Kind"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "rate_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Per Min"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token_id",
+          "name",
+          "prefix",
+          "actor_kind",
+          "scopes",
+          "rate_per_min",
+          "created_at",
+          "last_used_at",
+          "expires_at",
+          "revoked_at"
+        ],
+        "title": "TokenOut",
+        "description": "One registry row for listing. Carries NO secret material — neither the\ncleartext (never stored) nor the ``token_hash`` (a lookup key we do not\nsurface); only the non-secret ``prefix``."
       },
       "TransferRow": {
         "properties": {

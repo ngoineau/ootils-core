@@ -16,7 +16,7 @@ from uuid import uuid4
 from anyio import to_thread
 import psycopg
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -32,9 +32,10 @@ try:
 except ImportError:
     _SLOWAPI_AVAILABLE = False
 
-from ootils_core.api.auth import _expected_token
+from ootils_core.api import metrics
+from ootils_core.api.auth import Principal, _expected_token, require_scope
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import bom, calc, calendars, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream
+from ootils_core.api.routers import bom, calc, calendars, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens
 from ootils_core.api.routers.graph import nodes_router
 from ootils_core.mps import router as mps_router
 from ootils_core.atp import atp_router
@@ -334,9 +335,20 @@ def create_app() -> FastAPI:
                 content={"error": "internal_error", "message": "An internal error occurred.", "status": 500},
             )
 
-        latency_ms = int((time.perf_counter() - started) * 1000)
+        elapsed = time.perf_counter() - started
+        latency_ms = int(elapsed * 1000)
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-API-Version"] = API_VERSION
+
+        # Prometheus instrumentation (#392 AN-2). Best-effort: a metrics failure
+        # must never break a response. route = matched TEMPLATE (bounded
+        # cardinality); read here, AFTER call_next has routed the request.
+        try:
+            metrics.observe_request(
+                request, status_code=response.status_code, duration_seconds=elapsed
+            )
+        except Exception as exc:
+            logger.warning("metrics.observe_failed error=%s", exc)
 
         if _security_headers_enabled():
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -378,6 +390,19 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         return {"status": "ok", "version": API_VERSION}
 
+    # Prometheus scrape endpoint (#392 AN-2). Deliberately at the ROOT path (the
+    # de-facto Prometheus convention), NOT under /v1 — it is an ops surface, not
+    # part of the versioned API contract, hence include_in_schema=False (kept out
+    # of openapi.json). Gated on the `admin` scope (🎯 pilot default: the scrape
+    # target authenticates with an admin Bearer token) so metrics are not world-
+    # readable; there is no unauthenticated path, mirroring the rest of the API.
+    @application.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint(
+        _principal: Principal = Depends(require_scope("admin")),
+    ) -> Response:
+        body, content_type = metrics.render_latest()
+        return Response(content=body, media_type=content_type)
+
     # Register routers
     application.include_router(events.router)
     application.include_router(stream.router)
@@ -398,6 +423,7 @@ def create_app() -> FastAPI:
     application.include_router(recommendations.router)
     application.include_router(scenarios.router)
     application.include_router(param_overrides.router)
+    application.include_router(tokens.router)
     application.include_router(calc.router)
     application.include_router(demo.router)
     application.include_router(mrp.router)
