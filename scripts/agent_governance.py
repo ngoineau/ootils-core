@@ -36,6 +36,7 @@ from typing import Any, Generator, Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ootils_core.engine.events import emit_recommendation_created_for_run
@@ -252,12 +253,15 @@ def governed_run(
                      the caller's t0 to include the full elapsed time.
     """
     _t0 = t0 if t0 is not None else time.perf_counter()
-    cur = conn.cursor()
+    # Row-factory agnostic: watchers pass tuple_row connections, the
+    # integration harness passes the dict_row fixture — an explicit dict_row
+    # cursor + access by name works under both (repo rule, cf. bootstrap_pi).
+    cur = conn.cursor(row_factory=dict_row)
     run_id = cur.execute(
         "INSERT INTO agent_runs (agent_name, scenario_id, status) "
         "VALUES (%s, %s, 'RUNNING') RETURNING agent_run_id",
         (agent_name, scenario_id),
-    ).fetchone()[0]
+    ).fetchone()["agent_run_id"]
     logger.debug("agent=%s scenario=%s run_id=%s status=RUNNING", agent_name, scenario_id, run_id)
 
     run = _Run(conn, run_id, _t0)
