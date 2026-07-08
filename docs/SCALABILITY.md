@@ -173,6 +173,36 @@ Extrapolated 2-year × 5 K items (~3.6 M nodes) ≈ 19 min. The Tier 3 levers
 target this range — anything beyond ~1 M PI nodes is where Python compute
 becomes the dominant cost.
 
+#### Measured — FIRST pilot-scale run over the **API path** (2026-07-07, #414)
+
+The figures above are **engine-direct on synthetic seeds**. The first real
+measurement of the full HTTP path on the pilot base (`ootils_pilote_test`,
+36 635 items, 211 K raw nodes), following `docs/RUNBOOK-pilot-propagation.md` —
+fork-first, baseline untouched:
+
+| Step | Measured |
+|---|---|
+| Fork of baseline via `POST /v1/simulate` (deep-copy, 211 K nodes) | **23.8 s** |
+| `bootstrap_pi` — 300 finished items → 856 after BOM closure → 1 837 pairs × 120 d | **220 440 PI nodes in 66.4 s** |
+| Full recompute via `POST /v1/calc/run` (220 440 PI) | **464.4 s → 475 nps** |
+| Active shortages detected on the fork (item-day grain) | 174 769 |
+| Fork-on-fork what-if (431 K-node scenario), honest delta | PASS |
+
+Two structural lessons, both now measured rather than estimated:
+
+- **The API path runs ~8× slower than engine-direct synthetic benches**
+  (475 nps vs ~4 000 nps) — HTTP stack + remote-LAN DB round-trips dominate.
+  The 7.7-minute synchronous HTTP request is issue #193 (async calc workers)
+  demonstrating itself.
+- **The deep-copy fork is O(N) in STORAGE as well as time**: each pilot fork
+  duplicates the full node/edge set (211 K → the fork carried 431 K rows after
+  bootstrap). Five concurrent forks of a bootstrapped pilot base would add
+  ~2 M rows. The lazy-CoW / Rust-ArcSwap arbitration is roadmap SCALE-2.
+
+Side observation from the same run: 174 K fork-scoped `shortages` rows slowed
+the **baseline** outcome evaluator (~35 min vs ~3 min) — scenario-scoped index
+coverage on `shortages` is a quick-fix candidate.
+
 #### Postgres tuning gain — applied 2026-05-23
 
 The dev VM's Postgres ran the `postgres:16-alpine` defaults (`shared_buffers
