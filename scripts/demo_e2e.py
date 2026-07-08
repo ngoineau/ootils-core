@@ -50,7 +50,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 # The watchers (and their mrp_core / agent_simulation deps) do a bare
 # ``import mrp_core``; scripts/ must be on sys.path for the in-process watcher
@@ -356,32 +356,21 @@ def _find_token_id_by_name(dsn: str, name: str) -> Optional[str]:
 def _mint_token(
     dsn: str, *, name: str, actor_kind: str, scopes: list[str]
 ) -> tuple[str, str]:
-    """Insert one live api_tokens row; return (cleartext, token_id).
+    """Mint one live api_tokens row via the shared helper; return (cleartext,
+    token_id).
 
-    The cleartext exists ONLY in this process (the DB stores its SHA-256 via
-    the same hash_token/token_prefix the auth layer uses on lookup — the exact
-    pattern of tests/integration/test_agent_floor_integration.py::_mint_token).
-    High-entropy: ootk_ + 32 random hex chars.
-    """
-    from ootils_core.api.auth import hash_token, token_prefix
+    Delegates to ``ootils_core.api.token_service.mint_token`` — the SINGLE place
+    that knows how a token is generated (256-bit os.urandom), hashed (SHA-256)
+    and persisted (#392 AN-2 PR2b). The cleartext exists ONLY in this process;
+    the DB stores its hash + prefix. The ``with _connect(dsn)`` block commits on
+    exit (psycopg3 connection context manager), so the row is durable before we
+    return. Note the argument order swap: mint_token returns (token_id, clear),
+    this demo helper keeps its historical (clear, token_id) contract."""
+    from ootils_core.api.token_service import mint_token
 
-    clear = f"ootk_{uuid4().hex}{uuid4().hex}"
-    token_id = uuid4()
     with _connect(dsn) as conn:
-        conn.execute(
-            """
-            INSERT INTO api_tokens (
-                token_id, name, actor_kind, token_hash, token_prefix, scopes
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (
-                token_id,
-                name,
-                actor_kind,
-                hash_token(clear),
-                token_prefix(clear),
-                scopes,
-            ),
+        token_id, clear = mint_token(
+            conn, name=name, actor_kind=actor_kind, scopes=scopes
         )
     return clear, str(token_id)
 

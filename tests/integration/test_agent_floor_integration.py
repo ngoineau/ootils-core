@@ -1029,3 +1029,314 @@ class TestKillSwitchBeforeRate:
         # OBSERVABLE proof the counter never moved: the kill switch runs before
         # _enforce_rate_limit, so this token_id has NO bucket in the counter.
         assert UUID(token_id) not in auth._rate_counter._store
+
+
+# ===========================================================================
+# AN-2 (#392 PR2b) — the /v1/tokens REST lifecycle + /metrics scrape, driven
+# END TO END (mint / list / revoke through HTTP, then USE the returned
+# cleartext against the real auth path). Distinct from sections 1-15, which
+# fabricate tokens with direct SQL: here the credential is BORN over the API
+# (token_service.mint_token behind POST /v1/tokens) and every field of the
+# lifecycle is observed through the same TestClient the fleet would use.
+#
+#   16. A token minted via POST works IN its granted scope (200) and is denied
+#       OUT of it (403) — and an agent minted with recommend:approve is still
+#       stopped by the human GATE on APPROVED (actor_kind from the token).
+#   17. DELETE (revoke) takes effect on the VERY NEXT call → 401, with no TTL
+#       sleep: revoke_token clears the in-process cache, which is the point.
+#   18. last_used_at is bumped after a real authenticated call (cache-miss path).
+#   19. GET ?include_revoked shows a revoked row (revoked_at set); the default
+#       listing hides it.
+#   20. /metrics (admin Bearer) exposes ootils_http_requests_total with a REAL
+#       route-template label, and ootils_rate_limited_total climbs after a 429
+#       (deltas — the collectors are process-global).
+#   21. DELETE is idempotent (2nd → 204) and 404s an unknown token_id.
+#
+# Tokens minted here are NOT tracked by the `tracker` fixture (which only knows
+# its own direct-SQL mints); the `api_token_ids` fixture below scrubs them.
+# ===========================================================================
+
+
+@pytest.fixture
+def api_token_ids(migrated_db):
+    """Collect token_ids minted THROUGH the API during a test and scrub them
+    (and any audit rows) at teardown — the parallel of `tracker` for the
+    HTTP-minted credentials the REST-lifecycle tests create."""
+    ids: list[str] = []
+    yield ids
+    with _db_conn(migrated_db) as conn:
+        if ids:
+            conn.execute(
+                "DELETE FROM api_request_log WHERE token_id = ANY(%s::uuid[])", (ids,)
+            )
+            conn.execute(
+                "DELETE FROM api_tokens WHERE token_id = ANY(%s::uuid[])", (ids,)
+            )
+
+
+def _api_mint(
+    api_client,
+    *,
+    actor_kind: str,
+    scopes: list[str],
+    rate_per_min: int | None = None,
+    register: list[str] | None = None,
+) -> dict:
+    """Mint a token over POST /v1/tokens with the LEGACY admin token; return the
+    parsed 201 body (carries the once-shown ``token`` cleartext + ``token_id``).
+    Registers the token_id for teardown when ``register`` is supplied."""
+    body: dict = {
+        "name": f"api-{actor_kind}-{uuid4().hex[:8]}",
+        "actor_kind": actor_kind,
+        "scopes": scopes,
+    }
+    if rate_per_min is not None:
+        body["rate_per_min"] = rate_per_min
+    resp = api_client.post("/v1/tokens", headers=_bearer(LEGACY_TOKEN), json=body)
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    if register is not None:
+        register.append(data["token_id"])
+    return data
+
+
+def _metric_value(exposition_text: str, needle: str) -> float:
+    """Value of the first non-comment sample line containing ``needle``, or 0.0
+    when no such line exists yet (an untouched counter emits no series). Used to
+    read DELTAS around a call, since the Prometheus collectors are process-global
+    and accumulate across every test in the run."""
+    for line in exposition_text.splitlines():
+        if line.startswith("#") or needle not in line:
+            continue
+        return float(line.rsplit(" ", 1)[1])
+    return 0.0
+
+
+# ===========================================================================
+# 16. A minted token is usable in-scope, denied out-of-scope; the gate reads
+#     the TOKEN's actor_kind even for an API-minted agent.
+# ===========================================================================
+
+
+class TestApiMintedTokenIsUsable:
+    def test_in_scope_200_and_out_of_scope_403(self, api_client, tracker, api_token_ids):
+        data = _api_mint(
+            api_client, actor_kind="agent", scopes=["read"], register=api_token_ids
+        )
+        assert data["actor_kind"] == "agent"
+        clear = data["token"]
+
+        # IN scope: reading recommendations only needs `read`.
+        ok = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert ok.status_code == 200, ok.text
+
+        # OUT of scope: DRAFT -> REVIEWED needs recommend:draft, which this
+        # read-only token lacks.
+        reco_id = tracker.reco(status="DRAFT")
+        denied = api_client.post(
+            f"/v1/recommendations/{reco_id}/transition",
+            json={"to_status": "REVIEWED", "actor": "watcher", "actor_kind": "agent"},
+            headers=_bearer(clear),
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["detail"] == "missing scope 'recommend:draft'"
+
+    def test_api_minted_agent_is_stopped_by_the_human_gate_on_approve(
+        self, api_client, tracker, api_token_ids
+    ):
+        """Even minted (abnormally) WITH recommend:approve, an API-born AGENT
+        token clears the scope floor but is stopped by the human GATE on
+        APPROVED — the actor_kind is the token's, not the lying body's. The
+        end-to-end proof that minting over the API grants no self-declaration
+        loophole."""
+        data = _api_mint(
+            api_client,
+            actor_kind="agent",
+            scopes=["recommend:approve"],
+            register=api_token_ids,
+        )
+        clear = data["token"]
+        reco_id = tracker.reco(status="REVIEWED")
+
+        resp = api_client.post(
+            f"/v1/recommendations/{reco_id}/transition",
+            json={"to_status": "APPROVED", "actor": "rogue", "actor_kind": "human"},
+            headers=_bearer(clear),
+        )
+        assert resp.status_code == 403, resp.text
+        assert "human" in resp.json()["detail"].lower()
+
+
+# ===========================================================================
+# 17. DELETE (revoke) is observed on the NEXT call — cache clear, not TTL sleep.
+# ===========================================================================
+
+
+class TestApiRevokeTakesEffectImmediately:
+    def test_revoke_then_next_call_is_401(self, api_client, api_token_ids):
+        data = _api_mint(
+            api_client, actor_kind="agent", scopes=["read"], register=api_token_ids
+        )
+        clear, token_id = data["token"], data["token_id"]
+
+        # Warm the process cache with one successful auth.
+        warm = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert warm.status_code == 200, warm.text
+
+        # Revoke over HTTP: revoke_token flips revoked_at (committed by get_db)
+        # AND clears the in-process principal cache — so the very next request
+        # re-resolves against the DB, with no 30 s TTL wait.
+        deleted = api_client.delete(
+            f"/v1/tokens/{token_id}", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert deleted.status_code == 204, deleted.text
+
+        revoked = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert revoked.status_code == 401, revoked.text
+
+
+# ===========================================================================
+# 18. last_used_at bumped after a real call (the cache-miss bump path).
+# ===========================================================================
+
+
+class TestLastUsedAtBumped:
+    def test_last_used_at_advances_after_one_authenticated_call(
+        self, api_client, api_token_ids, migrated_db
+    ):
+        data = _api_mint(
+            api_client, actor_kind="agent", scopes=["read"], register=api_token_ids
+        )
+        clear, token_id = data["token"], data["token_id"]
+
+        with _db_conn(migrated_db) as conn:
+            before = conn.execute(
+                "SELECT last_used_at FROM api_tokens WHERE token_id = %s", (token_id,)
+            ).fetchone()
+        assert before["last_used_at"] is None  # never presented yet
+
+        # First presentation of this token is a cache miss -> DB lookup ->
+        # _bump_last_used_best_effort runs in its own connection.
+        r = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert r.status_code == 200, r.text
+
+        with _db_conn(migrated_db) as conn:
+            after = conn.execute(
+                "SELECT last_used_at FROM api_tokens WHERE token_id = %s", (token_id,)
+            ).fetchone()
+        assert after["last_used_at"] is not None  # bumped
+
+
+# ===========================================================================
+# 19. GET ?include_revoked toggles the visibility of a revoked row.
+# ===========================================================================
+
+
+class TestListIncludeRevoked:
+    def test_revoked_row_visible_only_with_include_revoked(
+        self, api_client, api_token_ids
+    ):
+        data = _api_mint(
+            api_client, actor_kind="agent", scopes=["read"], register=api_token_ids
+        )
+        token_id = data["token_id"]
+
+        deleted = api_client.delete(
+            f"/v1/tokens/{token_id}", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert deleted.status_code == 204, deleted.text
+
+        # Default listing hides the revoked row.
+        default = api_client.get("/v1/tokens", headers=_bearer(LEGACY_TOKEN))
+        assert default.status_code == 200, default.text
+        default_ids = {t["token_id"] for t in default.json()["tokens"]}
+        assert token_id not in default_ids
+
+        # include_revoked=true surfaces it, with revoked_at stamped.
+        incl = api_client.get(
+            "/v1/tokens?include_revoked=true", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert incl.status_code == 200, incl.text
+        by_id = {t["token_id"]: t for t in incl.json()["tokens"]}
+        assert token_id in by_id
+        assert by_id[token_id]["revoked_at"] is not None
+
+
+# ===========================================================================
+# 20. /metrics scrape — request counter with a real route template, and the
+#     rate-limited counter climbing on a provoked 429 (deltas).
+# ===========================================================================
+
+
+class TestMetricsScrape:
+    def test_http_requests_total_carries_a_real_route_template(self, api_client):
+        # A couple of real requests so the counter has a labelled series.
+        for _ in range(2):
+            r = api_client.get("/v1/recommendations", headers=_bearer(LEGACY_TOKEN))
+            assert r.status_code == 200, r.text
+
+        scrape = api_client.get("/metrics", headers=_bearer(LEGACY_TOKEN))
+        assert scrape.status_code == 200, scrape.text
+        assert scrape.headers["content-type"].startswith("text/plain")
+        body = scrape.text
+        assert "ootils_http_requests_total" in body
+        # A matched route TEMPLATE, never a raw path or "unmatched".
+        assert 'route="/v1/recommendations"' in body
+
+    def test_rate_limited_total_increments_on_a_429(self, api_client, api_token_ids):
+        needle = 'ootils_rate_limited_total{actor_kind="agent"}'
+        before = _metric_value(
+            api_client.get("/metrics", headers=_bearer(LEGACY_TOKEN)).text, needle
+        )
+
+        # rate_per_min=1 → the 2nd call in the same window is a 429 (the
+        # per-test autouse fixture cleared the rate counter, so the bucket
+        # starts empty).
+        data = _api_mint(
+            api_client,
+            actor_kind="agent",
+            scopes=["read"],
+            rate_per_min=1,
+            register=api_token_ids,
+        )
+        clear = data["token"]
+
+        first = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert first.status_code == 200, first.text
+        blocked = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert blocked.status_code == 429, blocked.text
+
+        after = _metric_value(
+            api_client.get("/metrics", headers=_bearer(LEGACY_TOKEN)).text, needle
+        )
+        assert after - before >= 1
+
+
+# ===========================================================================
+# 21. DELETE idempotency + 404 on an unknown token_id.
+# ===========================================================================
+
+
+class TestDeleteIdempotent:
+    def test_second_delete_is_204_and_unknown_is_404(self, api_client, api_token_ids):
+        data = _api_mint(
+            api_client, actor_kind="agent", scopes=["read"], register=api_token_ids
+        )
+        token_id = data["token_id"]
+
+        first = api_client.delete(
+            f"/v1/tokens/{token_id}", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert first.status_code == 204, first.text
+
+        # Idempotent: revoking an already-revoked token still returns 204.
+        second = api_client.delete(
+            f"/v1/tokens/{token_id}", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert second.status_code == 204, second.text
+
+        # Unknown token_id → 404 (existence SELECT misses).
+        unknown = api_client.delete(
+            f"/v1/tokens/{uuid4()}", headers=_bearer(LEGACY_TOKEN)
+        )
+        assert unknown.status_code == 404, unknown.text

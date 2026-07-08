@@ -103,6 +103,8 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 ### Auth
 `api/auth.py` validates `OOTILS_API_TOKEN` at **import time** and raises `RuntimeError` if unset. Token comparison uses `hmac.compare_digest`. Don't add an "optional auth" path.
 
+**Scopes & budgets (ADR-032, #392 AN-2):** a whitelist of 8 scopes lives in `VALID_SCOPES` (`api/auth.py`) — `read`, `ingest`, `calc:run`, `graph:write`, `scenario:write`, `recommend:draft`, `recommend:approve`, `admin` (superset). Every mounted route now depends on `require_scope("...")`; there is **no `require_auth` on any write** (it survives only as a thin alias for tests / the unmounted `atp/api.py`). Doctrine is **cost ≠ reversibility**: any endpoint that invokes an engine (MRP, propagation, Pyramide, DQ, CTP, ghosts, BOM explosion) requires `calc:run` including its derived graph writes; `graph:write` is only for direct master-data mutations (firm/unfirm). Per-token `rate_per_min` is enforced (`_RateCounter`/`_enforce_rate_limit`, per-worker sliding 60 s window, 429 + `Retry-After`; legacy & NULL exempt). Token lifecycle is `POST/GET/DELETE /v1/tokens` (admin; cleartext shown once; soft-revoke + global cache invalidation); `GET /metrics` (admin, outside `/v1` and OpenAPI, bounded cardinality).
+
 ### Propagation model (ADR-003)
 Event-driven, incremental, deterministic. An event marks a subgraph dirty; compute happens in topo order; unchanged nodes stop the cascade (they do not propagate further). Every change is attributable. Determinism is a hard constraint — **no randomness in the core engine**.
 

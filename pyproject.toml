@@ -32,6 +32,9 @@ dependencies = [
     "pydantic ~= 2.12",
     "openai ~= 2.15",
     "slowapi ~= 0.1",
+    # Prometheus metrics for /metrics (#392 AN-2). Run dependency, not an extra:
+    # the request middleware records counters/histograms unconditionally.
+    "prometheus-client ~= 0.21",
     # Staging file parsers (ADR-013): TSV/CSV via stdlib csv, XLSX via openpyxl.
     "openpyxl ~= 3.1",
     "python-multipart ~= 0.0.20",  # FastAPI file uploads (multipart/form-data)
