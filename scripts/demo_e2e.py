@@ -440,11 +440,13 @@ def _discover_forecast_series(dsn: str) -> Optional[tuple[str, str, int]]:
     booking-based demand_history rows — the richest series to forecast.
 
     Mirrors pyramide.repository's booking predicates (stream='regular',
-    inter-entity excluded, booked_date present, strict past). Joins
-    demand_history to items (by uuid) and locations (external_id =
-    warehouse_id, the migration-047 contract). Read-only, parameterized only
-    by the static predicates. Returns None if no exploitable series exists
-    (a fresh install with no demand_history)."""
+    inter-entity excluded, booked_date present, strict past). Resolves
+    dh.warehouse_id to a site via external_id ∪ location_aliases (ADR-031 —
+    the run-5 pilot execution proved the bare external_id equality misses
+    every aliased ERP code; reverse resolution code→site, DISTINCT on aliases
+    because one code may legitimately exist under several source_systems for
+    the SAME site and must not fan out the row counts). Read-only. Returns
+    None if no exploitable series exists."""
     with _connect(dsn) as conn:
         row = conn.execute(
             """
@@ -453,7 +455,11 @@ def _discover_forecast_series(dsn: str) -> Optional[tuple[str, str, int]]:
                    COUNT(*) AS n
             FROM demand_history dh
             JOIN items i ON i.item_id = dh.item_id
-            JOIN locations l ON l.external_id = dh.warehouse_id
+            LEFT JOIN locations ld ON ld.external_id = dh.warehouse_id
+            LEFT JOIN (SELECT DISTINCT alias, location_id
+                       FROM location_aliases) la ON la.alias = dh.warehouse_id
+            JOIN locations l
+              ON l.location_id = COALESCE(ld.location_id, la.location_id)
             WHERE dh.stream = 'regular'
               AND (dh.fulfillment IS NULL OR dh.fulfillment <> 'inter_entity')
               AND dh.booked_date IS NOT NULL
@@ -488,20 +494,27 @@ def step2_forecast(ctx: DemoContext) -> StepResult:
                 SELECT COUNT(*) AS total,
                        COUNT(DISTINCT dh.warehouse_id) AS warehouses,
                        COUNT(DISTINCT dh.warehouse_id)
-                         FILTER (WHERE l.location_id IS NOT NULL) AS mapped
+                         FILTER (WHERE l.location_id IS NOT NULL
+                                    OR la.location_id IS NOT NULL) AS mapped
                 FROM demand_history dh
                 LEFT JOIN locations l ON l.external_id = dh.warehouse_id
+                LEFT JOIN (SELECT DISTINCT alias, location_id
+                           FROM location_aliases) la ON la.alias = dh.warehouse_id
                 """
             ).fetchone()
         if int(diag["total"]) > 0 and int(diag["mapped"]) == 0:
             detail = (
                 f"demand_history has {int(diag['total']):,} rows but NONE of its "
-                f"{int(diag['warehouses'])} warehouse_id codes map to "
-                "locations.external_id — pilot data-onboarding gap (map the ERP "
-                "DC codes to the locations registry; see runbook caveats)"
+                f"{int(diag['warehouses'])} warehouse_id codes resolve to a site "
+                "(external_id or alias, ADR-031) — pilot data-onboarding gap "
+                "(load the code mapping via POST /v1/ingest/locations aliases)"
             )
         else:
-            detail = "no booking-based demand_history series to forecast"
+            detail = (
+                f"no exploitable booking-based series (mapped warehouse codes: "
+                f"{int(diag['mapped'])}/{int(diag['warehouses'])}) — mapped rows "
+                "exist but none matches the booking predicates"
+            )
         return StepResult(
             number=2, title="Forecast + FVA", status=SKIP, detail=detail,
         )
