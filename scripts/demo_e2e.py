@@ -68,8 +68,27 @@ BASELINE_SCENARIO_ID = "00000000-0000-0000-0000-000000000001"
 # find and revoke everything this script created with one query.
 _AGENT_TOKEN_NAME = "DEMO-E2E-agent"
 _HUMAN_TOKEN_NAME = "DEMO-E2E-human"
+# AN-2 (#392, PR2a) scope enforcement is now live end-to-end, so these grants
+# must cover every call each token makes:
+#   * AGENT — reads (step1/step8) + drafts (step4 DRP run is recommend:draft;
+#     step5 DRAFT->REVIEWED is recommend:draft). It deliberately does NOT hold
+#     recommend:approve, so step5's REVIEWED->APPROVED is refused (403) — the
+#     whole point of the governance gate demo. No calc:run: no agent step
+#     launches a run through the API (the watchers in step3 are DB-direct).
+#   * HUMAN — the full operator superset (all scopes except `admin`): the
+#     forecast run (step2) is calc:run; simulate / param-overrides / archive
+#     (step7) and scenario delete are scenario:write; snapshots + outcomes
+#     evaluate (step6) are ingest; the L3 approval (step5) is recommend:approve.
 _AGENT_SCOPES = ["read", "recommend:draft"]
-_HUMAN_SCOPES = ["read", "ingest", "recommend:draft", "recommend:approve"]
+_HUMAN_SCOPES = [
+    "read",
+    "ingest",
+    "calc:run",
+    "graph:write",
+    "scenario:write",
+    "recommend:draft",
+    "recommend:approve",
+]
 
 # The dedicated demo distribution link (step 4) is tagged so it is
 # identifiable and idempotent. Name only — the row itself is keyed on its own

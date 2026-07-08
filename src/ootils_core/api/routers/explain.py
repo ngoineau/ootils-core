@@ -15,7 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
@@ -46,7 +46,7 @@ class ExplainResponse(BaseModel):
 def get_explanation(
     node_id: str = Query(..., description="Target node UUID to explain"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> ExplainResponse:
     """Return the causal explanation for a planning node."""

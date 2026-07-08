@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.forecasting.algorithms import ForecastingError
@@ -295,7 +295,7 @@ def _soft_delete_forecast(db: DictRowConnection, forecast_id: UUID) -> None:
 def generate_forecast(
     body: ForecastGenerateRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> ForecastOut:
     """
     Generate a forecast for an item/location.
@@ -521,7 +521,7 @@ def generate_forecast(
 def get_forecast(
     forecast_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> ForecastOut:
     """
     Retrieve a forecast by ID with all values and adjustments.
@@ -670,7 +670,7 @@ def list_forecasts(
     method: Optional[str] = Query(default=None, pattern="^(MA|EXP_SMOOTHING|CROSTON|SEASONAL)$"),
     limit: int = Query(default=50, ge=1, le=500),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> ForecastListResponse:
     """
     List forecasts with optional filters.
@@ -804,7 +804,7 @@ def adjust_forecast(
     forecast_id: UUID,
     body: ForecastAdjustRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> ForecastAdjustResponse:
     """
     Apply an adjustment to a forecast.
@@ -920,7 +920,7 @@ def adjust_forecast(
 def delete_forecast(
     forecast_id: UUID,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> dict:
     """
     Soft delete a forecast.

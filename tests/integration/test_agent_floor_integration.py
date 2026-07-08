@@ -44,6 +44,18 @@ Plus the #392 security-review fixes:
       end) can draft-transition a recommendation with no CHECK violation, and
       the audit trail correctly attributes actor_kind='service'.
 
+Plus the AN-2 (#392 PR2a) scope-floor + rate-limit rollout:
+  12. THE SCOPE MATRIX (roadmap acceptance criterion): one representative write
+      per scope family — a {read}-only token is denied with the missing scope
+      NAMED, the family-scoped token clears the auth floor.
+  13. The per-token rate limit: rate_per_min=3 → 3×200 then 429 + integer
+      Retry-After ≥ 1, the sliding window driven by the injected counter clock
+      (no wall-clock sleep) so the token recovers after the window.
+  14. Legacy non-regression: the shared env token clears every family write and
+      is never rate-limited (token_id is None → exempt by design).
+  15. Kill-switch precedes rate: a disabled fleet 503s an agent BEFORE the rate
+      counter is ever touched (observable — no bucket for that token_id).
+
 Tokens are inserted DIRECTLY in SQL: only the test knows the cleartext; the DB
 holds ``hash_token(clear)``. Each test seeds its own uuid4-suffixed tokens so
 there are no inter-test collisions. No wall-clock timing assertions anywhere.
@@ -52,7 +64,7 @@ from __future__ import annotations
 
 import io
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -121,14 +133,20 @@ def audit_client(migrated_db):
 
 @pytest.fixture(autouse=True)
 def _clear_token_cache():
-    """The minted-token lookup is memoised in-process; clear it around every
-    test so a seed/revoke in one test never leaks a cached decision into
-    another (and so revocation is observable without a TTL sleep)."""
+    """The minted-token lookup is memoised in-process AND the per-token rate
+    counter accumulates in-process; clear BOTH around every test so a
+    seed/revoke in one test never leaks a cached decision into another (and so
+    revocation is observable without a TTL sleep), and so a token that spent
+    rate slots in one test never carries them into the next. Both are
+    module-level singletons in ootils_core.api.auth, shared by the app the
+    api_client fixture drives."""
     import ootils_core.api.auth as auth
 
     auth._token_cache.clear()
+    auth._rate_counter.clear()
     yield
     auth._token_cache.clear()
+    auth._rate_counter.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +168,17 @@ def _mint_token(
     scopes: list[str],
     expires_at: str | None = None,
     revoked_at: str | None = None,
+    rate_per_min: int | None = None,
 ) -> tuple[str, str]:
     """Insert one api_tokens row; return (cleartext_token, token_id).
 
     The cleartext exists ONLY here in the test — the DB stores its SHA-256 via
     the same hash_token the auth layer uses on lookup.
+
+    ``rate_per_min`` defaults to None (NULL = no per-token cap), so every token
+    minted by the pre-existing tests stays UNCAPPED and can never 429 — the
+    AN-2 rate counter is exercised only by the tokens that explicitly ask for a
+    budget (see TestRateLimit429 / TestKillSwitchBeforeRate below).
     """
     from ootils_core.api.auth import hash_token, token_prefix
 
@@ -165,8 +189,8 @@ def _mint_token(
             """
             INSERT INTO api_tokens (
                 token_id, name, actor_kind, token_hash, token_prefix,
-                scopes, expires_at, revoked_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                scopes, expires_at, revoked_at, rate_per_min
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 token_id,
@@ -177,6 +201,7 @@ def _mint_token(
                 scopes,
                 expires_at,
                 revoked_at,
+                rate_per_min,
             ),
         )
     return clear, str(token_id)
@@ -757,3 +782,250 @@ class TestServiceActorKind:
                 (reco_id,),
             ).fetchone()
         assert audit["actor_kind"] == "service"
+
+
+# ===========================================================================
+# 12. AN-2 (#392 PR2a) — the scope-enforcement MATRIX (roadmap acceptance
+#     criterion): one representative WRITE per scope family, both floors.
+#
+#     The read-only token is denied with the missing scope NAMED (the
+#     acceptance criterion); the family-scoped token clears the auth floor (a
+#     2xx, a business/validation 422, or a 404 all prove auth let it through —
+#     only a 403 would be an auth block, scope or human gate).
+#
+#     PREREQUISITE / minimal-valid-payload notes, per family:
+#       * ingest         POST /v1/ingest/items   — dry_run=True + a valid ItemRow
+#                        (external_id + name non-empty) → 200 with NO DB writes.
+#       * calc:run       POST /v1/calc/run        — {full_recompute: False} on
+#                        baseline → deterministic recompute (200; an engine 500
+#                        is still != 403).
+#       * graph:write    POST /v1/nodes/{id}/firm — the require_scope ROUTE
+#                        dependency fires before the body, so a read-only token
+#                        is 403 regardless of node existence; the granted token
+#                        reaches the body → 404 (random node_id), != 403.
+#       * scenario:write POST /v1/simulate        — {scenario_name, overrides:[]}
+#                        forks baseline → 201.
+#       * recommend:approve POST /v1/recommendations/{id}/transition APPROVED —
+#                        the scope check is IN-BODY (runtime target → runtime
+#                        scope), so the body MUST be valid (else a 422 pre-empts
+#                        the scope check); a REVIEWED reco is seeded. The GRANTED
+#                        token here is a HUMAN: APPROVED is a HUMAN_ONLY target,
+#                        so an agent+approve token would clear the scope floor
+#                        but hit the human GATE (403) — only a human clears both.
+#       * admin          POST /v1/demo/phase1/run — the ONLY admin-scoped write.
+#                        DENIED hits the real endpoint (require_scope('admin')
+#                        403s BEFORE the body → the demo never runs). GRANTED /
+#                        legacy stub the demo body (_stub_phase1_demo) so the
+#                        test isolates the AUTH-FLOOR grant from the heavy nested
+#                        Phase-1 chain (covered by test_phase1_e2e.py).
+# ===========================================================================
+
+
+_MATRIX_FAMILIES = [
+    "ingest",
+    "calc:run",
+    "graph:write",
+    "scenario:write",
+    "recommend:approve",
+    "admin",
+]
+
+
+def _grant_actor_kind(family: str) -> str:
+    """The actor_kind a GRANTED token must carry to clear BOTH auth floors for
+    a family. recommend:approve targets APPROVED (a HUMAN_ONLY target), so an
+    agent+approve token clears the scope floor but is stopped by the human GATE
+    — only a human clears both. Every other family's write carries no human
+    gate, so an agent (the ordinary fleet caller) is representative."""
+    return "human" if family == "recommend:approve" else "agent"
+
+
+def _do_family_write(api_client, tracker, family: str, token: str):
+    """Perform ONE representative write for ``family`` with ``token``; return
+    the raw response. Seeds only the prerequisite that family needs."""
+    headers = _bearer(token)
+    if family == "ingest":
+        return api_client.post(
+            "/v1/ingest/items",
+            headers=headers,
+            json={
+                "items": [
+                    {"external_id": f"FLOOR-{uuid4().hex[:8]}", "name": "Floor Item"}
+                ],
+                "dry_run": True,
+            },
+        )
+    if family == "calc:run":
+        return api_client.post(
+            "/v1/calc/run", headers=headers, json={"full_recompute": False}
+        )
+    if family == "graph:write":
+        return api_client.post(
+            f"/v1/nodes/{uuid4()}/firm", headers=headers, json={"actor": "floor-test"}
+        )
+    if family == "scenario:write":
+        return api_client.post(
+            "/v1/simulate",
+            headers=headers,
+            json={"scenario_name": f"floor-{uuid4().hex[:8]}", "overrides": []},
+        )
+    if family == "recommend:approve":
+        reco_id = tracker.reco(status="REVIEWED")
+        return api_client.post(
+            f"/v1/recommendations/{reco_id}/transition",
+            headers=headers,
+            json={
+                "to_status": "APPROVED",
+                "actor": "floor-approver",
+                "actor_kind": "human",
+            },
+        )
+    if family == "admin":
+        return api_client.post("/v1/demo/phase1/run", headers=headers)
+    raise AssertionError(f"unknown matrix family {family!r}")
+
+
+def _stub_phase1_demo(monkeypatch):
+    """Replace the heavy Phase-1 demo body with a cheap stub for the GRANTED
+    admin cases. The scope-enforcement test proves the ADMIN SCOPE grants access
+    to the admin-only endpoint — NOT that the demo chain runs (that is
+    test_phase1_e2e.py's job). Left unstubbed, the granted case would execute a
+    full nested-TestClient demo run (create_app + its own TestClient + the whole
+    Forecast→…→ATP chain) with no integration precedent. The DENIED admin case
+    needs no stub: require_scope('admin') is a route dependency that 403s BEFORE
+    the body, so the real demo body is never reached there.
+
+    The endpoint calls ``run_phase1_demo_from_env`` as a module global of
+    ``routers.demo`` resolved at call time, so rebinding that name reaches the
+    already-constructed api_client app."""
+    import ootils_core.api.routers.demo as demo_router
+
+    monkeypatch.setattr(
+        demo_router, "run_phase1_demo_from_env", lambda: {"stubbed": True}
+    )
+
+
+class TestScopeMatrix:
+    """The roadmap acceptance criterion, both floors of the matrix."""
+
+    @pytest.mark.parametrize("family", _MATRIX_FAMILIES)
+    def test_read_only_token_denied_with_named_scope(self, api_client, tracker, family):
+        # A single {read}-only agent token attempts each family's write.
+        clear, _ = tracker.token(actor_kind="agent", scopes=["read"])
+        resp = _do_family_write(api_client, tracker, family, clear)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == f"missing scope '{family}'"
+
+    @pytest.mark.parametrize("family", _MATRIX_FAMILIES)
+    def test_family_scoped_token_clears_the_auth_floor(
+        self, api_client, tracker, family, monkeypatch
+    ):
+        if family == "admin":
+            _stub_phase1_demo(monkeypatch)
+        clear, _ = tracker.token(
+            actor_kind=_grant_actor_kind(family), scopes=[family]
+        )
+        resp = _do_family_write(api_client, tracker, family, clear)
+        # 2xx / business-422 / 404 all mean the auth floor let the request
+        # THROUGH; only a 403 would be an auth (scope or gate) block.
+        assert resp.status_code != 403, resp.text
+
+
+# ===========================================================================
+# 13. AN-2 per-token rate limit — 429 + integer Retry-After, window driven by
+#     the injected clock (no wall-clock sleep).
+# ===========================================================================
+
+
+class TestRateLimit429:
+    def test_capped_token_429s_after_its_budget_then_recovers_after_the_window(
+        self, api_client, tracker, monkeypatch
+    ):
+        """rate_per_min=3 → 3×200, then the 4th → 429 with an integer
+        Retry-After ≥ 1. The counter's clock IS injectable from the test:
+        ``_RateCounter._clock`` is an instance slot on the module-level
+        ``auth._rate_counter`` singleton the app uses, so the 60 s sliding
+        window is advanced HERE without sleeping — after crossing the window
+        the same token is admitted again."""
+        import ootils_core.api.auth as auth
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(auth._rate_counter, "_clock", lambda: clock["t"])
+
+        clear, _ = tracker.token(
+            actor_kind="agent", scopes=["read"], rate_per_min=3
+        )
+        headers = _bearer(clear)
+
+        # 3 requests inside the budget, same instant → 200.
+        for _ in range(3):
+            r = api_client.get("/v1/recommendations", headers=headers)
+            assert r.status_code == 200, r.text
+
+        # 4th, still the same instant → over budget → 429 + Retry-After.
+        blocked = api_client.get("/v1/recommendations", headers=headers)
+        assert blocked.status_code == 429, blocked.text
+        assert "Retry-After" in blocked.headers
+        assert int(blocked.headers["Retry-After"]) >= 1
+
+        # Advance PAST the window (injected clock, no sleep): the three
+        # in-window timestamps age out → the token is admitted again.
+        clock["t"] += 61.0
+        after = api_client.get("/v1/recommendations", headers=headers)
+        assert after.status_code == 200, after.text
+
+
+# ===========================================================================
+# 14. Legacy non-regression — the shared env token clears every family write
+#     and is NEVER rate-limited (token_id is None → exempt by design).
+# ===========================================================================
+
+
+class TestLegacyNonRegression:
+    @pytest.mark.parametrize("family", _MATRIX_FAMILIES)
+    def test_legacy_token_clears_every_family_write(
+        self, api_client, tracker, family, monkeypatch
+    ):
+        # The legacy token is admin (superset scope) + human (clears the human
+        # gate), so it must pass every family's auth floor unchanged.
+        if family == "admin":
+            _stub_phase1_demo(monkeypatch)
+        resp = _do_family_write(api_client, tracker, family, LEGACY_TOKEN)
+        assert resp.status_code != 403, resp.text
+
+    def test_legacy_token_is_never_rate_limited(self, api_client):
+        """A tight burst on the shared legacy token never 429s — token_id is
+        None, so _enforce_rate_limit returns before ever consulting the
+        counter (pre-#392 behaviour preserved)."""
+        for _ in range(5):
+            r = api_client.get("/v1/recommendations", headers=_bearer(LEGACY_TOKEN))
+            assert r.status_code == 200, r.text
+            assert r.status_code != 429
+
+
+# ===========================================================================
+# 15. Kill-switch precedes rate — a disabled fleet 503s an agent BEFORE the
+#     rate counter is ever touched (resolve_principal ordering: kill switch,
+#     then rate limit).
+# ===========================================================================
+
+
+class TestKillSwitchBeforeRate:
+    def test_disabled_fleet_503s_agent_and_never_spends_a_rate_slot(
+        self, api_client, tracker, monkeypatch
+    ):
+        import ootils_core.api.auth as auth
+
+        clear, token_id = tracker.token(
+            actor_kind="agent", scopes=["read"], rate_per_min=3
+        )
+        # Start from a clean counter (the autouse fixture already cleared it),
+        # then disable the fleet for THIS request only (monkeypatch restores).
+        monkeypatch.setenv("OOTILS_AGENTS_ENABLED", "false")
+
+        resp = api_client.get("/v1/recommendations", headers=_bearer(clear))
+        assert resp.status_code == 503, resp.text
+
+        # OBSERVABLE proof the counter never moved: the kill switch runs before
+        # _enforce_rate_limit, so this token_id has NO bucket in the counter.
+        assert UUID(token_id) not in auth._rate_counter._store

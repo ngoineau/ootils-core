@@ -17,7 +17,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.atp.api import (
     ATPCheckRequest,
@@ -115,7 +115,7 @@ async def check_atp(
     body: ATPCheckRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> ATPCheckResponse:
     """
     Check ATP availability for an item at a location.
@@ -205,7 +205,7 @@ async def check_ctp(
     body: CTPCheckRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> CTPCheckResponse:
     """
     Check CTP availability for an item at a location.
@@ -309,7 +309,7 @@ async def simulate_ctp(
     body: CTPSimulateRequest,
     scenario_id: UUID = Depends(resolve_scenario_id),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ) -> CTPSimulateResponse:
     """
     Simulate CTP to find the first feasible date.

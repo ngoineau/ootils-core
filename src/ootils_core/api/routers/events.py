@@ -13,7 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 
@@ -171,7 +171,7 @@ class EventListResponse(BaseModel):
 def create_event(
     body: EventRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> EventResponse:
     """Submit a planning event that triggers recalculation."""
@@ -277,7 +277,7 @@ def create_event(
 @router.get("", response_model=EventListResponse)
 def list_events(
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     limit: int = Query(default=50, ge=1, le=500, description="Max events to return"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     event_type: Optional[str] = Query(default=None, description="Filter by event type"),

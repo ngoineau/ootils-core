@@ -24,7 +24,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id, BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.mrp.mrp_apics_engine import (
@@ -193,7 +193,7 @@ def run_mrp_apics(
     request: MrpApicsRunRequest,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ):
     """
     [DEPRECATED] Execute a full APICS-compliant multi-level MRP run.
@@ -280,7 +280,7 @@ def run_mrp_apics(
 def run_consumption(
     request: ConsumptionRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ):
     """
     Run forecast consumption against customer orders.
@@ -384,7 +384,7 @@ def run_consumption(
 def calculate_lot_sizing(
     request: LotSizingRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
 ):
     """
     Calculate lot sizing for a given net requirement.
@@ -429,7 +429,7 @@ def calculate_lot_sizing(
 def get_llc(
     recalculate: bool = Query(default=False, description="Recalculate LLCs from BOM"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ):
     """
     Get Low-Level Codes for all items.

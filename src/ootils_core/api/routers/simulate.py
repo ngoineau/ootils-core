@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.scenario.manager import ScenarioManager, _ALLOWED_FIELDS
@@ -94,7 +94,7 @@ class SimulateResponse(BaseModel):
 def create_simulation(
     body: SimulateRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("scenario:write")),
 ) -> SimulateResponse:
     """Create a new scenario with overrides and compute the delta vs base.
 

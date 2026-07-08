@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 
@@ -32,17 +32,18 @@ class CalcRunResponse(BaseModel):
     message: str
 
 
-# governance PR2: not applicable — #392 security-review audit (PR1):
-# propagation is deterministic recalculation (ADR-003), not a decision;
-# it re-derives ProjectedInventory/shortage state from events already
-# committed to the graph, it does not introduce new baseline facts. Left
-# require_auth-only; outside the L3 apply-to-baseline class this chantier
-# targets.
+# governance AN-2 (#392, PR2a): scoped `calc:run`. Propagation is
+# deterministic recalculation (ADR-003), not a decision — it re-derives
+# ProjectedInventory/shortage state from events already committed to the graph,
+# it introduces no new baseline facts, so no Decision Ladder human gate. But
+# "deterministic != free": triggering a recompute is a costly run, so it sits
+# behind the calc:run scope (an agent needs it explicitly; a read-only token
+# cannot launch it).
 @router.post("/run", response_model=CalcRunResponse)
 def trigger_calc_run(
     body: CalcRunRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("calc:run")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> CalcRunResponse:
     """Consume all unprocessed events for a scenario and run propagation."""

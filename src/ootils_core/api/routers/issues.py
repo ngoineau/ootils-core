@@ -12,7 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.shortage.detector import ShortageDetector
@@ -62,7 +62,7 @@ def get_issues(
     limit: int = Query(default=200, ge=1, le=1000, description="Max results to return (1–1000)"),
     offset: int = Query(default=0, ge=0, description="Result offset for pagination"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> IssuesResponse:
     """Return active shortages filtered by severity, horizon, item, and location with pagination."""

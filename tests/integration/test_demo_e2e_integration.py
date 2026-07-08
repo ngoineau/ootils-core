@@ -33,7 +33,8 @@ Premises verified in the script + seed before writing (not assumed):
     040; the human approval stamps actor_kind='human'.
   * api_tokens: name / actor_kind / scopes(TEXT[]) columns, migration 064; the
     demo mints DEMO-E2E-agent (['read','recommend:draft']) and DEMO-E2E-human
-    (['read','ingest','recommend:draft','recommend:approve']).
+    (the full operator superset: read, ingest, calc:run, graph:write,
+    scenario:write, recommend:draft, recommend:approve — AN-2 #392 PR2a).
   * inventory_snapshots / recommendation_outcomes exist (migrations 067/069).
 
 The seed is driven exactly as scripts/seed_demo_data.py's __main__ does
@@ -281,9 +282,17 @@ def test_demo_tokens_exist_with_expected_scopes(first_run):
 
     human = by_name["DEMO-E2E-human"]
     assert human["actor_kind"] == "human"
+    # AN-2 (#392, PR2a): the human token is the full operator superset (all
+    # scopes except `admin`) — the forecast run is calc:run, simulate /
+    # param-overrides / scenario delete are scenario:write, so the pre-AN-2
+    # {read, ingest, recommend:draft, recommend:approve} set no longer covers
+    # the demo's own calls.
     assert set(human["scopes"]) == {
         "read",
         "ingest",
+        "calc:run",
+        "graph:write",
+        "scenario:write",
         "recommend:draft",
         "recommend:approve",
     }

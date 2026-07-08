@@ -15,7 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db, resolve_scenario_id
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.kernel.graph.store import GraphStore
@@ -226,7 +226,7 @@ def get_projection(
     location_id: str = Query(..., description="Location identifier (UUID or external_id)"),
     grain: Optional[str] = Query(default=None, description="day / week / month — aggregates daily buckets"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> ProjectionResponse:
     """Return projected inventory buckets for an item/location pair, with supply/demand breakdown."""
@@ -346,7 +346,7 @@ def get_projection(
 @router.get("/portfolio", response_model=PortfolioResponse)
 def get_portfolio(
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> PortfolioResponse:
     """Return a shortage summary across all items/locations for a scenario."""
@@ -404,7 +404,7 @@ def get_pegging(
     node_id: str,
     depth: int = Query(default=3, ge=1, le=5, description="Max traversal depth"),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
     scenario_id: UUID = Depends(resolve_scenario_id),
 ) -> PeggingResponse:
     """Trace the pegging tree from a node — which demand consumed which supply."""

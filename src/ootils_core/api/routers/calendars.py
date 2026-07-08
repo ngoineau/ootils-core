@@ -16,7 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import get_db
 from ootils_core.db.types import DictRowConnection
 
@@ -121,7 +121,7 @@ class WorkingDaysResponse(BaseModel):
 def ingest_calendars(
     body: IngestCalendarsRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestCalendarsResponse:
     """
     Upsert non-working days (and other calendar entries) for a location.
@@ -224,7 +224,7 @@ def get_calendars(
     to_date: Optional[date] = Query(default=None),
     working_only: bool = Query(default=False),
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> GetCalendarsResponse:
     """
     Return calendar entries for a location.
@@ -292,7 +292,7 @@ def get_calendars(
 def compute_working_days(
     body: WorkingDaysRequest,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("read")),
 ) -> WorkingDaysResponse:
     """
     Compute a delivery date by adding N working days to a start date.

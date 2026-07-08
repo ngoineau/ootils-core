@@ -30,7 +30,7 @@ from psycopg import sql
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from ootils_core.api.auth import require_auth
+from ootils_core.api.auth import Principal, require_scope
 from ootils_core.api.dependencies import BASELINE_SCENARIO_ID, get_db
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.dq.engine import run_dq
@@ -476,7 +476,7 @@ def ingest_items(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert items by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -657,7 +657,7 @@ def ingest_locations(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert locations by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -947,7 +947,7 @@ def ingest_suppliers(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert suppliers by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -1047,7 +1047,7 @@ def ingest_supplier_items(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert supplier_items by (supplier_id, item_id). All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1186,7 +1186,7 @@ def ingest_on_hand(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert OnHandSupply nodes in the baseline scenario. All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1350,7 +1350,7 @@ def ingest_purchase_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert PurchaseOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1511,7 +1511,7 @@ def ingest_forecast_demand(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert ForecastDemand nodes. Keyed by (item, location, bucket_date, time_grain, scenario).
     All-or-nothing: any validation or FK error → HTTP 422.
@@ -1698,7 +1698,7 @@ def ingest_resources(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert resources by external_id. Also maintains a Resource node in the graph."""
     errors: list[dict] = []
@@ -1868,7 +1868,7 @@ def ingest_work_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert WorkOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({wo.item_external_id for wo in body.work_orders})
@@ -2022,7 +2022,7 @@ def ingest_customer_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert CustomerOrderDemand nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({co.item_external_id for co in body.customer_orders})
@@ -2180,7 +2180,7 @@ def ingest_transfers(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Upsert TransferSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({t.item_external_id for t in body.transfers})
@@ -2500,7 +2500,7 @@ def ingest_planning_params(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """SCD2-transparent upsert of item_planning_params (ADR-014 D3)."""
     from datetime import date
@@ -2777,7 +2777,7 @@ def ingest_routings(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _token: str = Depends(require_auth),
+    _principal: Principal = Depends(require_scope("ingest")),
 ) -> IngestResponse:
     """Full-reload routings + operations per (item, sequence). ADR-014 D2 unit checks at ingest."""
     # 1. Resolve item + resource external_ids in batch
