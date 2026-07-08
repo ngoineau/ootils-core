@@ -279,7 +279,10 @@ class TestRunDqAgent:
         assert result.priority_actions == ["Fix nulls"]
         assert result.model_used == "gpt-4.1-mini"
         assert len(result.issues) == 3  # 1 existing + 1 stat + 1 temporal
-        db.commit.assert_called()
+        # Transaction ownership belongs to the CALLER (the ingest path wraps
+        # the DQ run in conn.transaction(), where an explicit commit() is
+        # forbidden by psycopg and silently killed the agent on every ingest).
+        db.commit.assert_not_called()
 
     @patch("ootils_core.engine.dq.agent.agent.generate_llm_report")
     @patch("ootils_core.engine.dq.agent.agent.score_issues")
@@ -308,8 +311,15 @@ class TestRunDqAgent:
         with pytest.raises(RuntimeError, match="stat boom"):
             run_dq_agent(db, batch_id)
 
-        # Should have committed for the failed status update
-        assert db.commit.call_count >= 2
+        # The failed-status UPDATE is issued but NEVER committed here —
+        # persistence belongs to the caller's context (see run_dq_agent
+        # docstring trade-off).
+        db.commit.assert_not_called()
+        update_calls = [
+            c for c in db.execute.call_args_list
+            if "update dq_agent_runs" in c.args[0].strip().lower()
+        ]
+        assert len(update_calls) == 1, "failed-status UPDATE must still be issued"
 
     @patch("ootils_core.engine.dq.agent.agent.generate_llm_report")
     @patch("ootils_core.engine.dq.agent.agent.score_issues")

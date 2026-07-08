@@ -714,10 +714,20 @@ def run_dq(db: DictRowConnection, batch_id: UUID) -> DQResult:
         batch_id, entity_type, len(ingest_rows), passed_rows, failed_rows, warning_rows, len(all_issues),
     )
 
-    # Auto-trigger DQ Agent (stat + temporal + impact + LLM) after L1+L2
+    # Auto-trigger DQ Agent (stat + temporal + impact + LLM) after L1+L2.
+    # SAVEPOINT isolation: the nested transaction() opens a savepoint when the
+    # caller already holds one (the ingest path) or a plain transaction
+    # otherwise (the direct dq router path). On success the agent's writes
+    # commit with the caller; on ANY failure — Python OR SQL — the savepoint
+    # rolls back the agent's writes ALONE and the caller's transaction stays
+    # healthy (a raw SQL error would otherwise abort the shared transaction
+    # and 500 every subsequent statement of the batch — measured in CI the
+    # day the agent first ran to completion). Clean-slate on failure: no
+    # phantom 'running'/'failed' rows survive; the warning log is the signal.
     try:
         from ootils_core.engine.dq.agent import run_dq_agent
-        run_dq_agent(db, batch_id)
+        with db.transaction():
+            run_dq_agent(db, batch_id)
     except Exception as agent_exc:
         # Agent failure must never break the core DQ result
         logger.warning("dq_agent failed for batch %s (non-fatal): %s", batch_id, agent_exc)

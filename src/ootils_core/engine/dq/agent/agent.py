@@ -196,13 +196,25 @@ def run_dq_agent(
       4. Impact score all issues
       5. LLM report
       6. Persist everything
+
+    Transaction ownership: this function NEVER commits — persistence belongs
+    to the caller's context (the ingest path wraps the whole DQ run in
+    ``with db.transaction():``, where an explicit commit() is FORBIDDEN by
+    psycopg and used to make this agent fail silently on every ingest; the
+    direct router path relies on get_db's autocommit-on-success). Trade-off
+    accepted: the 'running' row is no longer visible from other connections
+    mid-run (runs are seconds-long), and on the ROUTER path an agent failure
+    that propagates rolls back its own 'failed' bookkeeping row — the 500 +
+    api_request_log remain the loud failure signal there; on the ingest path
+    the failure is caught upstream (non-fatal) so the 'failed' row commits
+    with the batch.
     """
     run_id = uuid4()
     started_at = datetime.now(timezone.utc)
 
     logger.info("dq_agent.run start batch_id=%s run_id=%s", batch_id, run_id)
 
-    # Mark run as running
+    # Mark run as running (persisted by the caller's transaction/commit)
     db.execute(
         """
         INSERT INTO dq_agent_runs
@@ -211,7 +223,6 @@ def run_dq_agent(
         """,
         (run_id, batch_id, started_at),
     )
-    db.commit()
 
     try:
         entity_type, total_rows = _get_entity_type(db, batch_id)
@@ -279,8 +290,6 @@ def run_dq_agent(
         # Enrich existing L1/L2 issues
         _enrich_existing_issues(db, run_id, existing_issues)
 
-        db.commit()
-
         logger.info(
             "dq_agent.run complete batch_id=%s run_id=%s issues=%d stat=%d temporal=%d",
             batch_id, run_id, len(all_issues), len(stat_issues), len(temporal_issues),
@@ -302,6 +311,9 @@ def run_dq_agent(
     except Exception as exc:
         logger.exception("dq_agent.run failed batch_id=%s run_id=%s: %s", batch_id, run_id, exc)
         completed_at = datetime.now(timezone.utc)
+        # Persisted by the caller's context when the failure is swallowed
+        # upstream (the ingest path); lost with the request rollback when the
+        # raise propagates (router path) — see the docstring trade-off.
         db.execute(
             """
             UPDATE dq_agent_runs
@@ -310,5 +322,4 @@ def run_dq_agent(
             """,
             (completed_at, run_id),
         )
-        db.commit()
         raise
