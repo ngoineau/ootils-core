@@ -169,9 +169,10 @@ def test_processed_flag_is_true_in_insert_sql() -> None:
 
 
 def test_reco_created_emits_when_count_positive() -> None:
-    # Two COUNT queries (recommendations, parameter_recommendations) then the
-    # INSERT. Counts sum to 5 -> emit with new_quantity=5.
-    conn = _RecordingConn(fetch_results=[{"n": 2}, {"n": 3}])
+    # Three COUNT queries (recommendations, parameter_recommendations,
+    # forecast_drift_recommendations) then the INSERT. Counts sum to 5 -> emit
+    # with new_quantity=5.
+    conn = _RecordingConn(fetch_results=[{"n": 2}, {"n": 3}, {"n": 0}])
     run_id = uuid4()
     scen = uuid4()
     eid = emit_recommendation_created_for_run(conn, run_id, scen, "shortage_watcher")
@@ -185,11 +186,12 @@ def test_reco_created_emits_when_count_positive() -> None:
 
 
 def test_reco_created_no_emit_when_zero() -> None:
-    conn = _RecordingConn(fetch_results=[{"n": 0}, {"n": 0}])
+    conn = _RecordingConn(fetch_results=[{"n": 0}, {"n": 0}, {"n": 0}])
     eid = emit_recommendation_created_for_run(conn, uuid4(), uuid4(), "dq_watcher")
     assert eid is None
-    # Only the two COUNT queries ran, no INSERT.
-    assert len(conn.calls) == 2
+    # Only the three COUNT queries ran (recommendations,
+    # parameter_recommendations, forecast_drift_recommendations), no INSERT.
+    assert len(conn.calls) == 3
     assert all("COUNT(*)" in sql for sql, _ in conn.calls)
 
 
