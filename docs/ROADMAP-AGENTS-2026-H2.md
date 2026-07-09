@@ -78,34 +78,41 @@
 
 *Tout ce bloc ferme les P0 du pari AI-native — mesurés sur pilote, confirmés par réfutation. C'est la priorité absolue après H0.*
 
-### AN-1 — Émission d'events complète + flotte en subscribe (#401) — P0
+**H1 : FAIT 5/5 (2026-07-08).** Les cinq chantiers ci-dessous sont mergés sur `main` et vérifiés (fichiers, tests, garde-fous CI présents dans le repo). H2 (§5) est désormais la vague courante.
+
+### AN-1 — Émission d'events complète + flotte en subscribe (#401) — P0 — ✅ FAIT (PR #430, mergée)
 **Constat confirmé** : création de reco, détection de shortage, fin de calc run n'écrivent AUCUN event (`transfer.py:329-355`, `detector.py:174-210`, `calc_run.py`) ; la machine à preuve non plus (`capture.py:197`, `evaluator.py:705`) ; aucun watcher ne consomme `/v1/stream` (le flag `--subscribe` n'existe pas). Le principe « Streamable » est produit sans consommateur et writes sans producteur.
 **Livrables** : (a) étendre `VALID_EVENT_TYPES` + CHECK (migration idempotente) avec `recommendation_created`/`shortage_detected`/`calc_run_finished`/`outcome_evaluated`/`snapshot_captured` ; émettre dans les 5 sites d'écriture ; (b) `--subscribe` sur les watchers (`/v1/stream?cursor=&once=true` en mode cron — le producteur SSE est prêt) ; (c) garde-fou CI : un test qui échoue si un write gouverné n'émet pas d'event (le « garde-fou » de #401).
 **Attention (dette tracée)** : trancher AVANT d'émettre `shortage_detected` laquelle des deux vérités shortage émet (ADR-021 : la table `shortages`/ShortageDetector — c'est elle le système de persistance canonique).
 **Acceptation** : re-run pilote → `GET /v1/stream?once=true` rejoue N > 0 events typés couvrant recos/shortages/calc/outcomes ; ≥ 1 watcher tourne en subscribe.
+**Vérifié dans le repo** : migration `071_events_fleet_types.sql` (les 5 types) ; garde-fou CI `tests/integration/test_fleet_events_integration.py` (« la thèse North Star » — cases 1-7, un write gouverné sans event = rouge) ; `--subscribe` câblé sur `scripts/agent_shortage_watcher.py` via `scripts/agent_subscribe.py` (`drain_stream`/`fetch_stream_cursor`, cursor persisté).
 
-### AN-2 — Scopes bout-en-bout + budgets par token (A2-PR2 + ADR-029) — P0
+### AN-2 — Scopes bout-en-bout + budgets par token (A2-PR2 + ADR-029) — P0 — ✅ FAIT (PRs #434/#435, mergées ; ADR-032 écrit)
 **Constat confirmé** : `require_auth` ne vérifie JAMAIS les scopes (auth.py:539-553) — seuls 7 routers sur ~30 utilisent `require_scope` ; un token read-only peut déclencher `POST /v1/mrp/run` ou muter le graphe. `api_tokens.rate_per_min` (migration 064) est du schéma mort : lu par aucun code.
 **Livrables** : (a) basculer TOUS les routers d'écriture (`mrp`, `ingest`, `calc`, `param_overrides`, `simulate`, `graph`, `mps`, `drp`…) vers `require_scope` — inventaire exhaustif par grep, aucun oublié ; (b) appliquer `rate_per_min` par token (middleware au checkout du Principal) ; (c) endpoints issue/revoke de tokens (gouvernés admin) ; (d) `/metrics` ; (e) **écrire ADR-029** (avec H0).
 **Acceptation** : test d'intégration — token scope read tente un write sur chaque famille de routes → 403 systématique ; token agent dépasse son rate → 429.
+**Vérifié dans le repo** : `require_scope` présent sur les 29 routers montés sous `src/ootils_core/api/routers/`, zéro `require_auth` restant côté routeurs ; `routers/tokens.py` (`POST/GET/DELETE /v1/tokens`) ; `GET /metrics` (`api/app.py`) ; `docs/ADR-032-scope-grid-and-budgets.md` écrit (grille des 8 scopes, doctrine coût≠réversibilité, `_RateCounter`) ; matrice d'enforcement `tests/integration/test_agent_floor_integration.py`.
 
-### SUP-1 — #423 : ADR-020 PAS 4, une seule maths MRP — P0 (décision pilote 2026-07-06, absorbe #415)
+### SUP-1 — #423 : ADR-020 PAS 4, une seule maths MRP — P0 (décision pilote 2026-07-06, absorbe #415) — ✅ FAIT (PR #432, mergée ; issue #423 fermée)
 **Constat confirmé + arbitrage pilote** : le moteur APICS (`POST /v1/mrp/run`) **réimplémente la maths** du cœur au lieu de l'appeler — chaque amélioration du cœur (fenêtre de consommation #349) laisse l'API en retard (« deux moteurs, deux chiffres »), résidu de parité ~4 % médian, garde-fou CI en xfail qui documente la dérive au lieu de l'empêcher. Fermer #415 seul soignerait un symptôme en laissant la machine à divergences en place.
 **Livrables (3 PR, détail dans #423)** : (1) arbitrages sémantiques tranchés dans le cœur (frozen fence 🎯, demande indépendante des composants, pièces de rechange, L4L/order_multiple) ; (2) délégation — l'APICS appelle le cœur et ne garde que la matérialisation graphe (`graph_integration`), **parité xfail → VERT DUR** ; (3) forkabilité réelle — l'on-hand APICS est en `BASELINE` codé en dur (risque nommé par l'ADR-020 : « les scénarios mentiraient ») → scénariser lecture+écriture via le loader du cœur, ferme une violation North Star silencieuse.
 **Acceptation** : parité math core ↔ APICS en vert dur CI (Early Buy inclus — ferme #415) ; `POST /v1/mrp/run` scénarisé bout-en-bout ; la maths MRP n'existe plus qu'à UN endroit ; goldens du cœur inchangés.
+**Vérifié dans le repo** : `.github/workflows/ci.yml` (« MRP A-vs-B parity guard #332 / #423 PR2 » — `parity_mrp_engines.py --check --max-median-drift 0.05`, gate dur, plus d'xfail) ; `tests/integration/test_mrp_delegation_integration.py` (run APICS sur fork isolé, overlay de scénario respecté) ; `docs/ADR-020-mrp-consolidation.md` §Séquence de migration PAS 4 « délégation ✅ fait ». Échelon DRP (per-site) reste hors périmètre #423, gated sur la demande per-site Pyramide — non réclamé ici.
 
-### DEM-1 — Câbler le routage tête/traîne + première exception demande — P0
+### DEM-1 — Câbler le routage tête/traîne + première exception demande — P0 — ✅ FAIT (PR #438 routage + PR #439 watcher, mergées ; ADR-033 écrit ; migration 072)
 **Constat confirmé** : `route()`/`classify()`/`SeriesFeatures` (577 lignes testées) ne sont appelés QUE par les tests ; le `HierarchicalRunner` consomme un mapping que rien ne peuple. La réponse au mur d'échelle du DESIGN est une bibliothèque inerte.
 **Livrables** : (a) `build_series_features(item, location)` dans le repository (profondeur histo, zero_ratio, ABC via `item_asp` × volume, force saisonnière — tout est déjà calculable) ; appel de `route()` dans le runner quand `routing_decisions` absent ; raison de routage persistée (auditabilité) ; (b) **tracking signal** : surveiller `accuracy.bias`/MASE glissant sur les runs persistés → exception DRAFT gouvernée quand ça dérape (réutilise l'existant ; crée la PREMIÈRE boucle d'exception demande — gap confirmé « aucun watcher côté demande »).
 **Acceptation** : run hiérarchique pilote → décisions de routage émises et tracées pour 100 % des séries ; une dérive provoquée en test → reco DRAFT `FORECAST_DRIFT`.
+**Vérifié dans le repo** : `auto_route` câblé dans `pyramide/repository.py` et `pyramide/hierarchy/runner.py` (opt-in, byte-identique par défaut) ; `scripts/agent_forecast_watcher.py` (premier watcher DEMANDE de la flotte) ; migration `072_forecast_drift_recommendations.sql` ; `tests/integration/test_forecast_watcher_integration.py` ; `docs/ADR-033-demand-routing-and-drift.md` écrit.
 
-### PROD-QW — Paquet quick-wins production (tous S, tous confirmés)
+### PROD-QW — Paquet quick-wins production (tous S, tous confirmés) — ✅ FAIT (PR #437, mergée)
 - **Restore prouvé + copie off-host (#192 — P0)** : script `pg_restore` vers DB jetable + test + rsync/rclone off-host. « Un backup jamais restauré n'est pas un backup. »
 - **Résilience pool** : `check=ConnectionPool.check_connection`, `max_lifetime`, `statement_timeout` + `idle_in_transaction_session_timeout` globaux.
 - **pip-audit en CI + CodeQL default-setup** (2 gates, ~30 min).
 - **`--cov-branch --cov-fail-under=<baseline>`** sur le job pytest (pytest-cov déjà en dep).
 - **`GET /v1/audit`** : lire `api_request_log` (écrit depuis app.py:120, lu par personne) — pagination + filtres actor/path/date, scope admin. « Audit is a feature, not telemetry » devient vrai.
 - **Webhook sortant minimal** : POST configurable sur transition de reco vers un statut L3 en attente — « l'exception te trouve » sans UI.
+**Vérifié dans le repo** : `scripts/restore_postgres.sh` + `scripts/backup_offhost.sh` ; `db/connection.py` (les 4 réglages de résilience pool) ; `.github/workflows/ci.yml` (`--cov-branch --cov-fail-under=40`) + `.github/workflows/codeql.yml` + job pip-audit dans `ci.yml` ; `api/routers/audit.py` (`GET /v1/audit`, scope admin) ; `notifications/l3_webhook.py`.
 
 ---
 
