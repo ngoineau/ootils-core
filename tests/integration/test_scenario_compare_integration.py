@@ -82,7 +82,14 @@ def client(migrated_db):
     with a direct dict_row connection (which also disables the api_request_log
     middleware — app.py:_should_audit_request skips overridden-get_db apps, so
     the read-purity assertion can focus on the typed ``events`` table). No
-    lifespan: the compare path needs no startup recovery/pool sizing."""
+    lifespan: the compare path needs no startup recovery/pool sizing.
+
+    OOTILS_API_TOKEN is re-asserted here at RUN time, not just at import:
+    auth reads the env per request, and an earlier module in the suite may
+    have set a different token after collection (cross-module env pollution
+    — the setdefault above is only collection-safe, same class of trap as
+    the ranking pollution lesson). test_stream_integration.py:73 pattern."""
+    os.environ["OOTILS_API_TOKEN"] = _TOKEN
     os.environ["DATABASE_URL"] = migrated_db
 
     from fastapi.testclient import TestClient
