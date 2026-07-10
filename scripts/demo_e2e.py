@@ -1,32 +1,32 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-demo_e2e.py — the executable wedge runbook (#408).
+demo_e2e.py â€” the executable wedge runbook (#408).
 
 Drives the whole "autonomous shortage control tower with scenario-backed
 recommendations" wedge end to end, in-process, against a real PostgreSQL
 database, printing a narrative an operator can read out loud in front of a
 prospect. It is the executable twin of docs/DEMO-RUNBOOK.md.
 
-It assembles EXISTING product surfaces only — zero new mechanics: the same
+It assembles EXISTING product surfaces only â€” zero new mechanics: the same
 FastAPI routers a client would call over HTTP (mounted on an in-process
 TestClient bound to the target DSN), plus the same in-process agent entry
 points the fleet uses (agent_shortage_watcher.main). Nothing here computes
 supply-chain truth of its own; every number comes from the product.
 
 Runs on TWO databases:
-  * the PILOTE base (36k+ items, real demand_history) — the live demo, and
+  * the PILOTE base (36k+ items, real demand_history) â€” the live demo, and
   * the CI-seeded base (scripts/seed_demo_data.py: VALVE-02 shortage,
-    XFER-01 DC-ATL -> DC-LAX transfer opportunity) — the automated check.
+    XFER-01 DC-ATL -> DC-LAX transfer opportunity) â€” the automated check.
 Each step self-detects what it can do and reports PASS / SKIP(reason) / FAIL.
 
 NON-DESTRUCTIVE, ABSOLUTE: no DELETE / TRUNCATE / destructive UPDATE, ever.
-Only the product's own normal writes happen — mint two demo tokens, ensure one
+Only the product's own normal writes happen â€” mint two demo tokens, ensure one
 distribution link, emit DRAFT recommendations, capture snapshots, evaluate
 outcomes, fork + archive one what-if scenario. Every discovery query is a
 read-only, parameterized SELECT. The DSN is NEVER printed (masked in every log
 line and in the scoreboard artefact).
 
-Idempotent: re-running duplicates nothing meaningful — tokens are reused by
+Idempotent: re-running duplicates nothing meaningful â€” tokens are reused by
 name, the demo link upserts ON CONFLICT, recommendations are uuid5-keyed,
 snapshots upsert, outcomes upsert, the fork is archived (never deleted).
 
@@ -70,12 +70,13 @@ _AGENT_TOKEN_NAME = "DEMO-E2E-agent"
 _HUMAN_TOKEN_NAME = "DEMO-E2E-human"
 # AN-2 (#392, PR2a) scope enforcement is now live end-to-end, so these grants
 # must cover every call each token makes:
-#   * AGENT — reads (step1/step8) + drafts (step4 DRP run is recommend:draft;
-#     step5 DRAFT->REVIEWED is recommend:draft). It deliberately does NOT hold
-#     recommend:approve, so step5's REVIEWED->APPROVED is refused (403) — the
+#   * AGENT â€” reads (step1; step8 scenario compare; step9 stream) + drafts
+#     (step4 DRP run is recommend:draft; step5 DRAFT->REVIEWED is
+#     recommend:draft). It deliberately does NOT hold
+#     recommend:approve, so step5's REVIEWED->APPROVED is refused (403) â€” the
 #     whole point of the governance gate demo. No calc:run: no agent step
 #     launches a run through the API (the watchers in step3 are DB-direct).
-#   * HUMAN — the full operator superset (all scopes except `admin`): the
+#   * HUMAN â€” the full operator superset (all scopes except `admin`): the
 #     forecast run (step2) is calc:run; simulate / param-overrides / archive
 #     (step7) and scenario delete are scenario:write; snapshots + outcomes
 #     evaluate (step6) are ingest; the L3 approval (step5) is recommend:approve.
@@ -91,13 +92,13 @@ _HUMAN_SCOPES = [
 ]
 
 # The dedicated demo distribution link (step 4) is tagged so it is
-# identifiable and idempotent. Name only — the row itself is keyed on its own
+# identifiable and idempotent. Name only â€” the row itself is keyed on its own
 # deterministic id.
 _DEMO_LINK_TAG = "DEMO-E2E"
 
 
 # ---------------------------------------------------------------------------
-# Presentation helpers (narrative CLI — print() is intentional)
+# Presentation helpers (narrative CLI â€” print() is intentional)
 # ---------------------------------------------------------------------------
 
 PASS = "PASS"
@@ -139,7 +140,7 @@ def _banner(text: str) -> None:
 def _step_header(number: int, title: str) -> None:
     print()
     print("-" * _WIDTH)
-    print(f"STEP {number} — {title}")
+    print(f"STEP {number} â€” {title}")
     print("-" * _WIDTH)
 
 
@@ -167,7 +168,7 @@ class DemoContext:
     run_bench: bool
     show_tokens: bool
     # What-if base scenario for step 7 (default baseline; a fork enables the
-    # pilot fork-on-fork counter-factual — #414). The literal 'baseline' is a
+    # pilot fork-on-fork counter-factual â€” #414). The literal 'baseline' is a
     # legal value the simulate router resolves to the sentinel UUID.
     whatif_base_scenario: str = BASELINE_SCENARIO_ID
     # Populated as steps run.
@@ -196,7 +197,7 @@ class DemoContext:
 
 
 # ---------------------------------------------------------------------------
-# Direct DB access (read-only discovery + token minting) — its own short-lived
+# Direct DB access (read-only discovery + token minting) â€” its own short-lived
 # connections, autocommit, dict_row. Never reuses the app pool.
 # ---------------------------------------------------------------------------
 
@@ -209,7 +210,7 @@ def _connect(dsn: str):
 
 
 def _schema_version(dsn: str) -> Optional[str]:
-    """MAX(version) applied — the latest migration filename, or None on a
+    """MAX(version) applied â€” the latest migration filename, or None on a
     fresh/uninitialised DB."""
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -231,7 +232,7 @@ def build_client(dsn: str) -> Any:
 
     # NOTE: the get_db override below only covers ROUTE handlers. The auth
     # layer's minted-token lookup needs DATABASE_URL in the env, which main()
-    # sets BEFORE the first ootils_core import (see the comment there) — by
+    # sets BEFORE the first ootils_core import (see the comment there) â€” by
     # the time this function runs it is too late to set it.
     from ootils_core.api.app import create_app
     from ootils_core.api.dependencies import get_db
@@ -249,7 +250,7 @@ def build_client(dsn: str) -> Any:
 
 
 # ===========================================================================
-# STEP 0 — boot + migration catch-up + read-only inventory
+# STEP 0 â€” boot + migration catch-up + read-only inventory
 # ===========================================================================
 
 
@@ -339,7 +340,7 @@ def _inventory(dsn: str) -> dict[str, int]:
 
 
 # ===========================================================================
-# STEP 1 — mint two governed tokens (idempotent by name)
+# STEP 1 â€” mint two governed tokens (idempotent by name)
 # ===========================================================================
 
 
@@ -359,7 +360,7 @@ def _mint_token(
     """Mint one live api_tokens row via the shared helper; return (cleartext,
     token_id).
 
-    Delegates to ``ootils_core.api.token_service.mint_token`` — the SINGLE place
+    Delegates to ``ootils_core.api.token_service.mint_token`` â€” the SINGLE place
     that knows how a token is generated (256-bit os.urandom), hashed (SHA-256)
     and persisted (#392 AN-2 PR2b). The cleartext exists ONLY in this process;
     the DB stores its hash + prefix. The ``with _connect(dsn)`` block commits on
@@ -383,7 +384,7 @@ def _ensure_token(
     mint a FRESH one and let the operator revoke the stale row out-of-band.
     Minting a new secret is the only honest option; the name still makes the
     set findable. ``reused`` is True only when no fresh mint was needed
-    (i.e. it never is here — kept for API symmetry / future caching)."""
+    (i.e. it never is here â€” kept for API symmetry / future caching)."""
     existing = _find_token_id_by_name(dsn, name)
     clear, _token_id = _mint_token(
         dsn, name=name, actor_kind=actor_kind, scopes=scopes
@@ -396,7 +397,7 @@ def _ensure_token(
 def step1_tokens(ctx: DemoContext) -> StepResult:
     """Mint (or refresh) the two DEMO-E2E tokens: an AGENT (read +
     recommend:draft) and a HUMAN (read + ingest + recommend:draft +
-    recommend:approve). The agent token cannot cross the L3 human gate — that
+    recommend:approve). The agent token cannot cross the L3 human gate â€” that
     asymmetry is the whole point of step 5. Cleartext is never printed unless
     --show-tokens (operator escape hatch); the non-secret prefix always is."""
     agent_clear, agent_prefix, agent_reused = _ensure_token(
@@ -439,19 +440,19 @@ def step1_tokens(ctx: DemoContext) -> StepResult:
 
 
 # ===========================================================================
-# STEP 2 — forecast + FVA
+# STEP 2 â€” forecast + FVA
 # ===========================================================================
 
 
 def _discover_forecast_series(dsn: str) -> Optional[tuple[str, str, int]]:
     """Find the (item_external_id, location_external_id, n_rows) with the most
-    booking-based demand_history rows — the richest series to forecast.
+    booking-based demand_history rows â€” the richest series to forecast.
 
     Mirrors pyramide.repository's booking predicates (stream='regular',
     inter-entity excluded, booked_date present, strict past). Resolves
-    dh.warehouse_id to a site via external_id ∪ location_aliases (ADR-031 —
+    dh.warehouse_id to a site via external_id âˆª location_aliases (ADR-031 â€”
     the run-5 pilot execution proved the bare external_id equality misses
-    every aliased ERP code; reverse resolution code→site, DISTINCT on aliases
+    every aliased ERP code; reverse resolution codeâ†’site, DISTINCT on aliases
     because one code may legitimately exist under several source_systems for
     the SAME site and must not fan out the row counts). Read-only. Returns
     None if no exploitable series exists."""
@@ -492,10 +493,10 @@ def step2_forecast(ctx: DemoContext) -> StepResult:
         # Distinguish "empty demand_history" from the pilot-data onboarding gap
         # observed on ootils_pilote_test: demand_history.warehouse_id carries
         # ERP numeric DC codes ('87', '286', ...) that were never mapped to
-        # locations.external_id (alpha codes 'DAL', 'CAN', ...) — so the
+        # locations.external_id (alpha codes 'DAL', 'CAN', ...) â€” so the
         # migration-047 join yields zero rows even over millions of bookings.
         # Mapping those codes is a data-onboarding decision for the pilot
-        # (🎯 see DEMO-RUNBOOK caveats), not something this demo fabricates.
+        # (ðŸŽ¯ see DEMO-RUNBOOK caveats), not something this demo fabricates.
         with _connect(ctx.dsn) as conn:
             diag = conn.execute(
                 """
@@ -514,13 +515,13 @@ def step2_forecast(ctx: DemoContext) -> StepResult:
             detail = (
                 f"demand_history has {int(diag['total']):,} rows but NONE of its "
                 f"{int(diag['warehouses'])} warehouse_id codes resolve to a site "
-                "(external_id or alias, ADR-031) — pilot data-onboarding gap "
+                "(external_id or alias, ADR-031) â€” pilot data-onboarding gap "
                 "(load the code mapping via POST /v1/ingest/locations aliases)"
             )
         else:
             detail = (
                 f"no exploitable booking-based series (mapped warehouse codes: "
-                f"{int(diag['mapped'])}/{int(diag['warehouses'])}) — mapped rows "
+                f"{int(diag['mapped'])}/{int(diag['warehouses'])}) â€” mapped rows "
                 "exist but none matches the booking predicates"
             )
         return StepResult(
@@ -546,7 +547,7 @@ def step2_forecast(ctx: DemoContext) -> StepResult:
     )
     if create.status_code != 201:
         # 422 "historical demand required" is possible if the richest series is
-        # below the engine's minimum — treat as an honest SKIP, not a FAIL.
+        # below the engine's minimum â€” treat as an honest SKIP, not a FAIL.
         if create.status_code == 422:
             return StepResult(
                 number=2,
@@ -623,7 +624,7 @@ def _aggregate_accuracy(metrics: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ===========================================================================
-# STEP 3 — governed watchers
+# STEP 3 â€” governed watchers
 # ===========================================================================
 
 
@@ -685,7 +686,7 @@ def _draft_reco_levels(dsn: str) -> dict[str, int]:
 
 
 # ===========================================================================
-# STEP 4 — DRP inter-site transfer
+# STEP 4 â€” DRP inter-site transfer
 # ===========================================================================
 
 
@@ -737,7 +738,7 @@ def step4_drp(ctx: DemoContext) -> StepResult:
     emitted (fair-share + logistic rounding visible in each reco's evidence).
     On the CI-seeded base, XFER-01 DC-ATL -> DC-LAX already exists (seed_drp)
     and DRP drafts the 180-unit transfer out of the box. If no link exists at
-    all, this SKIPs — the demo never fabricates master data beyond an existing
+    all, this SKIPs â€” the demo never fabricates master data beyond an existing
     link (the spec allows creating ONE link, but only when a real excess/
     deficit pair is found; discovery already requires a link, so a missing one
     means there is genuinely no transfer to show)."""
@@ -748,12 +749,12 @@ def step4_drp(ctx: DemoContext) -> StepResult:
               f"{pair['src_ext']} -> {pair['dst_ext']} "
               f"(source on-hand {pair['src_onhand']:,.0f})")
     else:
-        print("  No distribution_link with a stocked source found — running DRP "
+        print("  No distribution_link with a stocked source found â€” running DRP "
               "over the whole plan anyway (baseline).")
 
     run = ctx.client.post(
         "/v1/drp/run",
-        headers=ctx.agent_auth,  # requires recommend:draft — the agent token has it
+        headers=ctx.agent_auth,  # requires recommend:draft â€” the agent token has it
         json={"horizon_days": 180},
     )
     if run.status_code != 200:
@@ -810,7 +811,7 @@ def _sample_transfer_reco(dsn: str) -> Optional[dict[str, Any]]:
         return None
     evidence = row["evidence"] or {}
     # evidence shape is emitter-defined; surface a couple of telling keys if
-    # present, else a compact repr — never assume a fixed schema.
+    # present, else a compact repr â€” never assume a fixed schema.
     keys = ("fair_share_qty", "rounded_qty", "transfer_multiple", "deficit_qty")
     picked = {k: evidence[k] for k in keys if isinstance(evidence, dict) and k in evidence}
     note = ", ".join(f"{k}={v}" for k, v in picked.items()) or "see evidence trail"
@@ -822,12 +823,12 @@ def _sample_transfer_reco(dsn: str) -> Optional[dict[str, Any]]:
 
 
 # ===========================================================================
-# STEP 5 — cryptographic governance gate (#392)
+# STEP 5 â€” cryptographic governance gate (#392)
 # ===========================================================================
 
 
 def _pick_draft_reco(dsn: str) -> Optional[dict[str, Any]]:
-    """Newest baseline DRAFT recommendation — the subject of the gate demo.
+    """Newest baseline DRAFT recommendation â€” the subject of the gate demo.
     Prefer one this demo's runs just created (any DRAFT works)."""
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -855,7 +856,7 @@ def step5_gate(ctx: DemoContext) -> StepResult:
     (the agent may), then:
       * the AGENT token attempts REVIEWED -> APPROVED  => 403 (human-only gate)
       * the HUMAN token performs REVIEWED -> APPROVED  => 200
-    The actor_kind that decides the gate comes from the TOKEN, never the body —
+    The actor_kind that decides the gate comes from the TOKEN, never the body â€”
     an agent cannot self-declare 'human'. SKIP if no DRAFT reco exists (steps 3
     and 4 were both skipped/empty)."""
     reco = _pick_draft_reco(ctx.dsn)
@@ -884,7 +885,7 @@ def step5_gate(ctx: DemoContext) -> StepResult:
         )
     print("  Agent DRAFT -> REVIEWED            : 200 (agents may review)")
 
-    # AGENT attempts the L3 approval — must be refused by the human gate. The
+    # AGENT attempts the L3 approval â€” must be refused by the human gate. The
     # body deliberately LIES actor_kind='human' to prove the token wins.
     agent_approve = ctx.client.post(
         f"/v1/recommendations/{reco_id}/transition",
@@ -900,7 +901,7 @@ def step5_gate(ctx: DemoContext) -> StepResult:
     print("  Agent REVIEWED -> APPROVED         : 403 (blocked)")
     print(f"    gate detail: {gate_detail}")
 
-    # HUMAN performs the approval — passes both the scope floor and the gate.
+    # HUMAN performs the approval â€” passes both the scope floor and the gate.
     human_approve = ctx.client.post(
         f"/v1/recommendations/{reco_id}/transition",
         headers=ctx.human_auth,
@@ -923,14 +924,14 @@ def step5_gate(ctx: DemoContext) -> StepResult:
 
 
 # ===========================================================================
-# STEP 6 — the proof machine (snapshots -> outcomes -> KPIs)
+# STEP 6 â€” the proof machine (snapshots -> outcomes -> KPIs)
 # ===========================================================================
 
 
 def step6_proof(ctx: DemoContext) -> StepResult:
     """Close the value-proof loop: capture inventory snapshots (human token,
     ingest scope), evaluate recommendation outcomes, then read the five proof
-    KPIs. Every KPI is NULL-honest — 'n/a (no data)' for NULL, never a
+    KPIs. Every KPI is NULL-honest â€” 'n/a (no data)' for NULL, never a
     misleading 0."""
     cap = ctx.client.post(
         "/v1/snapshots", headers=ctx.human_auth, json={}
@@ -991,13 +992,13 @@ def _kpi(value: Any) -> str:
 
 
 # ===========================================================================
-# STEP 7 — forkable what-if (scenario + param overlay + honest delta)
+# STEP 7 â€” forkable what-if (scenario + param overlay + honest delta)
 # ===========================================================================
 
 
 def _discover_shortage_coord(dsn: str, base_scenario_id: str) -> Optional[dict[str, Any]]:
     """A real (item, location) that currently has an active shortage in the
-    given base scenario — the coordinate whose safety stock we relax in a fork.
+    given base scenario â€” the coordinate whose safety stock we relax in a fork.
     Read-only."""
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -1061,7 +1062,7 @@ def _pick_pi_node_for_fork(
     dsn: str, base_scenario_id: str, item_id: str, location_id: Optional[str]
 ) -> Optional[str]:
     """A ProjectedInventory node id (in the base scenario) to hang a simulate
-    override on — the node override path that /v1/simulate recomputes a shortage
+    override on â€” the node override path that /v1/simulate recomputes a shortage
     delta from. We nudge its opening_stock upward, a whitelisted simulate field,
     to prove the fork recomputes an HONEST delta (new/resolved)."""
     conds = ["node_type = 'ProjectedInventory'", "active", "scenario_id = %s", "item_id = %s"]
@@ -1072,7 +1073,7 @@ def _pick_pi_node_for_fork(
     where = " AND ".join(conds)
     with _connect(dsn) as conn:
         row = conn.execute(
-            f"SELECT node_id FROM nodes WHERE {where} "  # noqa: S608 — static columns, params bound
+            f"SELECT node_id FROM nodes WHERE {where} "  # noqa: S608 â€” static columns, params bound
             "ORDER BY bucket_sequence LIMIT 1",
             params,
         ).fetchone()
@@ -1082,11 +1083,11 @@ def _pick_pi_node_for_fork(
 def step7_whatif(ctx: DemoContext) -> StepResult:
     """Forkable counter-factual, honest delta. Demonstrate BOTH forkable
     surfaces on ONE fork:
-      (a) POST /v1/simulate — fork baseline, apply a node override on a PI
+      (a) POST /v1/simulate â€” fork baseline, apply a node override on a PI
           node at a shortage coordinate, recompute, return the HONEST shortage
           delta (new/resolved, delta_computed flag). This is the chiffered
           what-if.
-      (b) POST /v1/scenarios/{fork}/param-overrides — attach a safety_stock_qty
+      (b) POST /v1/scenarios/{fork}/param-overrides â€” attach a safety_stock_qty
           overlay override (#347) to that same fork on the shortage item, then
           list it back: proof the 15 planning-param fields are forkable via
           REST (L0, never promoted onto baseline).
@@ -1099,7 +1100,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
     Base scenario: ctx.whatif_base_scenario (default baseline). A non-baseline
     fork here is the pilot fork-on-fork path (#414): discovery, node pick, and
     the /v1/simulate base_scenario_id all read that fork, so the counter-factual
-    is a fork OF the pilot fork — never touching baseline."""
+    is a fork OF the pilot fork â€” never touching baseline."""
     base = ctx.whatif_base_scenario
     is_baseline_base = base == BASELINE_SCENARIO_ID
     if not is_baseline_base:
@@ -1109,7 +1110,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
     if coord is None:
         # No active shortage on the base (e.g. no recent calc run). Fall back to
         # ANY ProjectedInventory coordinate and run the counter-factual in the
-        # OTHER direction: opening_stock=0 ("what if we had less stock?") — an
+        # OTHER direction: opening_stock=0 ("what if we had less stock?") â€” an
         # equally honest fork whose delta shows NEW shortages instead of
         # resolved ones. Only SKIP when the base has no PI node at all to fork.
         coord = _discover_any_pi_coord(ctx.dsn, base)
@@ -1124,7 +1125,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
                     f"node on base scenario {base[:8]} to fork"
                 ),
             )
-        print("  No active shortage on the base — falling back to a PI "
+        print("  No active shortage on the base â€” falling back to a PI "
               "coordinate, tightening instead of relaxing")
     print(f"  What-if coord  : item={coord['item_ext']} "
           f"location={coord['loc_ext']} "
@@ -1167,7 +1168,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
           f"net={delta.get('net_shortage_change')}")
 
     # (b) Attach a planning-param overlay override to the SAME fork and read it
-    # back — proof the #347 whitelist is forkable via REST. safety_stock_qty is
+    # back â€” proof the #347 whitelist is forkable via REST. safety_stock_qty is
     # a whitelisted field; the coordinate is the shortage item (+ location when
     # it carries one).
     overlay_ok = False
@@ -1194,12 +1195,12 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
             overlay_note = f"safety_stock_qty overlay set, {n_over} override(s) on fork"
         else:
             # A 422 here (e.g. item has no planning-params row) is an honest,
-            # non-fatal outcome — the fork + simulate delta already proved
+            # non-fatal outcome â€” the fork + simulate delta already proved
             # forkability; report it without failing the step.
             overlay_note = f"overlay refused ({po.status_code}): {po.text[:100]}"
     print(f"  Param overlay  : {overlay_note}")
 
-    # Archive the fork — TTL pattern, never DELETE. DELETE /v1/scenarios/{id}
+    # Archive the fork â€” TTL pattern, never DELETE. DELETE /v1/scenarios/{id}
     # sets status='archived' (see scenarios.py), the product's own archival.
     arch = ctx.client.delete(f"/v1/scenarios/{fork_id}", headers=ctx.human_auth)
     archived = arch.status_code == 204
@@ -1211,7 +1212,7 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
         status=PASS,
         detail=(
             f"fork {fork_id[:8]} delta new={n_new}/resolved={n_resolved}"
-            # 0/0 with a failed recompute is NOT "no change" — say so loudly.
+            # 0/0 with a failed recompute is NOT "no change" â€” say so loudly.
             + ("" if sim_body["delta_computed"] else " (DELTA NOT COMPUTED)")
             + f", overlay={'set' if overlay_ok else 'n/a'}, archived={archived}"
             # Only mention the base when it is NOT baseline, to keep the CI-seeded
@@ -1232,14 +1233,130 @@ def step7_whatif(ctx: DemoContext) -> StepResult:
 
 
 # ===========================================================================
-# STEP 8 — StreamChanges (bounded replay by cursor)
+# STEP 8 â€” Scenario compare (SC-1: 2 forks ranked in $ side by side)
 # ===========================================================================
 
 
-def step8_stream(ctx: DemoContext) -> StepResult:
+def _fmt_usd(value: Optional[float]) -> str:
+    """$-honest rendering for this step's own $ columns: None -> 'n/a' (never
+    a masked $0), else 2dp with thousands separators."""
+    if value is None:
+        return "n/a"
+    return f"${value:,.2f}"
+
+
+def _fmt_pct(value: Optional[float]) -> str:
+    """fill_rate_est is a 0..1 ratio; None-honest (missing/zero-demand -> 'n/a'
+    rather than a masked 0%/100%)."""
+    if value is None:
+        return "n/a"
+    return f"{value * 100:,.1f}%"
+
+
+def step8_compare(ctx: DemoContext) -> StepResult:
+    """SC-1 acceptance criterion: GET /v1/scenarios/compare on (baseline, the
+    step 7 what-if fork) â€” 2 forks ranked in $ side by side. Read-pure (no
+    write; the endpoint only requires the `read` scope, so this uses the agent
+    token like step 1/9's other pure reads). SKIP honestly when step 7
+    produced no fork â€” same skip logic as step 7 itself: ``ctx.fork_scenario_id``
+    is only ever set after a successful ``POST /v1/simulate`` (201)."""
+    if ctx.fork_scenario_id is None:
+        return StepResult(
+            number=8,
+            title="Scenario compare",
+            status=SKIP,
+            detail="no what-if fork from step 7 to compare against baseline",
+        )
+
+    resp = ctx.client.get(
+        f"/v1/scenarios/compare?ids={BASELINE_SCENARIO_ID},{ctx.fork_scenario_id}",
+        headers=ctx.agent_auth,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"GET /v1/scenarios/compare -> {resp.status_code} {resp.text}"
+        )
+    body = resp.json()
+    entries = body.get("entries", [])
+    if len(entries) != 2 or "comparable" not in body:
+        raise RuntimeError(
+            "GET /v1/scenarios/compare returned an unexpected shape: "
+            f"{len(entries)} entries, comparable_present={'comparable' in body}"
+        )
+    comparable = body["comparable"]
+    reference_id = str(body["reference_scenario_id"])
+
+    # Mini side-by-side table: shortage_count, severity $, stock $, fill_rate, stale.
+    print(f"  {'scenario':<10} {'name':<24} {'shortages':>9} {'severity $':>14} "
+          f"{'stock $':>14} {'fill rate':>10} {'stale':>7}")
+    ranked: list[tuple[Optional[float], dict[str, Any]]] = []
+    for e in entries:
+        short_id = str(e["scenario_id"])[:8]
+        name = str(e["name"])[:24]
+        kpis = e.get("kpis")
+        if kpis is None:
+            note = (e.get("note") or "")[:60]
+            print(f"  {short_id:<10} {name:<24} {'n/a':>9} {'n/a':>14} "
+                  f"{'n/a':>14} {'n/a':>10} {'n/a':>7}   ({note})")
+            ranked.append((None, e))
+            continue
+        print(f"  {short_id:<10} {name:<24} {kpis['shortage_count']:>9} "
+              f"{_fmt_usd(kpis['shortage_severity_usd']):>14} "
+              f"{_fmt_usd(kpis['stock_value_usd']):>14} "
+              f"{_fmt_pct(kpis['fill_rate_est']):>10} "
+              f"{str(e.get('stale')):>7}")
+        ranked.append((kpis["shortage_severity_usd"], e))
+
+    # Deltas â€” printed for every entry OTHER than the reference itself (the
+    # reference's own delta vs itself is a trivial zero, not informative).
+    for e in entries:
+        if str(e["scenario_id"]) == reference_id:
+            continue
+        d = e.get("deltas")
+        if d is None:
+            continue
+        print(f"  Delta vs reference ({reference_id[:8]}) : "
+              f"shortages={d['shortage_count_delta']:+d} "
+              f"severity={_fmt_usd(d['severity_usd_delta'])} "
+              f"stock={_fmt_usd(d['stock_value_usd_delta'])} "
+              f"fill_rate={_fmt_pct(d['fill_rate_delta'])}")
+
+    # Ranking in $ (severity, lower $ exposure is better) â€” the acceptance
+    # criterion's "ranking en $". Non-computable entries (no completed
+    # calc_run) sort last, honestly, never masked as a winning $0.
+    ranked.sort(key=lambda t: (t[0] is None, t[0] if t[0] is not None else 0.0))
+    rank_line = ", ".join(
+        f"{i + 1}. {str(e['scenario_id'])[:8]} ({_fmt_usd(sev)})"
+        for i, (sev, e) in enumerate(ranked)
+    )
+    print(f"  Ranking ($ severity, ascending)    : {rank_line}")
+    print(f"  comparable                         : {comparable}")
+
+    return StepResult(
+        number=8,
+        title="Scenario compare",
+        status=PASS,
+        detail=(
+            f"2 entries (baseline, fork {ctx.fork_scenario_id[:8]}) "
+            f"comparable={comparable}"
+        ),
+        data={
+            "ids": [BASELINE_SCENARIO_ID, ctx.fork_scenario_id],
+            "comparable": comparable,
+            "entries": entries,
+        },
+    )
+
+
+# ===========================================================================
+# STEP 9 â€” StreamChanges (bounded replay by cursor)
+# ===========================================================================
+
+
+def step9_stream(ctx: DemoContext) -> StepResult:
     """Bounded, replayable read of everything this demo just did:
     GET /v1/stream?once=true&cursor=0 drains the baseline event history once
-    and closes. This is the "for AI" proof — every state change the demo made
+    and closes. This is the "for AI" proof â€” every state change the demo made
     is replayable by cursor, agents subscribe instead of polling. Parses the
     SSE frames to count events and report the last stream_seq."""
     resp = ctx.client.get(
@@ -1260,7 +1377,7 @@ def step8_stream(ctx: DemoContext) -> StepResult:
         print(f"  Event types (top)                  : {top}")
 
     return StepResult(
-        number=8,
+        number=9,
         title="StreamChanges",
         status=PASS,
         detail=f"{n_events} event(s) replayable by cursor, last stream_seq={last_seq}",
@@ -1270,7 +1387,7 @@ def step8_stream(ctx: DemoContext) -> StepResult:
 
 def _parse_sse(text: str) -> tuple[int, Optional[int], dict[str, int]]:
     """Count SSE frames carrying an ``id:`` line (data frames, not pings),
-    return (count, last_id, {event_type: count}). Pure text parse — no schema
+    return (count, last_id, {event_type: count}). Pure text parse â€” no schema
     assumption beyond the SSE ``id:``/``event:`` line grammar."""
     count = 0
     last_id: Optional[int] = None
@@ -1294,19 +1411,19 @@ def _parse_sse(text: str) -> tuple[int, Optional[int], dict[str, int]]:
 
 
 # ===========================================================================
-# STEP 9 — (optional) MRP bench, read-only, subprocess
+# STEP 10 â€” (optional) MRP bench, read-only, subprocess
 # ===========================================================================
 
 
-def step9_bench(ctx: DemoContext) -> StepResult:
+def step10_bench(ctx: DemoContext) -> StepResult:
     """Optional (--bench): run scripts/bench_mrp.py in a subprocess (its own
     READ ONLY transaction) and echo the per-phase timings. Kept a subprocess so
     its READ ONLY transaction guard and process isolation are exactly as the
-    perf harness intends — the demo never imports the bench into its own
+    perf harness intends â€” the demo never imports the bench into its own
     process."""
     if not ctx.run_bench:
         return StepResult(
-            number=9,
+            number=10,
             title="MRP bench",
             status=SKIP,
             detail="--bench not set",
@@ -1318,18 +1435,18 @@ def step9_bench(ctx: DemoContext) -> StepResult:
         text=True,
         timeout=600,
     )
-    # bench_mrp prints the DB NAME only (not the DSN) — safe to echo verbatim.
+    # bench_mrp prints the DB NAME only (not the DSN) â€” safe to echo verbatim.
     for line in proc.stdout.splitlines():
         print(f"  | {line}")
     if proc.returncode != 0:
         return StepResult(
-            number=9,
+            number=10,
             title="MRP bench",
             status=FAIL,
             detail=f"bench_mrp exited {proc.returncode}: {proc.stderr.strip()[:160]}",
         )
     return StepResult(
-        number=9,
+        number=10,
         title="MRP bench",
         status=PASS,
         detail="MRP cascade benched (read-only, 1 repeat)",
@@ -1350,7 +1467,7 @@ def _run_step(
     (except step 0, handled specially in main)."""
     try:
         return fn(ctx)
-    except Exception as exc:  # noqa: BLE001 — a step must never crash the runbook
+    except Exception as exc:  # noqa: BLE001 â€” a step must never crash the runbook
         if ctx.verbose:
             traceback.print_exc()
         # Guard against a DSN leaking through an exception message.
@@ -1372,8 +1489,9 @@ _STEP_TITLES = {
     "step5_gate": (5, "Governance gate"),
     "step6_proof": (6, "Proof machine"),
     "step7_whatif": (7, "Forkable what-if"),
-    "step8_stream": (8, "StreamChanges"),
-    "step9_bench": (9, "MRP bench"),
+    "step8_compare": (8, "Scenario compare"),
+    "step9_stream": (9, "StreamChanges"),
+    "step10_bench": (10, "MRP bench"),
 }
 
 
@@ -1402,7 +1520,7 @@ def _scoreboard(results: list[StepResult]) -> tuple[int, int, int]:
 
 
 def _write_artefact(path: Path, dsn: str, results: list[StepResult]) -> None:
-    """Persist a scoreboard JSON. The DSN is NEVER written — only mask_dsn."""
+    """Persist a scoreboard JSON. The DSN is NEVER written â€” only mask_dsn."""
     passed, skipped, failed = _scoreboard(results)
     payload = {
         "db": mask_dsn(dsn),
@@ -1427,7 +1545,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         description=(
             "Executable wedge runbook (#408): forecast+FVA, governed watchers, "
             "DRP, cryptographic governance gate, deterministic proof KPIs, "
-            "forkable what-if, cursor-replayable stream. Non-destructive, "
+            "forkable what-if, $-ranked scenario compare (SC-1), "
+            "cursor-replayable stream. Non-destructive, "
             "idempotent, DSN never printed."
         )
     )
@@ -1497,7 +1616,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # MUST happen before the FIRST ootils_core import (step 0 imports OotilsDB):
     # db/connection.py freezes DEFAULT_DATABASE_URL at module import, and the
     # auth layer's minted-token lookup (resolve_principal -> _get_ootils_db)
-    # builds a SINGLETON OotilsDB() from that frozen default — it never goes
+    # builds a SINGLETON OotilsDB() from that frozen default â€” it never goes
     # through the get_db override. Without this, every minted-token request
     # 503s "Authentication backend unavailable" against a default localhost DB
     # (the exact failure of the first pilot run).
@@ -1521,7 +1640,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
-    _banner("OOTILS WEDGE RUNBOOK (#408) — autonomous shortage control tower")
+    _banner("OOTILS WEDGE RUNBOOK (#408) â€” autonomous shortage control tower")
     print(f"  Target : {mask_dsn(args.dsn)}")
     print(f"  Mode   : skip_watchers={args.skip_watchers} bench={args.bench}")
     if whatif_base != BASELINE_SCENARIO_ID:
@@ -1538,7 +1657,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             traceback.print_exc()
         msg = str(exc).replace(args.dsn, mask_dsn(args.dsn))
         print(_verdict_line(StepResult(0, "Boot & migration catch-up", FAIL, msg[:200])))
-        print("\nABORT: cannot boot the app / reach the DB — no further steps run.")
+        print("\nABORT: cannot boot the app / reach the DB â€” no further steps run.")
         return 1
     results.append(step0)
     print(_verdict_line(step0))
@@ -1561,8 +1680,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         step5_gate,
         step6_proof,
         step7_whatif,
-        step8_stream,
-        step9_bench,
+        step8_compare,
+        step9_stream,
+        step10_bench,
     ]
 
     try:
