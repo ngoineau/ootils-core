@@ -29,11 +29,13 @@ baseline = the 'APPLIED' L3+ action class).
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
 from psycopg import sql
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ootils_core.api.auth import Principal, require_scope, resolve_gate_kind
@@ -43,6 +45,14 @@ from ootils_core.engine.recommendation.state_machine import (
     HumanGateError,
     enforce_human_gate,
 )
+from ootils_core.engine.scenario.compare import (
+    ScenarioCompareEntry,
+    ScenarioCompareError,
+    ScenarioCompareResult,
+    compare_scenarios,
+    parse_scenario_ids,
+    validate_id_count,
+)
 from ootils_core.engine.scenario.manager import (
     PromoteConflictError,
     ScenarioManager,
@@ -50,6 +60,28 @@ from ootils_core.engine.scenario.manager import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/scenarios", tags=["scenarios"])
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _scenario_compare_enabled() -> bool:
+    """Kill switch, default ON. Falsy OOTILS_SCENARIO_COMPARE_ENABLED -> 503."""
+    return os.environ.get("OOTILS_SCENARIO_COMPARE_ENABLED", "1").strip().lower() in _TRUTHY
+
+
+def require_scenario_compare_enabled() -> None:
+    """FastAPI dependency — checked AFTER auth/scope but BEFORE ``Depends(get_db)``
+    (FastAPI resolves synchronous dependencies in signature order and
+    short-circuits on the first HTTPException). Auth-first so an unauthenticated
+    caller always gets 401 and cannot probe the switch state; kill-switch-before-DB
+    so a disabled comparator answers 503 without touching the DB pool. Mirrors
+    ``api/routers/outcomes.py``'s ``_outcomes_enabled()``/
+    ``require_outcomes_enabled()`` pattern (outcomes.py:86)."""
+    if not _scenario_compare_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scenario compare is disabled (OOTILS_SCENARIO_COMPARE_ENABLED).",
+        )
 
 
 class ScenarioOut(BaseModel):
@@ -109,6 +141,147 @@ def list_scenarios(
         ],
         total=total,
     )
+
+
+# ============================================================
+# GET /v1/scenarios/compare — SC-1 (chantier SC-1, ADR-free per contract)
+# ============================================================
+# Registered BEFORE /{scenario_id} on purpose: FastAPI/Starlette commits to
+# the first path template that matches a request's URL. If /{scenario_id}
+# (a UUID path param) were registered first, "GET /v1/scenarios/compare"
+# would match THAT route (any path segment satisfies {scenario_id}) and fail
+# UUID validation with a generic 422 — never reaching this handler at all.
+
+
+class ScenarioCompareKpisOut(BaseModel):
+    """One scenario's KPI snapshot. shortage_count/below_safety_stock_count/
+    shortage_severity_usd are 0-honest (a real, meaningful 0 for a healthy
+    scenario); stock_value_usd/fill_rate_est are None-honest (missing pricing
+    / zero demand -> None, never a masked 0 or 1.0) — see
+    engine/scenario/compare.py's module docstring for the full KPI contract."""
+
+    shortage_count: int
+    below_safety_stock_count: int
+    shortage_severity_usd: float
+    stock_value_usd: Optional[float] = None
+    stock_value_basis_count: int
+    stock_value_unpriced_count: int
+    fill_rate_est: Optional[float] = None
+    fill_rate_basis_count: int
+
+
+class ScenarioCompareDeltasOut(BaseModel):
+    """entry - reference. stock_value_usd_delta/fill_rate_delta can be None
+    when either side's own KPI is None."""
+
+    shortage_count_delta: int
+    severity_usd_delta: float
+    stock_value_usd_delta: Optional[float] = None
+    fill_rate_delta: Optional[float] = None
+
+
+class ScenarioCompareEntryOut(BaseModel):
+    """One requested scenario's row. computable=False means kpis/deltas/stale
+    are all None and note explains why (no completed calc_run yet)."""
+
+    scenario_id: UUID
+    name: str
+    status: str
+    parent_scenario_id: Optional[UUID] = None
+    calc_run_id: Optional[UUID] = None
+    computed_at: Optional[datetime] = None
+    stale: Optional[bool] = None
+    computable: bool
+    note: Optional[str] = None
+    kpis: Optional[ScenarioCompareKpisOut] = None
+    deltas: Optional[ScenarioCompareDeltasOut] = None
+
+
+class ScenarioCompareOut(BaseModel):
+    """comparable = every entry is both computable AND fresh (not stale)."""
+
+    entries: list[ScenarioCompareEntryOut]
+    comparable: bool
+    reference_scenario_id: UUID
+    cost_precedence: str
+
+
+def _compare_entry_to_out(entry: ScenarioCompareEntry) -> ScenarioCompareEntryOut:
+    kpis_out = None
+    if entry.kpis is not None:
+        kpis_out = ScenarioCompareKpisOut(
+            shortage_count=entry.kpis.shortage_count,
+            below_safety_stock_count=entry.kpis.below_safety_stock_count,
+            shortage_severity_usd=entry.kpis.shortage_severity_usd,
+            stock_value_usd=entry.kpis.stock_value_usd,
+            stock_value_basis_count=entry.kpis.stock_value_basis_count,
+            stock_value_unpriced_count=entry.kpis.stock_value_unpriced_count,
+            fill_rate_est=entry.kpis.fill_rate_est,
+            fill_rate_basis_count=entry.kpis.fill_rate_basis_count,
+        )
+    deltas_out = None
+    if entry.deltas is not None:
+        deltas_out = ScenarioCompareDeltasOut(
+            shortage_count_delta=entry.deltas.shortage_count_delta,
+            severity_usd_delta=entry.deltas.severity_usd_delta,
+            stock_value_usd_delta=entry.deltas.stock_value_usd_delta,
+            fill_rate_delta=entry.deltas.fill_rate_delta,
+        )
+    return ScenarioCompareEntryOut(
+        scenario_id=entry.scenario_id,
+        name=entry.name,
+        status=entry.status,
+        parent_scenario_id=entry.parent_scenario_id,
+        calc_run_id=entry.calc_run_id,
+        computed_at=entry.computed_at,
+        stale=entry.stale,
+        computable=entry.computable,
+        note=entry.note,
+        kpis=kpis_out,
+        deltas=deltas_out,
+    )
+
+
+def _compare_result_to_out(result: ScenarioCompareResult) -> ScenarioCompareOut:
+    return ScenarioCompareOut(
+        entries=[_compare_entry_to_out(e) for e in result.entries],
+        comparable=result.comparable,
+        reference_scenario_id=result.reference_scenario_id,
+        cost_precedence=result.cost_precedence,
+    )
+
+
+@router.get(
+    "/compare",
+    response_model=ScenarioCompareOut,
+    summary="Compare KPIs across 2-5 scenarios",
+    description=(
+        "Read-only KPI comparison (shortages, stock_value_usd, fill_rate_est) "
+        "across 2-5 scenarios, scoped by each scenario's latest COMPLETED "
+        "calc_run. Deltas are computed against the baseline (if present in "
+        "`ids`) or the first id passed. A scenario with no completed calc_run "
+        "yields a `computable=false` entry with a note, not a request failure; "
+        "a malformed or unknown scenario id fails the WHOLE request (422). "
+        "Emits no event/audit row (a pure query path). Requires the `read` scope."
+    ),
+)
+def compare_scenarios_endpoint(
+    ids: str = Query(
+        ...,
+        description="Comma-separated scenario UUIDs, 2..5 (e.g. 'ids=<uuid1>,<uuid2>').",
+    ),
+    _principal: Principal = Depends(require_scope("read")),
+    _enabled: None = Depends(require_scenario_compare_enabled),
+    db: DictRowConnection = Depends(get_db),
+) -> ScenarioCompareOut:
+    try:
+        scenario_ids = parse_scenario_ids(ids)
+        validate_id_count(scenario_ids)
+        result = compare_scenarios(db, scenario_ids)
+    except ScenarioCompareError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+
+    return _compare_result_to_out(result)
 
 
 @router.get("/{scenario_id}", response_model=ScenarioOut)
