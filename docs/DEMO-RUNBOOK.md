@@ -379,3 +379,64 @@ operating data; they are safe to leave in place.
 - **Target guard.** The demo refuses any database whose name does not start with
   `ootils`, and refuses `ootils_dev` (semi-prod) without `--allow-dev` — the same
   guard the CLIs use.
+
+---
+
+## Le moat en 5 minutes
+
+> For the buyer who only has 5 minutes: a condensed, scripted replay of the
+> three moat properties documented in [`MOAT.md`](MOAT.md), assuming §1-§2 above
+> already ran once on `$BASE` (`$T` = human token, `$AGENT_T` = agent token —
+> minted in Step 1; `$RECO` = a `REVIEWED` recommendation from Step 3/4/5).
+> Nothing here is a new capability — it is a replay of what Step 1/4/5/7/8
+> already produced, condensed for a stand-up demo. Each gesture cites its
+> falsifiable test in `MOAT.md`; run that test yourself before the meeting.
+
+### Gesture 1 — Replay a plan → identical IDs (determinism)
+
+Step 4 already ran `POST /v1/drp/run` once. Capture its DRAFT set, replay the
+**exact same** plan, and diff:
+
+```bash
+IDS_1=$(curl -s "$BASE/v1/recommendations?status=DRAFT" -H "Authorization: Bearer $T" \
+  | jq -r '.recommendations[] | select(.action=="TRANSFER") | .recommendation_id' | sort)
+
+curl -s -X POST "$BASE/v1/drp/run" -H "Authorization: Bearer $T" \
+  -H 'Content-Type: application/json' -d '{"horizon_days":180}' \
+  | jq '{recommendations_emitted, recommendations_idempotent_noop}'
+# -> recommendations_emitted: 0 — every id was RE-DERIVED, not re-minted.
+
+IDS_2=$(curl -s "$BASE/v1/recommendations?status=DRAFT" -H "Authorization: Bearer $T" \
+  | jq -r '.recommendations[] | select(.action=="TRANSFER") | .recommendation_id' | sort)
+
+diff <(echo "$IDS_1") <(echo "$IDS_2")   # -> empty: byte-identical UUID set
+```
+
+**Proves:** `recommendation_id` is a pure function of (scenario, target node,
+action, proposed date) — never of a run timestamp or a random seed. Replaying
+an unchanged plan re-derives the same identities instead of minting new rows.
+
+**Falsifiable test:** `tests/integration/test_transfer_watcher_integration.py:277`
+`test_rerun_on_unchanged_plan_inserts_zero_new_rows`. Full anchor + two more
+tests at other layers (shortage persistence, Pyramide runs): `MOAT.md` §1.
+
+```bash
+DATABASE_URL=postgresql:///ootils_test python -m pytest \
+  tests/integration/test_transfer_watcher_integration.py::test_rerun_on_unchanged_plan_inserts_zero_new_rows -q
+```
+
+### Gesture 2 — A token that lies about its `actor_kind` → 403
+
+Already demonstrated end-to-end in **Step 5** above — rerun that exact
+sequence live: the agent token's request body claims `actor_kind: "human"`
+on an APPROVE, and still gets **403** because the gate reads the token, not
+the body. Falsifiable test + replay command: `MOAT.md` §2
+(`test_human_gate_blocks_agent_even_with_approve_scope_and_lying_body`).
+
+### Gesture 3 — Fork + delta + archive, live
+
+Already demonstrated end-to-end in **Steps 7-8** above — rerun that exact
+sequence live: fork baseline, attach a param-override overlay, get an honest
+shortage delta, archive the fork, then rank baseline vs the fork in $ via
+`GET /v1/scenarios/compare`. Falsifiable tests + replay commands: `MOAT.md`
+§3 (fork + promote-conflict detection).
