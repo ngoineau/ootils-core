@@ -460,20 +460,26 @@ class TestProofHarnessInProcess:
     def test_run_and_main_compute_delta_on_controlled_seed(
         self, migrated_db, capsys
     ):
-        """End-to-end on a controlled seed: the harness discovers exactly the
-        eligible series (>= 2 distinct non-NULL order_type values — the
-        single-program sibling and the NULL-only signal do NOT qualify),
-        builds the dense calendar, runs the AVANT/APRÈS backtest pair with
-        the real stat engine and produces a COMPUTABLE ΔFVA (basis > 0),
-        then main() renders the table + volume-weighted aggregate."""
+        """End-to-end on a controlled seed. The eligibility gate counts
+        NULL/blank order_type as its OWN class (the UNKNOWN bucket — review
+        fix): the flagship (SPRING/BASE/UNKNOWN) AND the mono-program+NULL
+        sibling (a genuine BASE/UNKNOWN partition) both qualify; a NULL-only
+        signal (single UNKNOWN class) does NOT. Builds the dense calendar,
+        runs the AVANT/APRÈS backtest pair with the real stat engine and
+        produces a COMPUTABLE ΔFVA (basis > 0), then main() renders the
+        table + volume-weighted aggregate. Discovery assertions are
+        MEMBERSHIP-based with a generous top: the discovery scans the whole
+        CI database and other tests' leftovers may rank alongside ours
+        (ranking-pollution lesson — never assert exact result lists on a
+        shared-DB LIMIT query)."""
         with _db_conn(migrated_db) as conn:
             item_id, loc_id, volume = _seed_eligible_series(
                 conn, uid("HARN-ITEM"), uid("HARN-LOC")
             )
-            # Ineligible sibling: ONE distinct order_type + NULL rows.
-            # COUNT(DISTINCT order_type) ignores NULLs, so this series stays
-            # below min_order_types=2 — order_type NULL is the ABSENCE of a
-            # classification signal, not a program to prove segmentation on.
+            # ELIGIBLE sibling under the NULL-counts-as-a-class gate: one
+            # named order_type + NULL rows = a genuine BASE/UNKNOWN
+            # two-program partition, worth proving (the review fix — the
+            # old gate ignored NULL and wrongly excluded such series).
             other_item = _create_item(conn, uid("MONO-ITEM"))
             other_loc = _create_location(conn, uid("MONO-LOC"))
             for k in range(15, 0, -1):
@@ -482,6 +488,14 @@ class TestProofHarnessInProcess:
                            booked, 50, order_type="STANDARD VISTA")
                 _insert_dh(conn, other_item, uid("MONO-ITEM"), uid("MONO-LOC"),
                            booked, 5, order_type=None)
+            # Truly INELIGIBLE control: only NULL order_types — a single
+            # UNKNOWN class, nothing to segment, the gate must hold.
+            null_item = _create_item(conn, uid("NULLONLY-ITEM"))
+            null_loc = _create_location(conn, uid("NULLONLY-LOC"))
+            for k in range(15, 0, -1):
+                booked = _shift_months(_month_start(TODAY), k) + timedelta(days=4)
+                _insert_dh(conn, null_item, uid("NULLONLY-ITEM"),
+                           uid("NULLONLY-LOC"), booked, 7, order_type=None)
             try:
                 rows = harness.run(
                     conn,
@@ -490,13 +504,17 @@ class TestProofHarnessInProcess:
                     tail_origins=3,
                     horizon=1,
                     min_order_types=2,
-                    top=5,
+                    top=50,
                 )
 
-                # Exactly the eligible series — the mono-program sibling is
-                # filtered out by the >= 2 distinct order_type gate.
-                assert [row.item_id for row in rows] == [item_id]
-                row = rows[0]
+                # MEMBERSHIP, not exact-list (shared-DB ranking pollution):
+                # both genuinely segmentable series are discovered, the
+                # single-class NULL-only control is not.
+                by_item = {r.item_id: r for r in rows}
+                assert item_id in by_item
+                assert other_item in by_item  # BASE/UNKNOWN, gate counts NULL
+                assert null_item not in by_item  # single UNKNOWN class
+                row = by_item[item_id]
                 assert row.location_id == loc_id
                 assert row.volume == volume
 
@@ -519,10 +537,19 @@ class TestProofHarnessInProcess:
                     result.fva_segmented.fva_wape - result.fva_mixed.fva_wape
                 )
 
-                # Aggregate: one contributing series.
-                weighted_mean, n_series = aggregate_delta_fva_wape(rows)
-                assert weighted_mean == result.delta_fva_wape
-                assert n_series == 1
+                # Aggregate over OUR two series only (pollution-immune):
+                # both contribute, and the volume-weighted mean lies between
+                # the two deltas — an invariant of any weighted mean, without
+                # pinning the implementation's quantization.
+                ours = [by_item[item_id], by_item[other_item]]
+                weighted_mean, n_series = aggregate_delta_fva_wape(ours)
+                assert n_series == 2
+                assert weighted_mean is not None
+                deltas = sorted([
+                    by_item[item_id].result.delta_fva_wape,
+                    by_item[other_item].result.delta_fva_wape,
+                ])
+                assert deltas[0] <= weighted_mean <= deltas[1]
 
                 # main() end-to-end (own connection, read-only transaction
                 # guard, argparse) on the same seed.
@@ -531,18 +558,21 @@ class TestProofHarnessInProcess:
                     "--granularity", "monthly",
                     "--lookback-days", "600",
                     "--tail-origins", "3",
-                    "--top", "5",
+                    "--top", "50",
                 ])
                 assert rc == 0
                 out = capsys.readouterr().out
                 assert uid("HARN-ITEM") in out
-                assert uid("MONO-ITEM") not in out
+                assert uid("MONO-ITEM") in out  # eligible under the new gate
+                assert uid("NULLONLY-ITEM") not in out
                 assert "AGGREGATE dFVA_wape (volume-weighted):" in out
             finally:
                 _cleanup_item(conn, item_id)
                 _cleanup_item(conn, other_item)
+                _cleanup_item(conn, null_item)
                 _cleanup_location(conn, loc_id)
                 _cleanup_location(conn, other_loc)
+                _cleanup_location(conn, null_loc)
 
     def test_harness_discovery_is_alias_aware(self, migrated_db, capsys):
         """Every demand row of the eligible series is booked under an ALIAS
@@ -568,12 +598,14 @@ class TestProofHarnessInProcess:
                     tail_origins=3,
                     horizon=1,
                     min_order_types=2,
-                    top=5,
+                    top=50,
                 )
-                assert [row.item_id for row in rows] == [item_id]
-                assert rows[0].location_id == loc_id  # canonical site, not the code
-                assert rows[0].result.basis_count == 3
-                assert rows[0].result.delta_fva_wape is not None
+                # Membership, not exact-list (shared-DB ranking pollution).
+                by_item = {r.item_id: r for r in rows}
+                assert item_id in by_item
+                assert by_item[item_id].location_id == loc_id  # canonical site, not the code
+                assert by_item[item_id].result.basis_count == 3
+                assert by_item[item_id].result.delta_fva_wape is not None
             finally:
                 _cleanup_item(conn, item_id)
                 _cleanup_location(conn, loc_id)
