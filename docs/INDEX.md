@@ -41,7 +41,7 @@ Operational concerns:
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
 - [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009.
 
-### Full ADR register (001 → 033, chronological)
+### Full ADR register (001 → 034, chronological)
 
 Every ADR under `docs/`, numbered. The curated "read first" lists above are the entry points; this is the complete map.
 
@@ -81,6 +81,7 @@ Every ADR under `docs/`, numbered. The curated "read first" lists above are the 
 - [`ADR-031-location-aliases.md`](ADR-031-location-aliases.md) — Location aliases: multi-code resolution of one warehouse.
 - [`ADR-032-scope-grid-and-budgets.md`](ADR-032-scope-grid-and-budgets.md) — Scope grid, per-token budgets, credential lifecycle, `/metrics`.
 - [`ADR-033-demand-routing-and-drift.md`](ADR-033-demand-routing-and-drift.md) — Head/tail demand routing wired + first demand-side watcher (forecast drift).
+- [`ADR-034-scenario-compare.md`](ADR-034-scenario-compare.md) — Scenario compare (SC-1): read-only KPI comparison (shortages, stock value, fill rate) across 2-5 scenarios; stale computed with no new schema.
 
 ## Feature specs (SPEC-*)
 
