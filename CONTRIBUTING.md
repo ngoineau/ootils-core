@@ -59,7 +59,7 @@ We are not recreating MRP with a better UI. Every design decision must be valida
 Every calculation must be traceable. If you can't explain why the engine produced a result, the design is wrong.
 
 **API first, UI never (for now)**
-We build the engine. The interface is someone else's problem for now. Do not propose UI features in V1.
+We build the engine. The interface is someone else's problem for now. Do not propose UI features in V1. The one arbitrated exception is [ADR-036](docs/ADR-036-human-window.md): a minimal read-only server-rendered client (`GET /ui`) over the existing API — still a thin client, no privileged path, no new business logic.
 
 **Determinism is non-negotiable**
 The same inputs must always produce the same outputs. No randomness in the core engine.
