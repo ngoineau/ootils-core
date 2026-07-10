@@ -60,10 +60,14 @@ _guard_target = demo_e2e._guard_target
 _parse_sse = demo_e2e._parse_sse
 _kpi = demo_e2e._kpi
 _fmt_num = demo_e2e._fmt_num
+_fmt_usd = demo_e2e._fmt_usd
+_fmt_pct = demo_e2e._fmt_pct
 _write_artefact = demo_e2e._write_artefact
 _scoreboard = demo_e2e._scoreboard
 _verdict_line = demo_e2e._verdict_line
 StepResult = demo_e2e.StepResult
+DemoContext = demo_e2e.DemoContext
+step8_compare = demo_e2e.step8_compare
 PASS = demo_e2e.PASS
 SKIP = demo_e2e.SKIP
 FAIL = demo_e2e.FAIL
@@ -362,6 +366,98 @@ def test_kpi_and_fmt_num_use_distinct_null_labels():
     # that collapsed them would trip this).
     assert _kpi(None) == "n/a (no data)"
     assert _fmt_num(None) == "n/a"
+
+
+# ===========================================================================
+# _fmt_usd / _fmt_pct — step 8 (SC-1 scenario compare) $-honest / ratio-honest
+# rendering: None != 0.0/0%, ever — same NULL-honest contract as _kpi/_fmt_num.
+# ===========================================================================
+
+
+def test_fmt_usd_none_is_na_never_a_masked_dollar_zero():
+    assert _fmt_usd(None) == "n/a"
+
+
+def test_fmt_usd_zero_renders_as_a_real_dollar_zero_not_na():
+    # The NULL-honest contract, mirrored for $: a genuine $0 (e.g. a healthy
+    # scenario with zero shortage severity) must read as such, never fall
+    # back to the None label.
+    assert _fmt_usd(0.0) == "$0.00"
+
+
+def test_fmt_usd_none_and_zero_are_never_the_same_string():
+    assert _fmt_usd(None) != _fmt_usd(0.0)
+
+
+def test_fmt_usd_formats_with_thousands_separator_and_two_decimals():
+    assert _fmt_usd(1234.5) == "$1,234.50"
+
+
+def test_fmt_usd_negative_value_keeps_the_sign():
+    # A delta can legitimately be negative (a fork with LOWER $ exposure than
+    # the reference) — the sign must survive, never be clamped away.
+    assert _fmt_usd(-42.1) == "$-42.10"
+
+
+def test_fmt_pct_none_is_na_never_a_masked_zero_or_hundred_percent():
+    assert _fmt_pct(None) == "n/a"
+
+
+def test_fmt_pct_zero_renders_as_a_real_zero_percent_not_na():
+    assert _fmt_pct(0.0) == "0.0%"
+
+
+def test_fmt_pct_none_and_zero_are_never_the_same_string():
+    assert _fmt_pct(None) != _fmt_pct(0.0)
+
+
+def test_fmt_pct_scales_ratio_to_percentage():
+    assert _fmt_pct(0.923) == "92.3%"
+
+
+def test_fmt_pct_full_fill_rate_is_a_hundred_percent():
+    assert _fmt_pct(1.0) == "100.0%"
+
+
+def test_fmt_usd_and_fmt_pct_use_the_same_null_label_as_fmt_num():
+    # Both step-8 formatters intentionally reuse _fmt_num's exact "n/a" label
+    # (unlike _kpi's more verbose "n/a (no data)") — a deliberate choice, not
+    # an accident; this guards it.
+    assert _fmt_usd(None) == _fmt_num(None) == "n/a"
+    assert _fmt_pct(None) == _fmt_num(None) == "n/a"
+
+
+# ===========================================================================
+# step8_compare — the SKIP branch is pure/DB-free: ctx.fork_scenario_id is
+# read BEFORE any ctx.client/ctx.agent_auth access, so a fake DemoContext with
+# no fork short-circuits before any I/O — no DB, no mock needed.
+# ===========================================================================
+
+
+def _fork_free_ctx() -> DemoContext:
+    return DemoContext(
+        dsn="postgresql:///ootils_test",
+        client=None,  # never touched: the SKIP branch returns before any I/O
+        verbose=False,
+        skip_watchers=False,
+        run_bench=False,
+        show_tokens=False,
+    )
+
+
+def test_step8_compare_skips_honestly_without_a_whatif_fork():
+    ctx = _fork_free_ctx()
+    assert ctx.fork_scenario_id is None  # the dataclass default, unset by step 7
+    result = step8_compare(ctx)
+    assert result.status == SKIP
+    assert result.number == 8
+    assert result.title == "Scenario compare"
+
+
+def test_step8_compare_skip_detail_names_the_missing_fork():
+    result = step8_compare(_fork_free_ctx())
+    assert "fork" in result.detail
+    assert "step 7" in result.detail
 
 
 # ===========================================================================

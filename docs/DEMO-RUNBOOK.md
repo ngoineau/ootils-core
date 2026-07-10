@@ -286,7 +286,23 @@ instead of resolved ones. *SKIPs* only if the base has no PI node at all.
 Note: on a large base the fork is a full deep-copy of baseline — budget
 minutes, not seconds, for this step on 200K+ nodes.
 
-### Step 8 — StreamChanges (replayable by cursor)
+### Step 8 — Scenario compare (SC-1: 2 forks ranked in $ side by side)
+
+**You see:** `GET /v1/scenarios/compare?ids=<baseline>,<fork>` run on baseline
+and the step 7 what-if fork — a mini side-by-side table (shortage count,
+severity $, stock $, fill rate, stale) for each scenario, the deltas vs the
+reference scenario, and a **ranking in $** (ascending severity, lower $
+exposure first). *SKIPs* honestly when step 7 produced no fork. Read-only
+(`read` scope) — no write, no event.
+
+**Proves (vs Kinaxis / o9):** counter-factuals are not just computable, they are
+**comparable** — two forks, ranked by $ exposure, side by side, in one call.
+
+```bash
+curl -s "$BASE/v1/scenarios/compare?ids=$BASELINE,$FORK" -H "Authorization: Bearer $T"
+```
+
+### Step 9 — StreamChanges (replayable by cursor)
 
 **You see:** a **bounded** replay of everything the demo just did —
 `GET /v1/stream?once=true&cursor=0` drains the baseline event history once and
@@ -303,7 +319,7 @@ curl -s "$BASE/v1/stream?once=true&cursor=0" -H "Authorization: Bearer $T"
 # SSE frames: id: <stream_seq> / event: <type> / data: <json>
 ```
 
-### Step 9 — MRP bench (optional, `--bench`)
+### Step 10 — MRP bench (optional, `--bench`)
 
 **You see:** per-phase MRP cascade timings (load / consume / time-phased / peg)
 from `scripts/bench_mrp.py`, run in a **read-only** subprocess.
@@ -342,7 +358,7 @@ operating data; they are safe to leave in place.
 - **The watcher takes minutes on a large item base.** Over 36k items,
   `agent_shortage_watcher` is not instant. Use `--skip-watchers` for a fast
   walkthrough; step 5 then governs a DRAFT from the DRP step instead, and steps
-  6–8 still run. On the CI base the watcher is quick.
+  6–9 still run. On the CI base the watcher is quick.
 - **Forecast SKIPs without history — and names the mapping gap.** If the target
   has no booking-based `demand_history`, step 2 reports `SKIP` (no series)
   rather than inventing one. The CI-seeded base *does* have history

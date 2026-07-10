@@ -259,7 +259,7 @@ consommation #349 réduit aussi les besoins nets à planifier), mais le wall est
 dominé à 84 % par le chargement DB, qui a grossi depuis mai (loader #349 +
 conditions réseau non contrôlées entre les deux mesures — pas un A/B strict).
 Le levier suivant reste côté load, pas côté cascade. Mesure prise pendant
-l'exécution pilote du runbook (`docs/DEMO-RUNBOOK.md`, step 9).
+l'exécution pilote du runbook (`docs/DEMO-RUNBOOK.md`, step 10).
 
 ### Première propagation pilote — chemin API (2026-07-07, #414 / RUNBOOK-pilot-propagation)
 
