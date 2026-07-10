@@ -41,7 +41,7 @@ Operational concerns:
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
 - [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009.
 
-### Full ADR register (001 → 035, chronological)
+### Full ADR register (001 → 036, chronological)
 
 Every ADR under `docs/`, numbered. The curated "read first" lists above are the entry points; this is the complete map.
 
@@ -83,6 +83,7 @@ Every ADR under `docs/`, numbered. The curated "read first" lists above are the 
 - [`ADR-033-demand-routing-and-drift.md`](ADR-033-demand-routing-and-drift.md) — Head/tail demand routing wired + first demand-side watcher (forecast drift).
 - [`ADR-034-scenario-compare.md`](ADR-034-scenario-compare.md) — Scenario compare (SC-1): read-only KPI comparison (shortages, stock value, fill rate) across 2-5 scenarios; stale computed with no new schema.
 - [`ADR-035-buy-program-segmentation.md`](ADR-035-buy-program-segmentation.md) — Buy-program segmentation (DEM-2 PR1): read-only, zero-migration ΔFVA proof — new dense per-program reader, single-source `buy_program_bucket()` taxonomy (honest `UNKNOWN` bucket), reuses `compute_fva` unchanged.
+- [`ADR-036-human-window.md`](ADR-036-human-window.md) — Human window (EXP-1 PR1): server-rendered `GET /ui` shell + `GET /v1/whoami`, read-only client over the existing API, no cookie/session, kill switch default OFF.
 
 ## Feature specs (SPEC-*)
 

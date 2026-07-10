@@ -47,6 +47,12 @@ dependencies = [
     # ping must work in a LEAN watcher install, not only under [dev] — a core
     # runtime dependency by design (PROD-QW review finding).
     "httpx ~= 0.28",
+    # GET /ui shell (EXP-1 PR1, ADR-036): Jinja2Templates renders the human
+    # window's static HTML shell — autoescape is ON by default in starlette's
+    # Jinja2Templates. A core runtime dependency, not an extra: the router is
+    # always importable even when OOTILS_UI_ENABLED=0 (the kill switch gates
+    # registration at create_app() time, not the import).
+    "jinja2 ~= 3.1",
 ]
 
 [project.optional-dependencies]
@@ -80,7 +86,7 @@ foundation = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"ootils_core" = ["db/migrations/*.sql"]
+"ootils_core" = ["db/migrations/*.sql", "api/ui/templates/*.html", "api/ui/static/*.js"]
 
 [tool.ruff]
 # Generated gRPC/protobuf stubs are not hand-maintained — never lint them

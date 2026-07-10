@@ -3629,6 +3629,56 @@
         }
       }
     },
+    "/v1/scenarios/compare": {
+      "get": {
+        "tags": [
+          "scenarios"
+        ],
+        "summary": "Compare KPIs across 2-5 scenarios",
+        "description": "Read-only KPI comparison (shortages, stock_value_usd, fill_rate_est) across 2-5 scenarios, scoped by each scenario's latest COMPLETED calc_run. Deltas are computed against the baseline (if present in `ids`) or the first id passed. A scenario with no completed calc_run yields a `computable=false` entry with a note, not a request failure; a malformed or unknown scenario id fails the WHOLE request (422). Emits no event/audit row (a pure query path). Requires the `read` scope.",
+        "operationId": "compare_scenarios_endpoint_v1_scenarios_compare_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated scenario UUIDs, 2..5 (e.g. 'ids=<uuid1>,<uuid2>').",
+              "title": "Ids"
+            },
+            "description": "Comma-separated scenario UUIDs, 2..5 (e.g. 'ids=<uuid1>,<uuid2>')."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioCompareOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/scenarios/{scenario_id}": {
       "get": {
         "tags": [
@@ -7132,6 +7182,33 @@
             }
           }
         }
+      }
+    },
+    "/v1/whoami": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Whoami",
+        "description": "Return the authenticated Principal resolved for this request.",
+        "operationId": "whoami_v1_whoami_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
       }
     }
   },
@@ -16522,6 +16599,249 @@
         ],
         "title": "SandboxScenariosListResponse"
       },
+      "ScenarioCompareDeltasOut": {
+        "properties": {
+          "shortage_count_delta": {
+            "type": "integer",
+            "title": "Shortage Count Delta"
+          },
+          "severity_usd_delta": {
+            "type": "number",
+            "title": "Severity Usd Delta"
+          },
+          "stock_value_usd_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stock Value Usd Delta"
+          },
+          "fill_rate_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Rate Delta"
+          }
+        },
+        "type": "object",
+        "required": [
+          "shortage_count_delta",
+          "severity_usd_delta"
+        ],
+        "title": "ScenarioCompareDeltasOut",
+        "description": "entry - reference. stock_value_usd_delta/fill_rate_delta can be None\nwhen either side's own KPI is None."
+      },
+      "ScenarioCompareEntryOut": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Scenario Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "parent_scenario_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Scenario Id"
+          },
+          "calc_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calc Run Id"
+          },
+          "computed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computed At"
+          },
+          "stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale"
+          },
+          "computable": {
+            "type": "boolean",
+            "title": "Computable"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "kpis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScenarioCompareKpisOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deltas": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScenarioCompareDeltasOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "name",
+          "status",
+          "computable"
+        ],
+        "title": "ScenarioCompareEntryOut",
+        "description": "One requested scenario's row. computable=False means kpis/deltas/stale\nare all None and note explains why (no completed calc_run yet)."
+      },
+      "ScenarioCompareKpisOut": {
+        "properties": {
+          "shortage_count": {
+            "type": "integer",
+            "title": "Shortage Count"
+          },
+          "below_safety_stock_count": {
+            "type": "integer",
+            "title": "Below Safety Stock Count"
+          },
+          "shortage_severity_usd": {
+            "type": "number",
+            "title": "Shortage Severity Usd"
+          },
+          "stock_value_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stock Value Usd"
+          },
+          "stock_value_basis_count": {
+            "type": "integer",
+            "title": "Stock Value Basis Count"
+          },
+          "stock_value_unpriced_count": {
+            "type": "integer",
+            "title": "Stock Value Unpriced Count"
+          },
+          "fill_rate_est": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Rate Est"
+          },
+          "fill_rate_basis_count": {
+            "type": "integer",
+            "title": "Fill Rate Basis Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "shortage_count",
+          "below_safety_stock_count",
+          "shortage_severity_usd",
+          "stock_value_basis_count",
+          "stock_value_unpriced_count",
+          "fill_rate_basis_count"
+        ],
+        "title": "ScenarioCompareKpisOut",
+        "description": "One scenario's KPI snapshot. shortage_count/below_safety_stock_count/\nshortage_severity_usd are 0-honest (a real, meaningful 0 for a healthy\nscenario); stock_value_usd/fill_rate_est are None-honest (missing pricing\n/ zero demand -> None, never a masked 0 or 1.0) — see\nengine/scenario/compare.py's module docstring for the full KPI contract."
+      },
+      "ScenarioCompareOut": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioCompareEntryOut"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "comparable": {
+            "type": "boolean",
+            "title": "Comparable"
+          },
+          "reference_scenario_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Reference Scenario Id"
+          },
+          "cost_precedence": {
+            "type": "string",
+            "title": "Cost Precedence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries",
+          "comparable",
+          "reference_scenario_id",
+          "cost_precedence"
+        ],
+        "title": "ScenarioCompareOut",
+        "description": "comparable = every entry is both computable AND fresh (not stale)."
+      },
       "ScenarioDiffEntry": {
         "properties": {
           "diff_id": {
@@ -17733,6 +18053,49 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WhoAmIOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "actor_kind": {
+            "type": "string",
+            "title": "Actor Kind"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "is_legacy": {
+            "type": "boolean",
+            "title": "Is Legacy"
+          },
+          "token_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Prefix"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "actor_kind",
+          "scopes",
+          "is_legacy"
+        ],
+        "title": "WhoAmIOut",
+        "description": "The caller's own Principal. NEVER the token — see module docstring.\n\n``token_prefix`` is None for the legacy single token: its\n``request.state.client_id`` is the sentinel ``\"global_token\"``, not a\nreal minted-token prefix, so it is deliberately not surfaced as one."
       },
       "WorkOrderRow": {
         "properties": {

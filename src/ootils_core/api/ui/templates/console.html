@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ootils Console</title>
+</head>
+<body>
+<h1>Ootils Console</h1>
+<p>
+  Read-only human window over the existing <code>/v1/*</code> API (EXP-1 PR1).
+  Nothing on this page is a privileged path: every call below is the same
+  Bearer-token request any API client could make. Your token stays in this
+  browser tab (sessionStorage) and is never sent anywhere except the
+  <code>Authorization</code> header of each request.
+</p>
+
+<section id="auth-panel">
+  <h2>Connect</h2>
+  <label for="token-input">API token</label>
+  <input type="password" id="token-input" autocomplete="off">
+  <button type="button" id="connect-button">Connect</button>
+  <button type="button" id="disconnect-button">Disconnect</button>
+  <p id="whoami-status">Not connected.</p>
+</section>
+
+<section id="scenario-panel">
+  <label for="scenario-input">Scenario id (blank = baseline)</label>
+  <input type="text" id="scenario-input">
+  <button type="button" id="refresh-button">Refresh</button>
+</section>
+
+<section id="recommendations-panel">
+  <h2>Recommendations</h2>
+  <div id="recommendations-body">Not loaded.</div>
+</section>
+
+<section id="kpi-panel">
+  <h2>Proof KPIs</h2>
+  <div id="kpi-body">Not loaded.</div>
+</section>
+
+<section id="compare-panel">
+  <h2>Scenario compare</h2>
+  <label for="compare-ids-input">Scenario ids, comma-separated (2-5)</label>
+  <input type="text" id="compare-ids-input">
+  <button type="button" id="compare-button">Compare</button>
+  <div id="compare-body">Not loaded.</div>
+</section>
+
+<script src="/ui/static/app.js" defer></script>
+</body>
+</html>

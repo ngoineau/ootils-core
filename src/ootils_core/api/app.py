@@ -35,7 +35,7 @@ except ImportError:
 from ootils_core.api import metrics
 from ootils_core.api.auth import Principal, _expected_token, require_scope
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import audit, bom, calc, calendars, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens
+from ootils_core.api.routers import audit, bom, calc, calendars, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, me, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens, ui
 from ootils_core.api.routers.graph import nodes_router
 from ootils_core.mps import router as mps_router
 from ootils_core.atp import atp_router
@@ -376,6 +376,16 @@ def create_app() -> FastAPI:
                     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                     "img-src 'self' data: https://fastapi.tiangolo.com",
                 )
+            elif path == "/ui" or path.startswith("/ui/"):
+                # EXP-1 human window (ADR-036): self-only, NO 'unsafe-inline' —
+                # console.html loads only /ui/static/app.js (external file,
+                # no inline <script>/<style>/onclick=) and fetch()es only
+                # same-origin /v1/* endpoints, all covered by 'self' via the
+                # default-src fallback (script-src/style-src/connect-src).
+                response.headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'self'; frame-ancestors 'none'",
+                )
             else:
                 response.headers.setdefault(
                     "Content-Security-Policy",
@@ -437,6 +447,8 @@ def create_app() -> FastAPI:
     application.include_router(mps_router)
     application.include_router(atp_router)
     application.include_router(crp_router)
+    application.include_router(me.router)
+    ui.include_ui(application)
 
     @application.exception_handler(Exception)
     async def generic_exception_handler(request, exc: Exception) -> JSONResponse:
