@@ -1,0 +1,107 @@
+# open-purchase-orders.yaml — feed contract for open supplier POs
+# (INT-1 PR1, ADR-037)
+#
+# WHAT THIS FILE IS: the contract for ONE source feed — what it must look
+# like before a daily run trusts it. Loaded into the `feed_contracts` table
+# (migration 073) by `scripts/load_feed_contracts.py`. Every field below is
+# validated STRICTLY (src/ootils_core/interfaces/contracts.py): an unknown
+# field or a bad value fails loudly, naming the field, before this ever
+# touches the database.
+#
+# PILOT: this is YOUR file to read and fill in with your real feed's actual
+# shape/schedule/owner. The values below are realistic placeholders — adjust
+# every one of them (especially cadence, arrival_window_minutes, owner, and
+# the volume guards) to your actual system before the daily run (PR2/PR3)
+# starts relying on this contract.
+#
+# This is the "open purchase orders" feed: every currently OPEN (not yet
+# fully received/cancelled) supplier PO line. It is BLOCKING because open
+# supply is the other half of the shortage picture alongside on-hand — a
+# stale or truncated PO extract makes the engine think supply that already
+# left the supplier's dock doesn't exist, and recommend a duplicate order.
+
+# Stable identifier for this feed across ALL its versions. Kebab-case,
+# matches this file's name by convention.
+feed_key: open-purchase-orders
+
+# Which canonical entity this feed lands as (one of the values the
+# `ingest_batches.entity_type` CHECK already accepts). `purchase_orders`
+# maps to `nodes` (node_type='PurchaseOrderSupply') via the existing staging
+# pipeline — see docs/staging-templates/purchase_orders.md.
+entity_type: purchase_orders
+
+# Free-text name of the system this feed actually comes FROM. Matches the
+# `source_system` you will pass to `POST /v1/staging/upload`.
+source_system: SAP-EU
+
+# Physical file format this feed arrives in. One of: tsv, csv, xlsx, json
+# (ADR-013 D1). TSV is the recommended format for ERP exports — business
+# values (PO numbers, item codes) rarely contain tabs, unlike commas or
+# quotes that pollute CSV exports from ERPs.
+format: tsv
+
+# The columns that together uniquely identify ONE row of this feed. A PO
+# line has a real transactional identity: external_id, unique per
+# source_system (docs/staging-templates/purchase_orders.md). Every entry
+# here MUST also appear in mandatory_columns below.
+key_columns:
+  - external_id
+
+# Columns that must be present and non-blank on EVERY row for this feed to
+# pass its DQ gate — see docs/staging-templates/purchase_orders.md for the
+# exact column contract (item/location/supplier external_ids must resolve;
+# quantity > 0; uom a known code; expected_delivery_date ISO 8601; status in
+# {open, in_transit, received, cancelled, closed}).
+mandatory_columns:
+  - external_id
+  - item_external_id
+  - location_external_id
+  - supplier_external_id
+  - quantity
+  - uom
+  - expected_delivery_date
+  - status
+
+# V1 admits ONLY 'full' — this feed is the FULL set of currently-open POs on
+# every refresh (closed/received POs simply drop out of the extract), not a
+# change-only delta. Safe to omit — 'full' is the default.
+load_mode: full
+
+# Expected schedule, as a cron expression (5 fields, UTC) — interpreted by
+# the daily-run runtime landing in PR2/PR3; this contract only DECLARES it.
+# Example: daily at 05:30 UTC, ahead of the on-hand snapshot and the
+# planning run.
+cadence: "30 5 * * *"
+
+# How many minutes after the cadence tick this feed is allowed to arrive
+# before a daily run treats it as MISSING. Tune this to your actual SAP
+# batch-export latency plus a safety margin.
+arrival_window_minutes: 120
+
+# Human/team accountable for this feed's content and freshness — who the L3
+# escalation webhook (ADR-037) ultimately names when a guard goes red.
+# Replace with your real team/contact.
+owner: procurement-ops
+
+# 'blocking' | 'advisory' (ADR-037 governed-ingest option (a)). Open POs are
+# blocking: a planning run should not auto-approve while it might be
+# recommending a duplicate order against supply that already exists.
+criticality: blocking
+
+# Volume guards — BOTH optional. See on-hand.yaml for the full rationale
+# (catching a silent partial extraction, ADR-037 §(e)).
+#
+# A small pilot customer can legitimately have very few open POs on a given
+# day, so the floor is intentionally low — raise it once you know your real
+# steady-state PO count.
+volume_guard_min_rows: 5
+# Open-PO counts are naturally spikier than on-hand (a big weekly buy run
+# lands in one file) — the swing tolerance is wider than on-hand's for that
+# reason. Fraction (0.30 == 30%, NOT a percent integer).
+volume_guard_max_pct_delta: 0.30
+
+# feed_keys this feed's daily-run ordering depends on. NOT a foreign key —
+# validated by the Python loader against the set of feed_keys actually
+# present in this directory. open-purchase-orders has no upstream dependency
+# among the PR1 seed feeds.
+depends_on: []
