@@ -24,18 +24,26 @@ use uuid::Uuid;
 
 /// Hardcoded baseline scenario UUID — same constant the rest of the
 /// system uses. Phase 4 will replace this with per-scenario loaders.
-pub const BASELINE_SCENARIO_ID: Uuid =
-    Uuid::from_u128(0x00000000_0000_0000_0000_000000000001);
+pub const BASELINE_SCENARIO_ID: Uuid = Uuid::from_u128(0x00000000_0000_0000_0000_000000000001);
 
 pub struct LoadStats {
     pub n_nodes: usize,
+    // n_pi/n_supplies/n_demands/n_unknown are computed and logged at
+    // boot (see the `info!` call in `load_baseline`) from their own
+    // local variables; the struct fields below are the reusable form
+    // for a future caller (e.g. a `/metrics` gauge) that doesn't
+    // exist yet — no caller reads `LoadStats` past construction today.
+    #[allow(dead_code)]
     pub n_pi: usize,
+    #[allow(dead_code)]
     pub n_supplies: usize,
+    #[allow(dead_code)]
     pub n_demands: usize,
     /// F-025: nodes the engine doesn't model (e.g. Resource, Ghost,
     /// future types). They're loaded into the graph but ignored by
     /// the propagator. Surfaced here + as a Prometheus counter so a
     /// new node type doesn't silently miscompute totals.
+    #[allow(dead_code)]
     pub n_unknown: usize,
     pub n_edges: usize,
     pub elapsed_ms: u64,
@@ -48,10 +56,7 @@ pub struct LoadStats {
 /// loader bails if the baseline has 0 nodes or 0 PIs (wrong DSN
 /// pointing at an empty DB). Set to true for CI / test fixtures
 /// that intentionally start from an empty schema.
-pub async fn load_baseline(
-    dsn: &str,
-    allow_empty: bool,
-) -> anyhow::Result<(Graph, LoadStats)> {
+pub async fn load_baseline(dsn: &str, allow_empty: bool) -> anyhow::Result<(Graph, LoadStats)> {
     let t0 = Instant::now();
 
     let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
@@ -69,8 +74,16 @@ pub async fn load_baseline(
         .iter()
         .filter(|n| n.node_type == NodeType::ProjectedInventory)
         .count();
-    let n_supplies = graph.nodes.iter().filter(|n| n.node_type.is_supply()).count();
-    let n_demands = graph.nodes.iter().filter(|n| n.node_type.is_demand()).count();
+    let n_supplies = graph
+        .nodes
+        .iter()
+        .filter(|n| n.node_type.is_supply())
+        .count();
+    let n_demands = graph
+        .nodes
+        .iter()
+        .filter(|n| n.node_type.is_demand())
+        .count();
     let n_unknown = graph
         .nodes
         .iter()
@@ -102,8 +115,7 @@ pub async fn load_baseline(
         if allow_empty {
             warn!(
                 n_nodes,
-                n_pi,
-                "baseline is empty but --allow-empty-baseline was set — booting anyway"
+                n_pi, "baseline is empty but --allow-empty-baseline was set — booting anyway"
             );
         } else {
             anyhow::bail!(
@@ -132,7 +144,10 @@ pub async fn load_baseline(
                  upgrade the engine doesn't know about yet."
             );
         } else {
-            info!(n_unknown, "loaded nodes with unknown node_type (ignored by propagator)");
+            info!(
+                n_unknown,
+                "loaded nodes with unknown node_type (ignored by propagator)"
+            );
         }
     }
 
@@ -306,10 +321,10 @@ async fn build_graph(client: &Client) -> anyhow::Result<Graph> {
         };
 
         let edge_type = EdgeType::from_db(edge_type_str);
-        edges_in
-            .entry(to_idx)
-            .or_default()
-            .push(EdgeRef { from: from_idx, edge_type });
+        edges_in.entry(to_idx).or_default().push(EdgeRef {
+            from: from_idx,
+            edge_type,
+        });
     }
     if n_skipped > 0 {
         warn!(

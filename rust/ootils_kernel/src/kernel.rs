@@ -65,9 +65,8 @@ pub fn sum_outflows(demands: &[Demand], bucket_start: NaiveDate, bucket_end: Nai
                     let overlap_days = (overlap_end - overlap_start).num_days().max(0);
                     if overlap_days > 0 {
                         // qty / span_days * overlap_days, preserving Decimal precision
-                        let frac = d.quantity
-                            / Decimal::from(span_days)
-                            * Decimal::from(overlap_days);
+                        let frac =
+                            d.quantity / Decimal::from(span_days) * Decimal::from(overlap_days);
                         total += frac;
                     }
                 }
@@ -149,7 +148,13 @@ mod tests {
             quantity: dec("50"),
             time_ref: date("2026-01-04"),
         }];
-        let r = compute_pi_bucket(dec("10"), &supplies, &[], date("2026-01-01"), date("2026-01-08"));
+        let r = compute_pi_bucket(
+            dec("10"),
+            &supplies,
+            &[],
+            date("2026-01-01"),
+            date("2026-01-08"),
+        );
         assert_eq!(r.inflows, dec("50"));
         assert_eq!(r.closing_stock, dec("60"));
     }
@@ -161,7 +166,13 @@ mod tests {
             quantity: dec("50"),
             time_ref: date("2026-01-08"),
         }];
-        let r = compute_pi_bucket(dec("10"), &supplies, &[], date("2026-01-01"), date("2026-01-08"));
+        let r = compute_pi_bucket(
+            dec("10"),
+            &supplies,
+            &[],
+            date("2026-01-01"),
+            date("2026-01-08"),
+        );
         assert_eq!(r.inflows, Decimal::ZERO);
     }
 
@@ -173,7 +184,13 @@ mod tests {
             time_span_end: Some(date("2026-01-08")),
             time_ref: None,
         }];
-        let r = compute_pi_bucket(dec("100"), &[], &demands, date("2026-01-01"), date("2026-01-08"));
+        let r = compute_pi_bucket(
+            dec("100"),
+            &[],
+            &demands,
+            date("2026-01-01"),
+            date("2026-01-08"),
+        );
         // Full 7-day span = 7 days overlap, so 100% of the 30 -> 30.
         assert_eq!(r.outflows, dec("30"));
     }
@@ -187,7 +204,13 @@ mod tests {
             time_span_end: Some(date("2026-01-31")),
             time_ref: None,
         }];
-        let r = compute_pi_bucket(dec("100"), &[], &demands, date("2026-01-01"), date("2026-01-02"));
+        let r = compute_pi_bucket(
+            dec("100"),
+            &[],
+            &demands,
+            date("2026-01-01"),
+            date("2026-01-02"),
+        );
         assert_eq!(r.outflows, dec("1"));
     }
 
@@ -199,7 +222,13 @@ mod tests {
             time_span_end: None,
             time_ref: Some(date("2026-01-05")),
         }];
-        let r = compute_pi_bucket(dec("100"), &[], &demands, date("2026-01-01"), date("2026-01-08"));
+        let r = compute_pi_bucket(
+            dec("100"),
+            &[],
+            &demands,
+            date("2026-01-01"),
+            date("2026-01-08"),
+        );
         assert_eq!(r.outflows, dec("20"));
     }
 
@@ -211,7 +240,13 @@ mod tests {
             time_span_end: None,
             time_ref: Some(date("2026-01-04")),
         }];
-        let r = compute_pi_bucket(dec("100"), &[], &demands, date("2026-01-01"), date("2026-01-08"));
+        let r = compute_pi_bucket(
+            dec("100"),
+            &[],
+            &demands,
+            date("2026-01-01"),
+            date("2026-01-08"),
+        );
         assert_eq!(r.closing_stock, dec("-50"));
         assert!(r.has_shortage);
         assert_eq!(r.shortage_qty, dec("50"));

@@ -186,6 +186,10 @@ pub struct WalWriter {
 impl WalWriter {
     /// Open (or create) the WAL at `path` using default rotation +
     /// size caps. Refuses v1 files with a clear error.
+    // Production boots via `open_with_caps` directly (main.rs, custom
+    // caps from CLI args) — this default-caps wrapper is exercised
+    // only by the unit tests below.
+    #[allow(dead_code)]
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::open_with_caps(
             path,
@@ -195,6 +199,7 @@ impl WalWriter {
     }
 
     /// Backward-compat shim for tests that only care about rotation.
+    #[allow(dead_code)]
     pub fn open_with_threshold(
         path: impl AsRef<Path>,
         rotation_threshold_bytes: u64,
@@ -222,10 +227,14 @@ impl WalWriter {
         }
 
         let exists = path.exists();
+        // Durability-critical: NEVER truncate. If the WAL already
+        // exists we resume from it (read_header below); truncating
+        // on every restart would silently destroy unflushed deltas.
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)?;
 
         let (applied_pg_seq, _hdr_version) = if !exists {
@@ -315,11 +324,14 @@ impl WalWriter {
         // Durability barrier — caller will not see success until disk has it.
         f.sync_data()?;
 
-        self.current_size
-            .fetch_add(record_bytes, Ordering::Relaxed);
+        self.current_size.fetch_add(record_bytes, Ordering::Relaxed);
         Ok(seq)
     }
 
+    // No current caller (the RUNBOOK documents checking WAL size via
+    // `stat` on the file directly); kept as the natural accessor for a
+    // future health/metrics endpoint.
+    #[allow(dead_code)]
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
@@ -340,6 +352,9 @@ impl WalWriter {
         self.applied_pg_seq.load(Ordering::Acquire)
     }
 
+    // Test-only peek (assertions in the unit tests below); production
+    // code never reads `next_seq` back out.
+    #[allow(dead_code)]
     pub fn next_seq_peek(&self) -> u64 {
         self.next_seq.load(Ordering::Acquire)
     }
@@ -374,7 +389,10 @@ impl WalWriter {
             }
             let len = u32::from_be_bytes(len_buf) as usize;
             if len > MAX_RECORD_PAYLOAD {
-                warn!(len, "WAL: record length overflow, treating as truncated, stopping");
+                warn!(
+                    len,
+                    "WAL: record length overflow, treating as truncated, stopping"
+                );
                 break;
             }
             if f.read_exact(&mut seq_buf).is_err() {
@@ -548,10 +566,7 @@ impl WalWriter {
         // Reopen the rotated file and swap it into the MutexGuard's
         // slot WITHOUT releasing the lock. Any append() that was
         // waiting on the lock now sees the new file handle.
-        let mut reopened = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.path)?;
+        let mut reopened = OpenOptions::new().read(true).write(true).open(&self.path)?;
         reopened.seek(SeekFrom::End(0))?;
         *live = reopened;
         self.current_size.store(new_size, Ordering::Relaxed);
@@ -566,6 +581,9 @@ impl WalWriter {
         Ok(reclaimed)
     }
 
+    // No current caller; kept as the natural accessor for a future
+    // health/metrics endpoint (same rationale as `max_bytes` above).
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -595,9 +613,8 @@ fn write_header(file: &mut File, applied_pg_seq: u64) -> anyhow::Result<()> {
 fn read_header(file: &mut File, path: &Path) -> anyhow::Result<(u64, u32)> {
     file.seek(SeekFrom::Start(0))?;
     let mut magic = [0u8; 4];
-    file.read_exact(&mut magic).map_err(|e| {
-        anyhow::anyhow!("WAL file {} unreadable: {}", path.display(), e)
-    })?;
+    file.read_exact(&mut magic)
+        .map_err(|e| anyhow::anyhow!("WAL file {} unreadable: {}", path.display(), e))?;
     if magic == MAGIC_V1 {
         anyhow::bail!(
             "WAL file {} is v1 format (magic WAL\\0). v2 (WAL2) is required. \
@@ -640,11 +657,7 @@ fn read_header(file: &mut File, path: &Path) -> anyhow::Result<(u64, u32)> {
 }
 
 /// Helper to build a `WalRecord` with timestamp filled in.
-pub fn make_record(
-    calc_run_id: Uuid,
-    scenario_id: Uuid,
-    deltas: Vec<NodeDelta>,
-) -> WalRecord {
+pub fn make_record(calc_run_id: Uuid, scenario_id: Uuid, deltas: Vec<NodeDelta>) -> WalRecord {
     WalRecord {
         timestamp_ms: Utc::now().timestamp_millis(),
         calc_run_id,
@@ -732,7 +745,10 @@ mod tests {
         let w2 = WalWriter::open(&path).unwrap();
         let recovered = w2.replay().unwrap();
         assert_eq!(recovered.len(), 5);
-        assert_eq!(recovered.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            recovered.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
     }
 
     #[test]
@@ -983,7 +999,10 @@ mod tests {
                 }
             }
         }
-        assert!(tripped, "expected WalFull within 10 appends past the 256B cap");
+        assert!(
+            tripped,
+            "expected WalFull within 10 appends past the 256B cap"
+        );
         // File on disk has NOT grown past the cap.
         let on_disk = std::fs::metadata(&path).unwrap().len();
         assert!(

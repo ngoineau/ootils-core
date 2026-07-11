@@ -274,3 +274,27 @@ at the cost of more frequent Postgres writes.
 - **Per-scenario propagation** not yet exposed. Propagate always
   targets the baseline. Fork-then-propagate-on-fork is a phase-9
   task.
+
+## CI (PERF-1 PR-B, rust-build.yml)
+
+The `tests/engine_service/` battery (15 files — health/metrics/GetNode,
+propagate correctness, concurrency, backpressure, PG failure/outage
+durability, recovery, per-scenario propagation, performance regression)
+now runs in CI via the `engine-service-it` job in
+`.github/workflows/rust-build.yml`: it builds `ootils-engine` in release
+mode, starts a Postgres 16 service container, applies migrations, seeds
+the demo dataset, and runs the battery against the real binary + a real
+DB. The same workflow also gates `cargo fmt --check` / `cargo clippy
+--workspace --all-targets -D warnings` / `cargo test --workspace`
+(`cargo-checks`) and gRPC stub drift (`proto-drift` — regenerates
+`src/ootils_core/_grpc/` from `engine.proto` and fails on any diff).
+
+`engine-service-it` starts **informative** (`continue-on-error: true`):
+the battery never ran in CI before this PR (it silently skipped for
+lack of a built binary — `tests/engine_service/conftest.py`'s
+`engine_binary` fixture calls `pytest.skip` when the release binary
+isn't found), so its baseline flakiness under GitHub Actions runners is
+still unproven. **Promote it to a required check after 2 consecutive
+green runs** (drop `continue-on-error`, then add it to branch
+protection — `cargo-checks` and `proto-drift` are blocking by
+convention from day one, not gated behind this same probation).

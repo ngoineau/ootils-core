@@ -134,6 +134,11 @@ impl Node {
     pub const FLAG_SHORTAGE: u8 = 0x02;
     pub const FLAG_ACTIVE: u8 = 0x04;
 
+    // Companion accessor to `has_shortage`/`is_active` below (same
+    // flag-bit pattern); no current caller inspects FLAG_DIRTY through
+    // the accessor — callers check dirtiness via the `HashSet<NodeIndex>`
+    // dirty-set instead (propagator.rs), not the per-node flag.
+    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.flags & Self::FLAG_DIRTY != 0
     }
@@ -230,6 +235,9 @@ impl Graph {
         self.nodes.len()
     }
 
+    // Companion to `len()` above; no current caller needs it (empty
+    // baseline is checked via `LoadStats.n_nodes` in loader.rs).
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -250,18 +258,18 @@ impl Graph {
             + self.by_node_id.capacity() * (size_of::<Uuid>() + size_of::<NodeIndex>())
             + self
                 .by_item_location
-                .iter()
-                .map(|(_, v)| v.capacity() * size_of::<NodeIndex>())
+                .values()
+                .map(|v| v.capacity() * size_of::<NodeIndex>())
                 .sum::<usize>()
             + self
                 .by_series
-                .iter()
-                .map(|(_, v)| v.capacity() * size_of::<NodeIndex>())
+                .values()
+                .map(|v| v.capacity() * size_of::<NodeIndex>())
                 .sum::<usize>()
             + self
                 .edges_in
-                .iter()
-                .map(|(_, v)| v.capacity() * size_of::<EdgeRef>())
+                .values()
+                .map(|v| v.capacity() * size_of::<EdgeRef>())
                 .sum::<usize>()
     }
 }

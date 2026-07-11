@@ -14,7 +14,7 @@
 //!   2. apply to Graph (in RAM)
 //!   3. WAL.append() + fsync     -- assigns + returns a sequence number
 //!   4. WriteBehindQueue.push(PendingDelta { seq, ... })  -- non-blocking
-//!   ----- caller-visible latency stops here -----
+//!      ----- caller-visible latency stops here -----
 //!   5. background task flushes batch to Postgres
 //!   6. on flush success: WAL.set_applied_pg_seq(max_seq_in_batch)
 //!      (NOT a truncate — see wal.rs for the v2 marker contract)
@@ -135,6 +135,10 @@ pub struct WriteBehindQueue {
 }
 
 impl WriteBehindQueue {
+    // Production boots via `with_caps` directly (main.rs, explicit
+    // depth cap from CLI args); this default-depth wrapper has no
+    // current caller.
+    #[allow(dead_code)]
     pub fn new(wal: Arc<WalWriter>, metrics: Arc<crate::metrics::Metrics>) -> Self {
         Self::with_caps(wal, metrics, 1_000_000)
     }
@@ -153,6 +157,9 @@ impl WriteBehindQueue {
         }
     }
 
+    // No current caller; kept as the natural accessor for a future
+    // health/metrics endpoint (same rationale as WalWriter's).
+    #[allow(dead_code)]
     pub fn max_depth(&self) -> usize {
         self.max_depth
     }
@@ -220,6 +227,10 @@ impl WriteBehindQueue {
         (out, max_seq)
     }
 
+    // Exercised by the unit tests below (queue-depth assertions);
+    // production code reads depth via `metrics.writeback_queue_depth`
+    // instead.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.pending.lock().len()
     }
@@ -240,7 +251,8 @@ impl WriteBehindQueue {
         // Build a map of all known node_id → highest-seq delta, scanning
         // both the current queue (which has new deltas appended during
         // the failed flush) and the failed batch.
-        let mut latest: HashMap<Uuid, PendingDelta> = HashMap::with_capacity(q.len() + failed_batch.len());
+        let mut latest: HashMap<Uuid, PendingDelta> =
+            HashMap::with_capacity(q.len() + failed_batch.len());
         for d in q.drain(..) {
             keep_latest(&mut latest, d);
         }
@@ -311,7 +323,10 @@ impl PgFlushClient {
             ))
             .await?;
         let stmt = client.prepare(FLUSH_UPDATE_SQL).await?;
-        info!(timeout_ms = PG_STATEMENT_TIMEOUT_MS, "PG flush client connected + statement prepared");
+        info!(
+            timeout_ms = PG_STATEMENT_TIMEOUT_MS,
+            "PG flush client connected + statement prepared"
+        );
         self.state = Some((client, stmt));
         Ok(())
     }
@@ -378,7 +393,10 @@ impl PgFlushClient {
             )
             .await?;
             tx.commit().await?;
-            debug!(n, "wrote batch to Postgres (REPEATABLE READ tx, cached client)");
+            debug!(
+                n,
+                "wrote batch to Postgres (REPEATABLE READ tx, cached client)"
+            );
             Ok(())
         }
         .await;
@@ -453,8 +471,7 @@ pub fn spawn_flusher(
                     } else {
                         debug!(
                             n,
-                            max_seq,
-                            "WriteBehindQueue: batch flushed + WAL marker advanced"
+                            max_seq, "WriteBehindQueue: batch flushed + WAL marker advanced"
                         );
                     }
                     // After a successful flush is a good moment to attempt
@@ -463,10 +480,7 @@ pub fn spawn_flusher(
                         warn!(error = %e, "WAL rotation failed (will retry)");
                     }
                     if consecutive_failures > 0 {
-                        info!(
-                            consecutive_failures,
-                            "flusher recovered, resetting backoff"
-                        );
+                        info!(consecutive_failures, "flusher recovered, resetting backoff");
                         consecutive_failures = 0;
                         current_interval = baseline_interval;
                     }
@@ -563,15 +577,12 @@ mod tests {
         // bounds memory.
         let (_d, q) = fresh_queue(1000);
         // Pre-existing pending: node 1 at seq=5, node 2 at seq=6.
-        q.try_push(vec![dummy_delta(5, 1), dummy_delta(6, 2)]).unwrap();
+        q.try_push(vec![dummy_delta(5, 1), dummy_delta(6, 2)])
+            .unwrap();
 
         // Failed batch coming back from PG: node 1 at seq=2 (older),
         // node 3 at seq=3 (new), node 2 at seq=8 (newer than current).
-        let failed = vec![
-            dummy_delta(2, 1),
-            dummy_delta(3, 3),
-            dummy_delta(8, 2),
-        ];
+        let failed = vec![dummy_delta(2, 1), dummy_delta(3, 3), dummy_delta(8, 2)];
         q.reenqueue_with_dedupe(failed);
 
         // After dedupe: 3 unique nodes, with their respective highest seqs:
@@ -581,10 +592,8 @@ mod tests {
         let (drained, max_seq) = q.drain_batch();
         assert_eq!(drained.len(), 3);
         assert_eq!(max_seq, 8);
-        let by_node: std::collections::HashMap<Uuid, u64> = drained
-            .iter()
-            .map(|d| (d.node_id, d.seq))
-            .collect();
+        let by_node: std::collections::HashMap<Uuid, u64> =
+            drained.iter().map(|d| (d.node_id, d.seq)).collect();
         assert_eq!(by_node[&Uuid::from_u128(1)], 5);
         assert_eq!(by_node[&Uuid::from_u128(2)], 8);
         assert_eq!(by_node[&Uuid::from_u128(3)], 3);

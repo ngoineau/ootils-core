@@ -101,14 +101,14 @@ impl Loader {
 ///
 /// Per-kind semantics:
 ///   - kind='pi'     : uuid_a=node_id, uuid_b=projection_series_id,
-///                     int_a=bucket_sequence, date_a=time_span_start,
-///                     date_b=time_span_end
+///     int_a=bucket_sequence, date_a=time_span_start,
+///     date_b=time_span_end
 ///   - kind='supply' : uuid_a=pi_node_id, qty=quantity, date_a=time_ref
 ///   - kind='demand' : uuid_a=pi_node_id, qty=quantity,
-///                     date_a=time_span_start, date_b=time_span_end,
-///                     date_c=time_ref
+///     date_a=time_span_start, date_b=time_span_end,
+///     date_c=time_ref
 ///   - kind='seed'   : uuid_a=projection_series_id, int_a=seed_seq,
-///                     qty=seed_opening
+///     qty=seed_opening
 const COMBINED_LOAD_SQL: &str = "\
 WITH dirty AS ( \
     SELECT pi.node_id, pi.projection_series_id, pi.bucket_sequence, \

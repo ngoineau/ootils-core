@@ -10,6 +10,17 @@
 //! still return `Unimplemented` and reference the phase that will fill
 //! them in.
 
+// `tonic::Status` is ~176 bytes, well over clippy's `result_large_err`
+// threshold — every RPC handler in this file returns
+// `Result<_, Status>` by the tonic contract, so this fires at every
+// handler boundary. The clippy-suggested fix (`Box<Status>`) is a
+// real signature change across the whole gRPC surface (handlers,
+// callers, the `?`-propagation chains below) — out of scope for a CI
+// hardening pass. Allowed module-wide rather than four near-identical
+// per-site allows; revisit if `Status` size becomes an actual
+// (measured) hot-path cost.
+#![allow(clippy::result_large_err)]
+
 use arc_swap::ArcSwap;
 use prost_types::Timestamp;
 use std::collections::HashSet;
@@ -94,16 +105,13 @@ fn date_to_iso(d: chrono::NaiveDate) -> String {
 
 #[tonic::async_trait]
 impl Engine for EngineSvc {
-    type QueryShortagesStream =
-        tokio_stream::wrappers::ReceiverStream<Result<Shortage, Status>>;
-    type StreamChangesStream =
-        tokio_stream::wrappers::ReceiverStream<Result<ChangeEvent, Status>>;
+    type QueryShortagesStream = tokio_stream::wrappers::ReceiverStream<Result<Shortage, Status>>;
+    type StreamChangesStream = tokio_stream::wrappers::ReceiverStream<Result<ChangeEvent, Status>>;
 
     async fn health(&self, _req: Request<()>) -> Result<Response<HealthStatus>, Status> {
         // F-039: explicit cast — saturating semantics on the unlikely
         // overflow (uptime > 292 billion years).
-        let uptime = i64::try_from(self.boot_time.elapsed().as_secs())
-            .unwrap_or(i64::MAX);
+        let uptime = i64::try_from(self.boot_time.elapsed().as_secs()).unwrap_or(i64::MAX);
         let g = self.baseline.load_full();
         // F-040 fix: user-facing detail — no internal "phase N"
         // nomenclature (ADR-017 implementation jargon).
@@ -115,7 +123,7 @@ impl Engine for EngineSvc {
         Ok(Response::new(HealthStatus {
             status: HealthEnum::Serving as i32,
             detail,
-            boot_time: Some(self.boot_timestamp.clone()),
+            boot_time: Some(self.boot_timestamp),
             uptime_seconds: uptime,
         }))
     }
@@ -137,7 +145,10 @@ impl Engine for EngineSvc {
             .sum();
         let events_total = self.metrics.events_total.load(Ordering::Relaxed) as i64;
         let nodes_processed = self.metrics.nodes_processed_total.load(Ordering::Relaxed) as i64;
-        let shortages = self.metrics.shortages_detected_total.load(Ordering::Relaxed) as i64;
+        let shortages = self
+            .metrics
+            .shortages_detected_total
+            .load(Ordering::Relaxed) as i64;
         // p50/p95/p99 require a histogram, which the hand-rolled
         // metrics registry doesn't keep (it accumulates sum-only).
         // Report mean as p50 — Prometheus consumers should use the
@@ -145,13 +156,15 @@ impl Engine for EngineSvc {
         // p95/p99 stay zero until a histogram lands (deferred — not
         // urgent enough to pull in prometheus-client).
         let mean_compute_us = if events_total > 0 {
-            self.metrics.propagate_compute_us_sum.load(Ordering::Relaxed) as f64 / events_total as f64
+            self.metrics
+                .propagate_compute_us_sum
+                .load(Ordering::Relaxed) as f64
+                / events_total as f64
         } else {
             0.0
         };
         let wal_size = self.metrics.wal_size_bytes.load(Ordering::Relaxed) as i64;
-        let queue_depth =
-            self.metrics.writeback_queue_depth.load(Ordering::Relaxed) as i32;
+        let queue_depth = self.metrics.writeback_queue_depth.load(Ordering::Relaxed) as i32;
 
         Ok(Response::new(EngineMetrics {
             baseline_graph_bytes: baseline_bytes,
@@ -169,10 +182,7 @@ impl Engine for EngineSvc {
         }))
     }
 
-    async fn list_scenarios(
-        &self,
-        _req: Request<()>,
-    ) -> Result<Response<ScenarioList>, Status> {
+    async fn list_scenarios(&self, _req: Request<()>) -> Result<Response<ScenarioList>, Status> {
         // Always surface the baseline + every active fork.
         let mut out: Vec<ScenarioInfo> = Vec::new();
         {
@@ -181,7 +191,7 @@ impl Engine for EngineSvc {
                 id: "00000000-0000-0000-0000-000000000001".into(),
                 name: "baseline".into(),
                 parent_id: String::new(),
-                created_at: Some(self.boot_timestamp.clone()),
+                created_at: Some(self.boot_timestamp),
                 overlay_size: 0,
                 memory_bytes: g.memory_bytes() as i64,
             });
@@ -190,14 +200,11 @@ impl Engine for EngineSvc {
             out.push(ScenarioInfo {
                 id: s.id.to_string(),
                 name: s.name.clone(),
-                parent_id: s
-                    .parent_id
-                    .map(|u| u.to_string())
-                    .unwrap_or_default(),
+                parent_id: s.parent_id.map(|u| u.to_string()).unwrap_or_default(),
                 created_at: Some(Timestamp::from(s.created_at_system)),
                 overlay_size: s.overlay_size() as i32,
-                memory_bytes: (s.baseline_snapshot.memory_bytes()
-                    + s.overlay_memory_bytes()) as i64,
+                memory_bytes: (s.baseline_snapshot.memory_bytes() + s.overlay_memory_bytes())
+                    as i64,
             });
         }
         Ok(Response::new(ScenarioList { scenarios: out }))
@@ -219,13 +226,14 @@ impl Engine for EngineSvc {
         //   any other UUID → fork from named scenario (P3.5 MCTS)
         let ttl = q.ttl_seconds as u64;
         let (scenario, stats) = if q.parent_scenario_id.is_empty() {
-            self.scenarios.fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
+            self.scenarios
+                .fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
         } else {
-            let parent_uuid = Uuid::from_str(&q.parent_scenario_id).map_err(|e| {
-                Status::invalid_argument(format!("bad parent_scenario_id: {e}"))
-            })?;
+            let parent_uuid = Uuid::from_str(&q.parent_scenario_id)
+                .map_err(|e| Status::invalid_argument(format!("bad parent_scenario_id: {e}")))?;
             if parent_uuid == crate::loader::BASELINE_SCENARIO_ID {
-                self.scenarios.fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
+                self.scenarios
+                    .fork_from_baseline_with_ttl(name.clone(), &self.baseline, ttl)
             } else {
                 self.scenarios
                     .fork_from_scenario(name.clone(), parent_uuid, ttl)
@@ -235,9 +243,10 @@ impl Engine for EngineSvc {
             }
         };
         self.metrics.record_fork();
-        self.metrics
-            .active_scenarios
-            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.active_scenarios.store(
+            self.scenarios.len() as i64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         info!(
             scenario_id = %scenario.id,
             name = %scenario.name,
@@ -276,9 +285,10 @@ impl Engine for EngineSvc {
             .remove(&sid)
             .ok_or_else(|| Status::not_found(format!("scenario {sid} not found")))?;
         let overlay_entries = scenario.overlay_size() as i32;
-        self.metrics
-            .active_scenarios
-            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.active_scenarios.store(
+            self.scenarios.len() as i64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         info!(scenario_id = %sid, overlay_entries, "scenario deleted (F-038)");
         Ok(Response::new(DeleteResult {
             overlay_entries_freed: overlay_entries,
@@ -344,9 +354,10 @@ impl Engine for EngineSvc {
         // Drop the scenario from the manager — merged is consumed.
         self.scenarios.remove(&sid);
         self.metrics.record_merge();
-        self.metrics
-            .active_scenarios
-            .store(self.scenarios.len() as i64, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.active_scenarios.store(
+            self.scenarios.len() as i64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let new_gen = {
             let g = self.baseline.load_full();
@@ -366,10 +377,7 @@ impl Engine for EngineSvc {
         }))
     }
 
-    async fn get_node(
-        &self,
-        req: Request<NodeQuery>,
-    ) -> Result<Response<NodeState>, Status> {
+    async fn get_node(&self, req: Request<NodeQuery>) -> Result<Response<NodeState>, Status> {
         // P3.1 (agent-first): GetNode is now overlay-aware. If
         // scenario_id refers to a forked scenario, read first from
         // its overlay (post-propagation values) and fall back to the
@@ -381,21 +389,20 @@ impl Engine for EngineSvc {
             .map_err(|e| Status::invalid_argument(format!("bad node_id: {e}")))?;
 
         // Resolve target scenario (baseline if empty / canonical UUID).
-        let scenario_opt: Option<Arc<crate::scenario::Scenario>> = if q.scenario_id.is_empty() {
-            None
-        } else {
-            let req_sid = Uuid::from_str(&q.scenario_id)
-                .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
-            if req_sid == crate::loader::BASELINE_SCENARIO_ID {
+        let scenario_opt: Option<Arc<crate::scenario::Scenario>> =
+            if q.scenario_id.is_empty() {
                 None
             } else {
-                Some(
-                    self.scenarios.get(&req_sid).ok_or_else(|| {
+                let req_sid = Uuid::from_str(&q.scenario_id)
+                    .map_err(|e| Status::invalid_argument(format!("bad scenario_id: {e}")))?;
+                if req_sid == crate::loader::BASELINE_SCENARIO_ID {
+                    None
+                } else {
+                    Some(self.scenarios.get(&req_sid).ok_or_else(|| {
                         Status::not_found(format!("scenario {req_sid} not found"))
-                    })?,
-                )
-            }
-        };
+                    })?)
+                }
+            };
 
         // Fetch the node — overlay-aware if we have a scenario.
         let node = match &scenario_opt {
@@ -542,7 +549,6 @@ impl Engine for EngineSvc {
         //   overlay write only — no WAL/PG. Per-scenario propagation
         //   lock so parallel propags on DIFFERENT scenarios don't
         //   serialize against each other.
-        let metrics = self.metrics.clone();
         let blocking_outcome = if let Some(scenario) = target_scenario.clone() {
             // ---- Scenario propagation path ----
             tokio::task::spawn_blocking(
@@ -700,8 +706,8 @@ impl Engine for EngineSvc {
         let events = q.events;
         let scenario_id_str = q.scenario_id.clone();
 
-        let batch_outcome = tokio::task::spawn_blocking(
-            move || -> (Vec<PropagateResponse>, i32, String) {
+        let batch_outcome =
+            tokio::task::spawn_blocking(move || -> (Vec<PropagateResponse>, i32, String) {
                 let mut results = Vec::with_capacity(events.len());
                 // Single lock acquisition for the whole batch.
                 let n = events.len();
@@ -715,7 +721,13 @@ impl Engine for EngineSvc {
                                 return (
                                     results,
                                     i as i32,
-                                    format!("event #{} of {}: {}: {}", i, n, status.code(), status.message()),
+                                    format!(
+                                        "event #{} of {}: {}: {}",
+                                        i,
+                                        n,
+                                        status.code(),
+                                        status.message()
+                                    ),
                                 );
                             }
                         }
@@ -729,20 +741,24 @@ impl Engine for EngineSvc {
                                 return (
                                     results,
                                     i as i32,
-                                    format!("event #{} of {}: {}: {}", i, n, status.code(), status.message()),
+                                    format!(
+                                        "event #{} of {}: {}: {}",
+                                        i,
+                                        n,
+                                        status.code(),
+                                        status.message()
+                                    ),
                                 );
                             }
                         }
                     }
                 }
                 (results, -1, String::new())
-            },
-        )
-        .await;
+            })
+            .await;
 
-        let (results, failed_at, detail) = batch_outcome.map_err(|e| {
-            Status::internal(format!("propagate_batch worker failed: {e}"))
-        })?;
+        let (results, failed_at, detail) = batch_outcome
+            .map_err(|e| Status::internal(format!("propagate_batch worker failed: {e}")))?;
 
         Ok(Response::new(PropagateBatchResponse {
             results,
@@ -910,7 +926,11 @@ fn apply_one_baseline(
     let mut wal_fsync_us = 0.0;
     if !stats.deltas.is_empty() {
         let t_wal = Instant::now();
-        let record = make_record(cr_uuid, crate::loader::BASELINE_SCENARIO_ID, stats.deltas.clone());
+        let record = make_record(
+            cr_uuid,
+            crate::loader::BASELINE_SCENARIO_ID,
+            stats.deltas.clone(),
+        );
         let assigned_seq = match writeback.wal().append(&record) {
             Ok(s) => s,
             Err(e) => {
