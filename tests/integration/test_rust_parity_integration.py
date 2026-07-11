@@ -40,6 +40,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 ootils_kernel = pytest.importorskip(
@@ -509,14 +510,19 @@ _BOOM = "simulated rust failure after boundary commit (test)"
 
 class _ExplodingKernel:
     """Stands in for ootils_kernel: fails like a Rust-session error would —
-    AFTER `_propagate_via_rust` has already committed the request boundary."""
+    AFTER `_propagate_via_rust` has already committed the request boundary.
+    Records its call args so the test can assert the credential contract at
+    the exact Python→Rust boundary."""
+
+    last_call: dict | None = None
 
     @staticmethod
     def version() -> str:
         return "0.2.0"
 
-    @staticmethod
-    def propagate_and_write(dsn, password, calc_run_id_str, scenario_id_str):
+    @classmethod
+    def propagate_and_write(cls, dsn, password, calc_run_id_str, scenario_id_str):
+        cls.last_call = {"dsn": dsn, "password": password}
         raise RuntimeError(_BOOM)
 
 
@@ -553,10 +559,19 @@ def test_rust_failure_after_boundary_commit_is_recoverable(
     # exactly what get_db's rollback-on-exception would do in production.
     conn.rollback()
 
-    # Security contract of the PR-C fix: the DB password must never surface
-    # in any log record of the failure path (DSN is built without it).
+    # Security contract of the PR-C fix, asserted STRUCTURALLY at the exact
+    # Python→Rust boundary. (A plain `password not in caplog.text` false-
+    # positives whenever the password is a substring of benign log tokens —
+    # e.g. the CI password 'ootils' inside every 'ootils_core.*' logger
+    # name.) The DSN handed to the kernel must carry no password field; the
+    # credential travels only as the separate argument.
+    call = _ExplodingKernel.last_call
+    assert call is not None, "the kernel stub was never invoked"
+    assert "password" not in conninfo_to_dict(call["dsn"]), call["dsn"]
     if password:
-        assert password not in caplog.text
+        assert call["password"] == password
+        # The only shape a DSN-credential leak can take in a log line.
+        assert f":{password}@" not in caplog.text
 
     # (a) The failure record survived the rollback — it was made durable by
     # _fail_after_boundary_commit's own commit, not by the caller's.
