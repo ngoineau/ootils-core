@@ -194,6 +194,10 @@ jobs:
         # test_rust_parity_integration.py lands in a sibling PR; guarding
         # on file presence makes merge order between the two PRs
         # irrelevant instead of one blocking the other.
+        # `!cancelled()`: the battery above is informational (known red,
+        # tracked separately) — its failure must not skip the parity proof,
+        # which is the core evidence for the PyO3 flavor.
+        if: ${{ !cancelled() }}
         run: |
           if [ -f tests/integration/test_rust_parity_integration.py ]; then
             python -m pytest tests/integration/test_rust_parity_integration.py -q
