@@ -1,0 +1,127 @@
+# on-hand.yaml — feed contract for physical/available stock (INT-1 PR1, ADR-037)
+#
+# WHAT THIS FILE IS: the contract for ONE source feed — what it must look
+# like before a daily run trusts it. Loaded into the `feed_contracts` table
+# (migration 073) by `scripts/load_feed_contracts.py`. Every field below is
+# validated STRICTLY (src/ootils_core/interfaces/contracts.py): an unknown
+# field or a bad value fails loudly, naming the field, before this ever
+# touches the database.
+#
+# PILOT: this is YOUR file to read and fill in with your real feed's actual
+# shape/schedule/owner. The values below are realistic placeholders — adjust
+# every one of them (especially cadence, arrival_window_minutes, owner, and
+# the volume guards) to your actual system before the daily run (PR2/PR3)
+# starts relying on this contract.
+#
+# This is the "on-hand" feed: available/physical stock per (item, site), a
+# full snapshot at each refresh. It is BLOCKING because the whole planning
+# picture (shortages, MRP netting) starts from what's actually on the shelf —
+# a missing or partial on-hand extract is the #1 silent-death mode for an
+# interface (see ADR-037 §(e)): the run must not auto-approve on a stale or
+# truncated stock picture.
+
+# Stable identifier for this feed across ALL its versions. Never changes once
+# chosen — this is the value scripts/load_feed_contracts.py and (later) the
+# daily run key on. Kebab-case, matches this file's name by convention (not
+# enforced, but keep them in sync so the registry is easy to browse).
+feed_key: on-hand
+
+# Which canonical entity this feed lands as — must be one of the values the
+# `ingest_batches.entity_type` CHECK already accepts (items, locations,
+# suppliers, supplier_items, purchase_orders, customer_orders, forecasts,
+# work_orders, transfers, on_hand, resources, planning_params, routings).
+# `on_hand` maps to `nodes` (node_type='OnHandSupply') via the existing
+# staging pipeline — see docs/staging-templates/on_hand.md.
+entity_type: on_hand
+
+# Free-text name of the system this feed actually comes FROM (not a closed
+# vocabulary — write whatever your ERP/WMS/planner calls itself). Matches the
+# `source_system` you will pass to `POST /v1/staging/upload`.
+source_system: WMS-DAILY-SNAPSHOT
+
+# Physical file format this feed arrives in. One of: tsv, csv, xlsx, json
+# (ADR-013 D1). RÈGLE PILOTE (2026-07-11) : TSV UNIQUEMENT pour tous les
+# flux pilote — jamais de CSV (virgules dans les libellés, guillemets,
+# séparateur décimal : « c'est un enfer »). La tabulation n'apparaît pas
+# dans les données métier. Les autres formats restent valides pour
+# d'autres déploiements, pas pour celui-ci.
+format: tsv
+
+# The columns that together uniquely identify ONE row of this feed — its
+# business key. For on-hand there is no transactional external_id (it's a
+# snapshot by construction, docs/staging-templates/on_hand.md): the natural
+# key is (item, location). Every entry here MUST also appear in
+# mandatory_columns below (a column identifying a row cannot itself be
+# optional).
+key_columns:
+  - item_external_id
+  - location_external_id
+
+# Columns that must be present and non-blank on EVERY row for this feed to
+# pass its DQ gate — see docs/staging-templates/on_hand.md for the exact
+# column contract (item_external_id, location_external_id must resolve to
+# known items/locations; quantity must be >= 0; uom is a known UOM code;
+# as_of_date is the snapshot date, ISO 8601).
+mandatory_columns:
+  - item_external_id
+  - location_external_id
+  - quantity
+  - uom
+  - as_of_date
+
+# V1 admits ONLY 'full' — this feed is a full snapshot on every refresh, not
+# a change-only delta (delta semantics arrive in a later migration; a
+# contract claiming load_mode: delta today is REJECTED by the loader before
+# it ever reaches the database). Safe to omit — 'full' is the default.
+load_mode: full
+
+# Expected schedule, as a cron expression (5 fields, UTC) — interpreted by
+# the daily-run runtime landing in PR2/PR3; this contract only DECLARES it.
+# Example: daily at 06:00 UTC, ahead of the planning run.
+cadence: "0 6 * * *"
+
+# How many minutes after the cadence tick this feed is allowed to arrive
+# before a daily run treats it as MISSING. Tune this to your actual ETL
+# latency plus a safety margin — too tight and a normal delay trips a false
+# alarm, too loose and a genuinely stuck feed goes unnoticed for hours.
+arrival_window_minutes: 90
+
+# Human/team accountable for this feed's content and freshness — who the L3
+# escalation webhook (ADR-037) ultimately names when a guard goes red.
+# Replace with your real team/contact.
+owner: warehouse-ops
+
+# 'blocking' | 'advisory' (ADR-037 governed-ingest option (a)): a 'blocking'
+# feed missing, late, or failing its volume guard blocks the daily run's
+# auto-approval outright and escalates; an 'advisory' feed only downgrades
+# confidence / escalates, it never blocks the whole run on its own.
+# on-hand is blocking: no planning run should auto-approve on unknown or
+# wildly-off stock.
+criticality: blocking
+
+# Volume guards — BOTH optional (a feed can configure zero, one, or both).
+# They exist to catch the #1 interface death mode: a SILENT PARTIAL
+# extraction (ADR-037 §(e)) — a WMS job that "succeeds" but only wrote half
+# the rows nobody notices until shortages start showing up wrong.
+#
+# volume_guard_min_rows: the daily row count must be AT LEAST this many, or
+# the guard goes red. Set to a number comfortably below your normal daily
+# row count (items x sites you actually track) so a genuine near-empty
+# extract trips it without false-alarming on normal day-to-day variation.
+volume_guard_min_rows: 100
+# volume_guard_max_pct_delta: the daily row count must not swing by more
+# than this FRACTION (0.20 == 20%, NOT a percent integer) versus the
+# previous run, in either direction. Catches a partial extract that still
+# clears volume_guard_min_rows but is still a big unexplained drop (or a
+# suspicious spike) versus yesterday.
+volume_guard_max_pct_delta: 0.20
+
+# feed_keys this feed's daily-run ordering depends on (e.g. a downstream feed
+# that needs another feed loaded first). NOT a foreign key — validated by
+# the Python loader against the set of feed_keys actually present in this
+# directory. on-hand has no upstream dependency among the PR1 seed feeds:
+# leave this as an empty list. Example syntax, if you later add a
+# feed this one should follow:
+#   depends_on:
+#     - some-other-feed-key
+depends_on: []

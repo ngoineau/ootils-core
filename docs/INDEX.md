@@ -39,9 +39,9 @@ Operational concerns:
 - [`ADR-006-blockers-resolution.md`](ADR-006-blockers-resolution.md), [`ADR-007-showstoppers-resolution.md`](ADR-007-showstoppers-resolution.md), [`ADR-008-agent-operability-fixes.md`](ADR-008-agent-operability-fixes.md) — Punctual decisions during sprint hardening.
 - [`ADR-009-import-pipeline.md`](ADR-009-import-pipeline.md) — Ingest pipeline shape (2-step staging + DQ).
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
-- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009.
+- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009. D4 (mandatory human approval) is **partially superseded by [ADR-037](ADR-037-daily-run-and-governed-ingest.md)** for the governed daily-run case — D4 still stands for any ad-hoc upload outside a governed daily run.
 
-### Full ADR register (001 → 036, chronological)
+### Full ADR register (001 → 037, chronological)
 
 Every ADR under `docs/`, numbered. The curated "read first" lists above are the entry points; this is the complete map.
 
@@ -84,6 +84,7 @@ Every ADR under `docs/`, numbered. The curated "read first" lists above are the 
 - [`ADR-034-scenario-compare.md`](ADR-034-scenario-compare.md) — Scenario compare (SC-1): read-only KPI comparison (shortages, stock value, fill rate) across 2-5 scenarios; stale computed with no new schema.
 - [`ADR-035-buy-program-segmentation.md`](ADR-035-buy-program-segmentation.md) — Buy-program segmentation (DEM-2 PR1): read-only, zero-migration ΔFVA proof — new dense per-program reader, single-source `buy_program_bucket()` taxonomy (honest `UNKNOWN` bucket), reuses `compute_fva` unchanged.
 - [`ADR-036-human-window.md`](ADR-036-human-window.md) — Human window (EXP-1 PR1): server-rendered `GET /ui` shell + `GET /v1/whoami`, read-only client over the existing API, no cookie/session, kill switch default OFF.
+- [`ADR-037-daily-run-and-governed-ingest.md`](ADR-037-daily-run-and-governed-ingest.md) — Daily run & governed ingest (INT-1 PR1): versioned `feed_contracts` registry (migration 073) + pilot-editable YAML under `config/feed-contracts/`; supersedes [ADR-013](ADR-013-external-interfaces.md) D4 for the daily-run case (governed option (a): auto-approve iff DQ green AND all guards green, red guard on a blocking feed escalates via the L3 webhook). PR1 is registry-only — no runtime read yet (daily_runs + guard evaluation land in PR2/PR3, REST surface in PR4).
 
 ## Feature specs (SPEC-*)
 

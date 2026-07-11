@@ -53,6 +53,12 @@ dependencies = [
     # always importable even when OOTILS_UI_ENABLED=0 (the kill switch gates
     # registration at create_app() time, not the import).
     "jinja2 ~= 3.1",
+    # Feed-contract YAML registry (INT-1 PR1, ADR-037):
+    # interfaces/contracts.py parses config/feed-contracts/*.yaml via
+    # yaml.safe_load ONLY (pilot-edited config, never executed as code). Core
+    # runtime dependency, not an extra: the loader CLI is meant to run in any
+    # lean install.
+    "PyYAML ~= 6.0",
 ]
 
 [project.optional-dependencies]

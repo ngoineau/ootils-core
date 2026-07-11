@@ -1,0 +1,101 @@
+# open-work-orders.yaml — feed contract for open manufacturing work orders
+# (INT-1 PR1, ADR-037)
+#
+# WHAT THIS FILE IS: the contract for ONE source feed — what it must look
+# like before a daily run trusts it. Loaded into the `feed_contracts` table
+# (migration 073) by `scripts/load_feed_contracts.py`. Every field below is
+# validated STRICTLY (src/ootils_core/interfaces/contracts.py): an unknown
+# field or a bad value fails loudly, naming the field, before this ever
+# touches the database.
+#
+# PILOT: this is YOUR file to read and fill in with your real feed's actual
+# shape/schedule/owner — OR to leave as-is/delete if you have no MES/shop-
+# floor system to extract from (see criticality below).
+#
+# This is the "open work orders" feed: every currently open manufacturing
+# order (planned/released/in_progress) for made items. It is ADVISORY, not
+# blocking, because NOT EVERY PILOT CUSTOMER RUNS DISCRETE MANUFACTURING WITH
+# a trackable WO system — a distributor or a pure buy-side operation may
+# have zero work orders by design, and the daily run must not block on a
+# feed that is legitimately empty or entirely absent for that customer.
+
+# Stable identifier for this feed across ALL its versions. Kebab-case,
+# matches this file's name by convention.
+feed_key: open-work-orders
+
+# Which canonical entity this feed lands as (one of the values the
+# `ingest_batches.entity_type` CHECK already accepts). `work_orders` maps to
+# `nodes` (node_type='WorkOrderSupply') via the existing staging pipeline —
+# see docs/staging-templates/work_orders.md.
+entity_type: work_orders
+
+# Free-text name of the system this feed actually comes FROM. Matches the
+# `source_system` you will pass to `POST /v1/staging/upload`.
+source_system: MES-FACTORY-1
+
+# Physical file format this feed arrives in. One of: tsv, csv, xlsx, json
+# (ADR-013 D1). TSV is the recommended format for shop-floor/MES exports.
+format: tsv
+
+# The columns that together uniquely identify ONE row of this feed. A WO has
+# a real transactional identity: external_id, unique per source_system
+# (docs/staging-templates/work_orders.md). Every entry here MUST also
+# appear in mandatory_columns below.
+key_columns:
+  - external_id
+
+# Columns that must be present and non-blank on EVERY row for this feed to
+# pass its DQ gate — see docs/staging-templates/work_orders.md. Note uom and
+# expected_completion_date are OPTIONAL on this entity (uom defaults to EA)
+# and are deliberately left out of this list; status is required and must be
+# one of {planned, released, in_progress, completed, cancelled}.
+mandatory_columns:
+  - external_id
+  - item_external_id
+  - location_external_id
+  - quantity
+  - status
+
+# V1 admits ONLY 'full' — this feed is the FULL set of currently-open work
+# orders on every refresh, not a change-only delta. Safe to omit — 'full' is
+# the default.
+load_mode: full
+
+# Expected schedule, as a cron expression (5 fields, UTC) — interpreted by
+# the daily-run runtime landing in PR2/PR3; this contract only DECLARES it.
+# Example: daily at 07:00 UTC, after on-hand and open POs.
+cadence: "0 7 * * *"
+
+# How many minutes after the cadence tick this feed is allowed to arrive
+# before a daily run treats it as MISSING. Looser than the two blocking
+# feeds above — a late or missing advisory feed downgrades confidence, it
+# does not stall the run.
+arrival_window_minutes: 180
+
+# Human/team accountable for this feed's content and freshness — who the L3
+# escalation webhook (ADR-037) ultimately names when a guard goes red.
+# Replace with your real team/contact.
+owner: production-planning
+
+# 'blocking' | 'advisory' (ADR-037 governed-ingest option (a)): advisory
+# means a missing/late/guard-failing work-orders feed downgrades confidence
+# or escalates, but never blocks the daily run's auto-approval by itself —
+# see the module docstring above for why (not every customer has one).
+criticality: advisory
+
+# Volume guards — BOTH optional (a feed can configure zero, one, or both).
+# Deliberately UNCONFIGURED here: a customer with no/few work orders on a
+# given day is a legitimate, common state for this entity, so a fixed row-
+# count floor would false-alarm constantly. If your operation has a real
+# steady-state WO volume worth watching, uncomment and fill these in exactly
+# like on-hand.yaml / open-purchase-orders.yaml do:
+#   volume_guard_min_rows: 10
+#   volume_guard_max_pct_delta: 0.40
+volume_guard_min_rows: null
+volume_guard_max_pct_delta: null
+
+# feed_keys this feed's daily-run ordering depends on. NOT a foreign key —
+# validated by the Python loader against the set of feed_keys actually
+# present in this directory. open-work-orders has no upstream dependency
+# among the PR1 seed feeds.
+depends_on: []
