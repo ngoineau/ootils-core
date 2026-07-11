@@ -22,6 +22,18 @@
 //! arithmetic — and keep one wheel compatible across Python 3.11/3.12/
 //! 3.13+ without rebuild.
 
+// pyo3 0.22's `#[pyfunction]` macro wraps every function body in a
+// generic `.into()` conversion to normalize the error type to
+// `PyErr` — a no-op when the function already returns
+// `PyResult<T>` (i.e. `Err = PyErr`), but clippy 1.95's
+// `useless_conversion` lint flags that macro-generated identity
+// conversion on the function signature span. It fires on every
+// `#[pyfunction]` in this crate (not our code — the offending
+// `.into()` lives inside pyo3's macro expansion), so a crate-level
+// allow is the targeted fix rather than six near-identical
+// per-function ones. Revisit when pyo3 is upgraded past this.
+#![allow(clippy::useless_conversion)]
+
 mod io;
 mod kernel;
 mod pool;
@@ -110,9 +122,11 @@ fn load_subgraph_stats<'py>(
     let mut loader = io::Loader::connect(dsn).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("postgres connect failed: {e}"))
     })?;
-    let sg = loader.load_subgraph(calc_run_id, scenario_id).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}"))
-    })?;
+    let sg = loader
+        .load_subgraph(calc_run_id, scenario_id)
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}"))
+        })?;
     let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let d = pyo3::types::PyDict::new_bound(py);
@@ -145,7 +159,10 @@ fn project_subgraph<'py>(
     dsn: &str,
     calc_run_id_str: &str,
     scenario_id_str: &str,
-) -> PyResult<(Vec<Bound<'py, pyo3::types::PyDict>>, Bound<'py, pyo3::types::PyDict>)> {
+) -> PyResult<(
+    Vec<Bound<'py, pyo3::types::PyDict>>,
+    Bound<'py, pyo3::types::PyDict>,
+)> {
     let calc_run_id = parse_uuid(calc_run_id_str)?;
     let scenario_id = parse_uuid(scenario_id_str)?;
 
@@ -155,7 +172,9 @@ fn project_subgraph<'py>(
     })?;
     let sg = loader
         .load_subgraph(calc_run_id, scenario_id)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}")))?;
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("load_subgraph failed: {e}"))
+        })?;
     let load_ms = t_load_start.elapsed().as_secs_f64() * 1000.0;
 
     let t_compute_start = std::time::Instant::now();
@@ -213,8 +232,9 @@ fn propagate_and_write<'py>(
     let calc_run_id = parse_uuid(calc_run_id_str)?;
     let scenario_id = parse_uuid(scenario_id_str)?;
 
-    let stats = writeback::propagate_and_write(dsn, calc_run_id, scenario_id)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("propagate_and_write failed: {e}")))?;
+    let stats = writeback::propagate_and_write(dsn, calc_run_id, scenario_id).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("propagate_and_write failed: {e}"))
+    })?;
 
     let d = pyo3::types::PyDict::new_bound(py);
     d.set_item("n_dirty_pis", stats.n_dirty_pis)?;

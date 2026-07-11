@@ -15,9 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         // Keep proto source path explicit so cargo re-runs on .proto edits.
-        .compile_protos(
-            &["proto/engine.proto"],
-            &["proto"],
-        )?;
+        .compile_protos(&["proto/engine.proto"], &["proto"])?;
     Ok(())
 }

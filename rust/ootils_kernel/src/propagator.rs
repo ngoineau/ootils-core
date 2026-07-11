@@ -56,7 +56,10 @@ pub fn project(sg: &Subgraph) -> Projection {
     // happy because sg outlives this function call.
     let mut by_series: HashMap<Uuid, Vec<&crate::io::DirtyPi>> = HashMap::new();
     for pi in &sg.dirty_pis {
-        by_series.entry(pi.projection_series_id).or_default().push(pi);
+        by_series
+            .entry(pi.projection_series_id)
+            .or_default()
+            .push(pi);
     }
 
     for (series_id, mut buckets) in by_series {
@@ -76,8 +79,16 @@ pub fn project(sg: &Subgraph) -> Projection {
         // Walk forward.
         let mut prev_closing = seed_opening;
         for pi in buckets {
-            let supplies = sg.supplies_by_pi.get(&pi.node_id).map(|v| v.as_slice()).unwrap_or(&[]);
-            let demands = sg.demands_by_pi.get(&pi.node_id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let supplies = sg
+                .supplies_by_pi
+                .get(&pi.node_id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let demands = sg
+                .demands_by_pi
+                .get(&pi.node_id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let r = compute_pi_bucket(
                 prev_closing,
                 supplies,

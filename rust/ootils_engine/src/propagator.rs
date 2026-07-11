@@ -40,6 +40,12 @@ pub struct PropagationStats {
 /// graph under a brief write lock. Carries the dirty-PI count so the
 /// caller can still report `n_dirty` accurately.
 pub struct ComputedResults {
+    // `apply`/`apply_scenario` callers derive their own dirty count
+    // from the `&HashSet<NodeIndex>` they already hold (see
+    // `PropagationStats.n_dirty`, populated from `dirty.len()`), so
+    // this field is never read back out of `ComputedResults`. Kept on
+    // the struct as the natural place to carry it if that changes.
+    #[allow(dead_code)]
     pub n_dirty: usize,
     pub results: Vec<(NodeIndex, PiResult)>,
     pub compute_us: u64,
@@ -89,8 +95,8 @@ pub fn plan_compute(graph: &Graph, dirty: &HashSet<NodeIndex>) -> ComputedResult
     // This parallelization is what lets us hit sub-100ms on profile L.
     // Empirically (8 logical cores): 106ms → ~40ms.
     let series_batches: Vec<Vec<NodeIndex>> = by_series
-        .into_iter()
-        .map(|(_, mut buckets)| {
+        .into_values()
+        .map(|mut buckets| {
             buckets.sort_by_key(|&idx| graph.nodes[idx as usize].bucket_sequence);
             buckets
         })
@@ -334,7 +340,13 @@ fn compute_one_bucket(
         })
     });
 
-    Some(compute_pi_bucket(opening_stock, supplies, demands, bucket_start, bucket_end))
+    Some(compute_pi_bucket(
+        opening_stock,
+        supplies,
+        demands,
+        bucket_start,
+        bucket_end,
+    ))
 }
 
 // ============================================================
@@ -370,10 +382,7 @@ use crate::scenario::Scenario;
 /// Scenario equivalent of `plan_compute`. Same rayon parallelism,
 /// same per-series catch_unwind boundary, same output shape — but
 /// all node reads route through the overlay-aware view.
-pub fn plan_compute_scenario(
-    scenario: &Scenario,
-    dirty: &HashSet<NodeIndex>,
-) -> ComputedResults {
+pub fn plan_compute_scenario(scenario: &Scenario, dirty: &HashSet<NodeIndex>) -> ComputedResults {
     let t0 = std::time::Instant::now();
     let snapshot = &scenario.baseline_snapshot;
 
@@ -387,9 +396,7 @@ pub fn plan_compute_scenario(
         if n_snap.node_type != NodeType::ProjectedInventory {
             continue;
         }
-        let sid_opt = scenario
-            .get_node_cloned(idx)
-            .and_then(|n| n.series_id);
+        let sid_opt = scenario.get_node_cloned(idx).and_then(|n| n.series_id);
         if let Some(sid) = sid_opt {
             by_series.entry(sid).or_default().push(idx);
         }
@@ -398,8 +405,8 @@ pub fn plan_compute_scenario(
     // Sort each series' buckets by bucket_sequence. Read from snapshot
     // (bucket_sequence is set at boot, immutable in practice).
     let series_batches: Vec<Vec<NodeIndex>> = by_series
-        .into_iter()
-        .map(|(_, mut buckets)| {
+        .into_values()
+        .map(|mut buckets| {
             buckets.sort_by_key(|&idx| snapshot.nodes[idx as usize].bucket_sequence);
             buckets
         })
@@ -527,10 +534,7 @@ fn compute_one_series_scenario(
 /// Scenario equivalent of `compute_seed_opening_from_sorted`.
 /// PI[0] seed = sum of OnHand supplies (overlay-aware).
 /// PI[N>0] seed = previous bucket's closing_stock (overlay-aware).
-fn compute_seed_opening_scenario(
-    scenario: &Scenario,
-    sorted_dirty: &[NodeIndex],
-) -> Decimal {
+fn compute_seed_opening_scenario(scenario: &Scenario, sorted_dirty: &[NodeIndex]) -> Decimal {
     let &seed_idx = match sorted_dirty.first() {
         Some(x) => x,
         None => return Decimal::ZERO,
@@ -567,9 +571,9 @@ fn compute_seed_opening_scenario(
     if let Some(sid) = seed_node.series_id {
         if let Some(buckets) = snapshot.by_series.get(&sid) {
             let target = seed_seq - 1;
-            if let Ok(pos) = buckets.binary_search_by_key(&target, |&idx| {
-                snapshot.nodes[idx as usize].bucket_sequence
-            }) {
+            if let Ok(pos) = buckets
+                .binary_search_by_key(&target, |&idx| snapshot.nodes[idx as usize].bucket_sequence)
+            {
                 let prev_idx = buckets[pos];
                 if let Some(prev_node) = scenario.get_node_cloned(prev_idx) {
                     return prev_node.closing_stock;

@@ -44,11 +44,7 @@ pub struct DemandContrib<'a> {
 /// Sum supplies whose `time_ref` falls in `[bucket_start, bucket_end)`.
 /// Mirrors the `point_in_bucket` contribution rule.
 #[inline]
-pub fn sum_inflows<'a, I>(
-    supplies: I,
-    bucket_start: NaiveDate,
-    bucket_end: NaiveDate,
-) -> Decimal
+pub fn sum_inflows<'a, I>(supplies: I, bucket_start: NaiveDate, bucket_end: NaiveDate) -> Decimal
 where
     I: IntoIterator<Item = SupplyContrib<'a>>,
 {
@@ -66,13 +62,10 @@ where
 ///    the day-overlap between the demand span and the bucket.
 ///  - Point demands (CustomerOrderDemand): full quantity if date in
 ///    bucket.
+///
 /// The CASE / numeric(50,28) cast preserves parity with Python kernel.
 #[inline]
-pub fn sum_outflows<'a, I>(
-    demands: I,
-    bucket_start: NaiveDate,
-    bucket_end: NaiveDate,
-) -> Decimal
+pub fn sum_outflows<'a, I>(demands: I, bucket_start: NaiveDate, bucket_end: NaiveDate) -> Decimal
 where
     I: IntoIterator<Item = DemandContrib<'a>>,
 {
@@ -94,8 +87,8 @@ where
                         // precision — divide-first here could drift
                         // > TOLERANCE (1e-18) under high-quantity /
                         // long-span demands.
-                        let frac = d.quantity * Decimal::from(overlap_days)
-                            / Decimal::from(span_days);
+                        let frac =
+                            d.quantity * Decimal::from(overlap_days) / Decimal::from(span_days);
                         total += frac;
                     }
                 }
@@ -130,7 +123,11 @@ where
     let outflows = sum_outflows(demands, bucket_start, bucket_end);
     let closing_stock = opening_stock + inflows - outflows;
     let has_shortage = closing_stock < Decimal::ZERO;
-    let shortage_qty = if has_shortage { -closing_stock } else { Decimal::ZERO };
+    let shortage_qty = if has_shortage {
+        -closing_stock
+    } else {
+        Decimal::ZERO
+    };
     PiResult {
         opening_stock,
         inflows,

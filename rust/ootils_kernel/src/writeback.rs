@@ -35,6 +35,12 @@ const COPY_THRESHOLD: usize = 5000;
 ///
 /// MUST be kept in sync with `src/ootils_core/engine/orchestration/
 /// propagator_sql.py::SHORTAGES_SQL`.
+// Not wired yet: `propagate_and_write` still leaves shortage detection
+// to Python's SHORTAGES_SQL (see the doc comment on `propagate_and_write`
+// in lib.rs) — this copy is prepared for the day the Rust side runs
+// detection in-transaction too. Tracked as follow-up, not dead code to
+// delete: removing it would lose the "kept in sync" contract above.
+#[allow(dead_code)]
 const SHORTAGES_SQL: &str = "\
 WITH pi_with_ss AS ( \
     SELECT \
@@ -113,6 +119,10 @@ ON CONFLICT (pi_node_id, calc_run_id) DO UPDATE SET \
 /// Stats returned after one writeback pass (used by the diagnostic dict
 /// surfaced to Python).
 pub struct WriteStats {
+    // Computed at both call sites but not yet threaded through
+    // `FullStats`/the Python diagnostic dict (lib.rs). Whether to
+    // surface it is a call-signature decision, not made here.
+    #[allow(dead_code)]
     pub n_rows_written: usize,
     pub n_shortages_detected: usize,
     pub path: &'static str,

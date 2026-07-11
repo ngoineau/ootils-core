@@ -143,20 +143,19 @@ async fn main() -> anyhow::Result<()> {
     // a 5-second baseline load. (The actual server is spawned later;
     // this is just early validation of the parsed addr.)
     let metrics_addr_str = cli.metrics_listen.trim().to_string();
-    let metrics_addr: Option<SocketAddr> = if metrics_addr_str.is_empty()
-        || metrics_addr_str.eq_ignore_ascii_case("off")
-    {
-        None
-    } else {
-        Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
-            anyhow::anyhow!(
-                "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
+    let metrics_addr: Option<SocketAddr> =
+        if metrics_addr_str.is_empty() || metrics_addr_str.eq_ignore_ascii_case("off") {
+            None
+        } else {
+            Some(metrics_addr_str.parse::<SocketAddr>().map_err(|e| {
+                anyhow::anyhow!(
+                    "OOTILS_METRICS_LISTEN={:?} is not a valid host:port: {} \
                  (use \"off\" to disable the metrics server)",
-                metrics_addr_str,
-                e
-            )
-        })?)
-    };
+                    metrics_addr_str,
+                    e
+                )
+            })?)
+        };
 
     verify_postgres(&cli.dsn).await?;
 
@@ -260,8 +259,7 @@ async fn main() -> anyhow::Result<()> {
     // (F-007 fail-fast).
     let metrics_registry = Arc::new(metrics::Metrics::new());
     if let Some(addr) = metrics_addr {
-        let _metrics_handle =
-            metrics::spawn_metrics_server(metrics_registry.clone(), addr);
+        let _metrics_handle = metrics::spawn_metrics_server(metrics_registry.clone(), addr);
     } else {
         info!("metrics endpoint explicitly disabled");
     }
@@ -273,9 +271,10 @@ async fn main() -> anyhow::Result<()> {
     ));
     // Publish the configured caps as gauges so operators can see them
     // from /metrics (vs having to dig through engine logs).
-    metrics_registry
-        .queue_max_depth
-        .store(cli.queue_max_depth as i64, std::sync::atomic::Ordering::Relaxed);
+    metrics_registry.queue_max_depth.store(
+        cli.queue_max_depth as i64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     metrics_registry
         .wal_max_bytes
         .store(cli.wal_max_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -287,11 +286,8 @@ async fn main() -> anyhow::Result<()> {
     // long-lived and worth aborting cleanly to avoid leaving a
     // half-flushed batch in tokio's runtime when main exits.
     let dsn_for_flusher = cli.dsn.clone();
-    let flusher_handle = write_behind::spawn_flusher(
-        queue.clone(),
-        dsn_for_flusher,
-        cli.flush_interval_ms,
-    );
+    let flusher_handle =
+        write_behind::spawn_flusher(queue.clone(), dsn_for_flusher, cli.flush_interval_ms);
 
     // If we recovered from WAL, also re-enqueue those deltas for
     // Postgres flush. Each delta carries the seq of the record it
@@ -324,11 +320,11 @@ async fn main() -> anyhow::Result<()> {
         let scan_interval_sec = (ttl / 4).max(30);
         info!(
             scenario_ttl_sec = ttl,
-            scan_interval_sec,
-            "scenario TTL eviction task spawned (P2.1.d)"
+            scan_interval_sec, "scenario TTL eviction task spawned (P2.1.d)"
         );
         Some(tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(scan_interval_sec));
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(scan_interval_sec));
             // Skip first immediate fire — give the engine a moment to settle.
             ticker.tick().await;
             loop {
@@ -420,9 +416,7 @@ fn run_bench(graph_lock: &Arc<ArcSwap<state::Graph>>) {
     let mark_ms = t_mark.elapsed().as_millis();
     info!(
         n_dirty = dirty.len(),
-        clone_ms,
-        mark_ms,
-        "marked all active PIs dirty (post-CoW)"
+        clone_ms, mark_ms, "marked all active PIs dirty (post-CoW)"
     );
 
     let t_prop = Instant::now();
@@ -471,13 +465,6 @@ fn run_bench_fork(graph_lock: &Arc<ArcSwap<state::Graph>>, n: usize) {
     }
     let total_us: u64 = timings_us.iter().sum();
     let timings_ms: Vec<u64> = timings_us.iter().map(|&us| us / 1000).collect();
-    let total: u64 = timings_ms.iter().sum();
-    let avg = total as f64 / n as f64;
-    let mut sorted = timings_ms.clone();
-    sorted.sort_unstable();
-    let p50 = sorted[sorted.len() / 2];
-    let p95 = sorted[((sorted.len() as f64) * 0.95) as usize];
-    let max = *sorted.last().unwrap();
     // Also report µs versions because ms is too coarse with ArcSwap.
     let mut sorted_us = timings_us.clone();
     sorted_us.sort_unstable();
@@ -486,10 +473,7 @@ fn run_bench_fork(graph_lock: &Arc<ArcSwap<state::Graph>>, n: usize) {
     let max_us = *sorted_us.last().unwrap();
     info!(
         total_us,
-        p50_us,
-        p95_us,
-        max_us,
-        "BENCH (µs precision — P2.1.a ArcSwap)"
+        p50_us, p95_us, max_us, "BENCH (µs precision — P2.1.a ArcSwap)"
     );
     let total: u64 = timings_ms.iter().sum();
     let avg = total as f64 / n as f64;
@@ -564,21 +548,14 @@ pub fn redact_dsn(dsn: &str) -> String {
                 Some(colon) => format!("{}:****", &userinfo[..colon]),
                 None => userinfo.to_string(),
             };
-            return format!(
-                "{}://{}{}",
-                &dsn[..scheme_end],
-                redacted_userinfo,
-                after_at
-            );
+            return format!("{}://{}{}", &dsn[..scheme_end], redacted_userinfo, after_at);
         }
     }
     // Key-value form: ... password=... ...
     let mut out = String::with_capacity(dsn.len());
     let mut chars = dsn.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == 'p'
-            && dsn[out.len()..].starts_with("password=")
-        {
+        if c == 'p' && dsn[out.len()..].starts_with("password=") {
             // Emit "password=****" and skip to next whitespace.
             out.push_str("password=****");
             // Skip past the original "password=value".

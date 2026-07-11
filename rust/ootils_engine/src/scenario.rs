@@ -39,6 +39,11 @@ pub struct Scenario {
     pub baseline_snapshot: Arc<Graph>,
     /// Modified nodes — diff from the snapshot.
     pub overlay: DashMap<NodeIndex, Node, RandomState>,
+    // Monotonic counterpart to `created_at_system` below — kept for a
+    // future age/uptime computation; nothing reads it today (gRPC
+    // responses serialize `created_at_system` via `Timestamp::from`,
+    // and TTL eviction uses `last_accessed_at`, not this field).
+    #[allow(dead_code)]
     pub created_at_instant: Instant,
     pub created_at_system: SystemTime,
     /// P2.1.c: per-scenario propagation serializer. Two propagations
@@ -58,8 +63,20 @@ pub struct Scenario {
 }
 
 impl Scenario {
+    // Convenience constructor for the per-scenario propagation module
+    // sketched in `propagator_scenario.rs.skeleton` (not yet wired
+    // into `mod` — see main.rs). Every live call site goes through
+    // `with_options` directly (fork_from_baseline_with_ttl,
+    // fork_from_scenario).
+    #[allow(dead_code)]
     pub fn new(name: String, parent_id: Option<Uuid>, baseline: Arc<Graph>) -> Self {
-        Self::with_options(name, parent_id, baseline, DashMap::with_hasher(RandomState::new()), 0)
+        Self::with_options(
+            name,
+            parent_id,
+            baseline,
+            DashMap::with_hasher(RandomState::new()),
+            0,
+        )
     }
 
     /// Full constructor used by fork paths that may inherit a parent's
@@ -103,24 +120,23 @@ impl Scenario {
         if let Some(entry) = self.overlay.get(&idx) {
             return Some(entry.value().clone());
         }
-        self.baseline_snapshot
-            .nodes
-            .get(idx as usize)
-            .cloned()
+        self.baseline_snapshot.nodes.get(idx as usize).cloned()
     }
 
     /// Same as `get_node_cloned` but returns the node by reference from
     /// the snapshot if not in overlay. Caller must NOT mutate.
+    // Prepared for `propagator_scenario.rs.skeleton` (unwired draft
+    // module); `get_node_cloned` is what current callers use instead.
+    #[allow(dead_code)]
     pub fn read_node<R>(&self, idx: NodeIndex, f: impl FnOnce(&Node) -> R) -> Option<R> {
         if let Some(entry) = self.overlay.get(&idx) {
             return Some(f(entry.value()));
         }
-        self.baseline_snapshot
-            .nodes
-            .get(idx as usize)
-            .map(f)
+        self.baseline_snapshot.nodes.get(idx as usize).map(f)
     }
 
+    // Same skeleton-module note as `read_node` above.
+    #[allow(dead_code)]
     pub fn write_node(&self, idx: NodeIndex, node: Node) {
         self.overlay.insert(idx, node);
     }
