@@ -65,8 +65,9 @@ jobs:
 
       - name: cargo test --workspace
         working-directory: rust
-        # 29 #[cfg(test)] across ootils_kernel/ootils_engine — WAL replay,
-        # write-behind dedupe, kernel bucket math. Pure Rust, no Postgres.
+        # 26 #[test] functions (19 ootils_engine + 7 ootils_kernel) — WAL
+        # replay, write-behind dedupe, kernel bucket math. Pure Rust, no
+        # Postgres.
         run: cargo test --workspace
 
   proto-drift:
@@ -87,12 +88,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install grpcio-tools
-        # Pinned to the same train as the runtime `grpcio ~= 1.71` pin in
-        # pyproject.toml — keeps the codegen output format stable across
-        # runs instead of drifting with an unrelated grpcio-tools bump.
+        # EXACT pins, deliberately stricter than the runtime `grpcio ~= 1.71`
+        # in pyproject.toml: byte-for-byte drift checking only works if the
+        # generator matches the one that produced the committed stubs.
+        # 1.80.0 = the GRPC_GENERATED_VERSION stamped in engine_pb2_grpc.py;
+        # 6.31.1 = the "Protobuf Python Version" stamped in engine_pb2.py.
+        # A compatible-release pin here would let an unrelated grpcio-tools
+        # release change the output format and turn this gate red on a
+        # perfectly good PR. Doctrine: to bump the codegen version, regenerate
+        # the stubs AND bump these pins in the SAME commit (the runtime pin in
+        # pyproject.toml is a separate concern — leave it alone).
         run: |
           pip install --upgrade pip
-          pip install "grpcio-tools ~= 1.71"
+          pip install "grpcio-tools==1.80.0" "protobuf==6.31.1"
 
       - name: Regenerate gRPC stubs
         run: python scripts/regenerate_grpc_stubs.py
