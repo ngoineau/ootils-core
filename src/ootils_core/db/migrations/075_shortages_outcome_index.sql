@@ -1,0 +1,111 @@
+-- ============================================================
+-- Migration 075 — shortages outcome-evaluator DISTINCT ON index (PERF-1 PR-A)
+-- ============================================================
+-- WHY: `_load_observed_shortages` (engine/outcome/evaluator.py:574-586) —
+-- the read the baseline recommendation-outcome evaluator runs once per
+-- evaluation to find, per (item_id, location_id), the most-severe still-
+-- active shortage at/before `as_of` — is:
+--
+--     SELECT DISTINCT ON (item_id, location_id)
+--            item_id, location_id, shortage_date, shortage_qty, severity_score
+--     FROM shortages
+--     WHERE scenario_id = %s
+--       AND status = 'active'
+--       AND shortage_date <= %s
+--       AND item_id IS NOT NULL
+--     ORDER BY item_id, location_id, severity_score DESC, shortage_date
+--
+-- On the pilot base's 174 769 fork-scoped `shortages` rows (docs/
+-- SCALABILITY.md:202-204, run #414) this DISTINCT ON's ORDER BY has NO
+-- matching index, so Postgres Seq-Scans the whole partial-active set and
+-- Sorts it in memory — the outcome evaluator on BASELINE (a tiny scenario
+-- by row count) went from ~3 min to ~35 min purely because the shortages
+-- table now also carries a huge unrelated fork's rows the scan has to
+-- filter past. Adding an index whose leading columns are (scenario_id,
+-- item_id, location_id) — matching the WHERE + the DISTINCT ON/ORDER BY
+-- grouping columns, in that order — lets Postgres satisfy the whole
+-- query as an Index Scan with NO separate Sort node (skip-scan per
+-- (item_id, location_id) group, first row of each group already the
+-- max-severity one thanks to the trailing DESC columns). Expected:
+-- <1 min on the same dataset (order-of-magnitude, not a promise —
+-- verify with EXPLAIN ANALYZE against the pilot base once available).
+--
+-- WHY NOT reuse idx_shortages_scenario_active (migration 014,
+-- `(scenario_id, severity_score DESC) WHERE status = 'active'`) instead of
+-- adding a third partial index: that index is, and stays, the right — and
+-- unbeatable — index for the OTHER hot path it was built for: "give me
+-- this scenario's active shortages ordered by severity" with no per-(item,
+-- location) grouping (`get_active_shortages`, `resolve_stale`, the
+-- propagator's post-cascade summary). Widening it to include item_id/
+-- location_id/shortage_date would make ITS leading-column shape worse for
+-- that simpler, more frequently hit query (a plain ORDER BY severity_score
+-- DESC no longer index-only-matches once item_id sits between scenario_id
+-- and severity_score in the key) while still not being what DISTINCT ON
+-- needs (grouping columns must precede the tie-break columns in the index
+-- key, which `idx_shortages_scenario_active` does not provide). Two
+-- narrow, purpose-built partial indexes beat one compromise index that
+-- serves neither query well.
+--
+-- TRADE-OFF ACCEPTED: this is now a THIRD partial index on `shortages`
+-- filtered by `status = 'active'` (alongside idx_shortages_scenario_active
+-- and idx_shortages_item_active, migration 014) — extra write amplification
+-- on every INSERT/UPDATE that touches an active shortage row (the detector's
+-- upsert path, `ShortageDetector`) and extra storage. Accepted: shortages
+-- are written in batch per calc_run (not a hot per-row OLTP path), while
+-- `_load_observed_shortages` is read on every outcome evaluation — a read:
+-- write ratio that favours the extra index. If write amplification becomes
+-- measurable, migration 014's index #4 (`idx_shortages_item_active`, a
+-- single-column partial index this one's leading columns already subsume
+-- for any query also filtering scenario_id) is the more plausible future
+-- drop, not this one.
+--
+-- NOT `CREATE INDEX CONCURRENTLY`: forbidden inside the runner's per-file
+-- transaction (db/connection.py wraps each migration in `conn.transaction()`
+-- and CONCURRENTLY cannot run inside a transaction block). Migrations apply
+-- at API boot under a Postgres advisory lock (`_LOCK_KEY`), serialized
+-- against concurrent instances, so a plain blocking CREATE INDEX is the
+-- correct and only available form here — acceptable at current
+-- demo/pilot scale (see docs/SCALABILITY.md); revisit only if a future
+-- `shortages` row count makes a boot-time table lock unacceptable in
+-- production.
+--
+-- Idempotence (pattern from migration 063's header, mandatory — the runner
+-- rolls back AND ABORTS on any error, never swallows "already exists", so a
+-- fixed migration re-attempted at the next boot re-runs every statement
+-- from scratch):
+--   * CREATE INDEX IF NOT EXISTS — no-op on re-run, including a re-run
+--     after a prior partial application of this same file.
+--
+-- Columns verified to exist on `shortages` (migration 005_m4_shortages.sql):
+-- scenario_id UUID NOT NULL, item_id UUID (nullable), location_id UUID
+-- (nullable), severity_score NUMERIC NOT NULL, shortage_date DATE NOT NULL,
+-- status TEXT NOT NULL CHECK (status IN ('active', 'resolved')).
+-- Confirmed no pre-existing equivalent index (grepped every prior
+-- migration's `CREATE INDEX ... ON shortages`): shortages_scenario_id_idx
+-- (scenario_id), shortages_pi_node_id_idx (pi_node_id),
+-- shortages_shortage_date_idx (shortage_date), shortages_status_idx
+-- (status), idx_shortages_scenario_active (scenario_id, severity_score
+-- DESC) WHERE status='active', idx_shortages_item_active (item_id) WHERE
+-- status='active' — none cover (scenario_id, item_id, location_id,
+-- severity_score DESC, shortage_date).
+--
+-- ref: PERF-1 PR-A, docs/SCALABILITY.md:202-204, engine/outcome/evaluator.py.
+-- ============================================================
+
+BEGIN;
+
+-- Serves `_load_observed_shortages`'s DISTINCT ON (item_id, location_id)
+-- ... ORDER BY item_id, location_id, severity_score DESC, shortage_date,
+-- scoped by `WHERE scenario_id = %s AND status = 'active'` — the leading
+-- columns match the WHERE equality (scenario_id) then the DISTINCT ON
+-- grouping columns (item_id, location_id) in order, so Postgres can walk
+-- the index once per group and take the first row (already the max-
+-- severity / earliest-date tie-break thanks to the trailing sort columns)
+-- with no separate Sort node. `shortage_date` trails only as the DISTINCT
+-- ON tie-breaker after severity_score DESC — matches the query's ORDER BY
+-- exactly, ASC default (the query does not specify DESC on shortage_date).
+CREATE INDEX IF NOT EXISTS idx_shortages_scenario_item_loc_active
+    ON shortages (scenario_id, item_id, location_id, severity_score DESC, shortage_date)
+    WHERE status = 'active';
+
+COMMIT;

@@ -203,6 +203,19 @@ Side observation from the same run: 174 K fork-scoped `shortages` rows slowed
 the **baseline** outcome evaluator (~35 min vs ~3 min) — scenario-scoped index
 coverage on `shortages` is a quick-fix candidate.
 
+**Quick-fix applied (PERF-1 PR-A, migration
+`075_shortages_outcome_index.sql`):** `idx_shortages_scenario_item_loc_active`
+— `(scenario_id, item_id, location_id, severity_score DESC, shortage_date)
+WHERE status = 'active'` — targets `_load_observed_shortages`'s uncovered
+`DISTINCT ON (item_id, location_id) ... ORDER BY item_id, location_id,
+severity_score DESC, shortage_date` (`engine/outcome/evaluator.py:574-586`),
+which previously forced a Seq Scan + Sort over the whole active-shortage set
+regardless of which scenario was being evaluated. Expected: <1 min on the
+same dataset (order of magnitude — verify with `EXPLAIN ANALYZE` against the
+pilot base). Kept alongside, not merged into, `idx_shortages_scenario_active`
+(migration 014) — that index stays the right shape for its own hot path
+(severity-ordered active shortages with no per-item/location grouping).
+
 #### Postgres tuning gain — applied 2026-05-23
 
 The dev VM's Postgres ran the `postgres:16-alpine` defaults (`shared_buffers
