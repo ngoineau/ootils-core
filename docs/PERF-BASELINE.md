@@ -271,6 +271,40 @@ différence EST le coût du chemin HTTP + DB LAN, cf. #193 workers async) ;
 174 769 pénuries item-jour sur le fork ; baseline intacte (0 PI). Exécuté
 fork-first, fork archivé — reproductible via le runbook.
 
+### Saveur rust (Architecture A) — 2026-07-11, chiffres NON re-benchés formellement
+
+`propagator_rust.py:58-63` documente, en commentaire de code (pas une campagne
+PERF-BASELINE dédiée), les mesures qui ont fixé `RUST_DISPATCH_THRESHOLD` à 0
+par défaut (Rust toujours utilisé) après les optimisations "week-5" de
+l'ADR-016 (connection pool process-wide + writeback UNNEST + chargement
+combiné en une seule requête `UNION ALL` — `pool.rs`/`io.rs`) :
+
+| Volume | SQL | Rust (Architecture A, in-process, pool chaud) | Verdict |
+|---|---|---|---|
+| 91 PIs (dirty set incrémental typique) | 95 ms | ~40 ms | Rust 2,4× plus rapide |
+| 5 000 PIs | — | Rust toujours gagnant | — |
+| Full profile L (227 K PI) | 36,8 s | 9,5 s | Rust gagnant (~3,9×) |
+
+**⚠️ Ces chiffres n'ont PAS été produits par la méthodologie §Méthodologie de
+ce document** (pas de profils S/M/L formels avec 2 runs de stabilité) — ce
+sont les mesures internes citées dans le code source qui ont justifié le
+seuil de dispatch, prises pendant les optimisations week-5 de l'ADR-016
+(donc **avant** l'industrialisation PR-C : build Docker `WITH_RUST`, fix
+PGPASSWORD, commit mi-requête documenté). Elles n'ont jamais été rejouées
+avec la méthodologie de ce document.
+
+**Action requise avant tout arbitrage de défaut** : `scripts/bench_engine_comparison.py`
+supporte déjà la saveur `rust` aux côtés de `python`/`sql` — un re-bench
+formel (profils S/M/L, même méthodologie que ci-dessus) est un préalable à
+toute décision touchant `OOTILS_ENGINE` par défaut (cf CLAUDE.md « le défaut
+ne flippe pas sans ADR », et `docs/ROADMAP-AGENTS-2026-H2.md` §6 SCALE-2 pour
+la saveur `rust-svc`/Architecture B, hors périmètre de cette sous-section).
+**À exécuter sur la VM après merge**, avec une image buildée `WITH_RUST=1`
+(le wheel `ootils_kernel` n'est jamais présent dans l'image par défaut — voir
+`Dockerfile`). La table ci-dessus reproduit strictement `propagator_rust.py:58-63` ;
+tant que le re-bench formel n'est pas fait, ne pas la traiter comme une
+baseline au même titre que les tables SQL/Python mesurées plus haut.
+
 ## Hardware / contexte
 
 - Postgres 16.13 sur VM Debian (192.168.1.176:5432) — infra refondue 2026-05-24

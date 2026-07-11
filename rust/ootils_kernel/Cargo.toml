@@ -1,6 +1,6 @@
 [package]
 name = "ootils_kernel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rust kernel for ootils-core propagation engine (ADR-016)"
 license = "MIT"

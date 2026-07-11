@@ -9,9 +9,25 @@ in-process). The service path is opt-in.
 
 ## Why this service exists
 
-The Postgres-backed engines (SQL, Rust-in-process) are capped at
-~2.4× SQL on bulk and slightly slower than SQL on incremental events.
-The bottleneck is Postgres I/O on the propagation hot path.
+Historically, Rust-in-process (Architecture A) was measured at ~2.4× SQL on
+bulk and slightly slower than SQL on incremental events. **That snapshot is
+stale** — it predates the ADR-016 "week-5" optimizations (process-wide
+connection pool + UNNEST writeback + single combined `UNION ALL` load, see
+`propagator_rust.py:58-68`), which flipped both figures in Architecture A's
+favor: incremental dirty sets now measure ~2.4× **faster** than SQL, not
+slower, and full bulk propagation on profile L measures 9.5s vs 36.8s SQL,
+not capped at 2.4×. See [PERF-BASELINE.md](PERF-BASELINE.md) §"Saveur rust
+(Architecture A)" for the current numbers — themselves flagged there as not
+yet re-benched via the formal `scripts/bench_engine_comparison.py`
+methodology, so treat both sets of figures as directional, not final.
+
+Keep the two architectures distinct regardless of which Architecture-A
+number is current: **in-process (Architecture A, `OOTILS_ENGINE=rust`)**
+stays Postgres-bound by construction — every event still round-trips
+Postgres from the same FastAPI process. **This service (Architecture B,
+`OOTILS_ENGINE=rust-svc`)** is the one that removes Postgres I/O from the
+hot path entirely by moving state into RAM in a separate process — the
+numbers below are Architecture B's.
 
 The standalone Rust engine moves the state into RAM and writes back to
 Postgres asynchronously. Measured on profile L (10 K SKU, 227 K PI nodes):

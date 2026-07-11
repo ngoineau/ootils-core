@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ootils-kernel"
-version = "0.1.0"
+version = "0.2.0"
 description = "Rust kernel for ootils-core — propagation hot path (ADR-016)"
 requires-python = ">=3.11"
 license = { text = "MIT" }

@@ -17,7 +17,7 @@
 //! - If the connection dies (server restart, network blip), the
 //!   `get_or_open` helper reconnects transparently.
 
-use postgres::{Client, NoTls};
+use postgres::Client;
 use std::sync::Mutex;
 
 use once_cell::sync::OnceCell;
@@ -33,39 +33,48 @@ struct PoolEntry {
     /// changes (shouldn't happen in a single process, but cheap to
     /// guard against).
     dsn: String,
+    /// The password the cached client was opened with (see io::connect_client
+    /// — never read from PGPASSWORD, always passed explicitly). Tracked
+    /// alongside `dsn` so a password change also forces a reconnect.
+    password: Option<String>,
 }
 
-/// Acquire an exclusive handle to a Postgres client open against `dsn`.
-/// Opens lazily on first call; reuses the existing client on
-/// subsequent calls; reconnects automatically if the cached client
-/// errors out (caller will see the new error from the retry).
+/// Acquire an exclusive handle to a Postgres client open against `dsn`
+/// (+ `password`, passed explicitly — see `io::connect_client`). Opens
+/// lazily on first call; reuses the existing client on subsequent calls;
+/// reconnects automatically if the cached client errors out (caller will
+/// see the new error from the retry).
 ///
 /// The closure receives `&mut Client` and may issue queries. When the
 /// closure returns, the client is parked back in the pool, ready for
 /// the next caller.
 pub fn with_client<R>(
     dsn: &str,
+    password: Option<&str>,
     f: impl FnOnce(&mut Client) -> Result<R, postgres::Error>,
 ) -> Result<R, postgres::Error> {
     let entry_lock = POOL.get_or_init(|| {
         Mutex::new(PoolEntry {
             client: None,
             dsn: String::new(),
+            password: None,
         })
     });
 
     // First try with the existing cached client.
     let mut entry = entry_lock.lock().expect("pool mutex poisoned");
 
-    // If the cached DSN differs from what's requested, drop the old client.
-    if entry.dsn != dsn {
+    // If the cached DSN or password differs from what's requested, drop
+    // the old client.
+    if entry.dsn != dsn || entry.password.as_deref() != password {
         entry.client = None;
         entry.dsn = dsn.to_string();
+        entry.password = password.map(str::to_string);
     }
 
     // Lazy-open if missing.
     if entry.client.is_none() {
-        entry.client = Some(Client::connect(dsn, NoTls)?);
+        entry.client = Some(crate::io::connect_client(dsn, password)?);
     }
 
     // Run the closure. If it returns an error, drop the cached client
