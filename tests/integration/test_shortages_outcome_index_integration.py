@@ -11,26 +11,46 @@ Covered contracts:
      shortage_date), partial predicate WHERE status = 'active', NOT unique —
      and migration 075 replaced nothing: every pre-existing shortages index
      (005 + 014) is still present.
-  2. Usability proof at volume: 2 fork scenarios x ~3,800 seeded `shortages`
-     rows each (bulk server-side INSERT ... SELECT, same row shape as the
-     existing outcome-test seeds), then EXPLAIN (FORMAT JSON) of the VERBATIM
-     `_load_observed_shortages` query -> the plan references the 075 index,
-     contains NO Seq Scan, and NO Sort node (the Sort-free plan is the entire
-     point of the index: the DISTINCT ON ordering comes straight off the
-     btree).
+  2. Usability proof — the index's FORM, never the planner's preference: 2
+     fork scenarios x ~3,800 seeded `shortages` rows each (bulk server-side
+     INSERT ... SELECT, same row shape as the existing outcome-test seeds),
+     then EXPLAIN (FORMAT JSON) of the VERBATIM `_load_observed_shortages`
+     query with every COMPETING access path neutralized -> the plan is an
+     ordered Index Scan on the 075 index, with NO Seq Scan, NO Sort node
+     (the Sort-free plan is the entire point of the index: the DISTINCT ON
+     ordering comes straight off the btree), and scenario_id in the Index
+     Cond — not demoted to a Filter.
 
-     Planner GUCs are pinned for the EXPLAIN (SET LOCAL enable_seqscan = off,
-     enable_bitmapscan = off): at this deliberately small CI volume (~7.6k
-     rows, a handful of heap pages) a Seq Scan is LEGITIMATELY the cheapest
-     plan, so the planner's default choice proves nothing about the index —
-     what the test must prove is the index's SHAPE, i.e. that an ordered
-     index path satisfying both the WHERE and the DISTINCT ON ORDER BY exists
-     at all. With seq+bitmap paths priced out, a plan that still avoided the
-     index (or needed a Sort on top of it) would fail the assertions — which
-     is exactly the regression this test guards against. SET LOCAL scopes the
-     pins to the test's transaction; the `conn` fixture rolls it back.
-  3. Truth consistency: the forced-index plan returns byte-identical rows to
-     the default plan (the partial index agrees with the table), and the
+     Why "neutralize competitors" instead of "pin GUCs and expect the
+     planner to pick 075" (the strategy this module first shipped with, and
+     which failed in CI): at this deliberately small volume (~7.6k rows),
+     even with SET LOCAL enable_seqscan = off AND enable_bitmapscan = off,
+     the planner LEGITIMATELY prefers shortages_status_idx + an explicit
+     Sort — the 075 path implies ~1.8k random-order heap fetches (priced at
+     random_page_cost = 4) and costs MORE than a narrower index plus an
+     in-memory sort at toy scale. That choice flips with volume, statistics
+     and server version (at the pilot's 175k rows the 075 index wins), so
+     asserting the planner's preference is a volume-sensitive non-proof.
+     What IS deterministic is the index's SHAPE: with the competing indexes
+     transactionally dropped (DROP INDEX is transactional in PostgreSQL;
+     the drops live inside a SAVEPOINT rolled back immediately after the
+     probe, so nothing leaks whatever the fixture's commit semantics) and
+     seq/bitmap paths priced out, a plan that still needed a Sort on top of
+     the 075 index — or pushed scenario_id into a Filter — would fail the
+     assertions. That Sort-free ordered scan is exactly the property that
+     makes the index win at pilot volume.
+
+     Droppability, verified against the migrations: `shortages_pkey` is
+     constraint-backed (not DROP INDEX-able, and useless to this query, so
+     it stays); `shortages_pi_node_calc_run_uidx` is a plain CREATE UNIQUE
+     INDEX (005 — no pg_constraint rides it), so it is discovered and
+     dropped like the rest. Discovery is dynamic from pg_index, excluding
+     constraint-backed indexes — a future migration adding another shortages
+     index can never silently re-introduce a competitor into this probe.
+  3. Truth consistency: the neutralized-path (index-forced) plan returns
+     byte-identical rows to the real query executed BEFORE the savepoint
+     under the default planner with all indexes present (the true contract:
+     the index changes the access path, never the result set), and the
      DISTINCT ON semantics over the seeded volume are the expected ones
      (per (item, location): max severity_score among ACTIVE rows dated <=
      as_of, tie-broken by earliest shortage_date).
@@ -51,12 +71,14 @@ from __future__ import annotations
 
 import inspect
 import json
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from ootils_core.engine.outcome import evaluator as outcome_evaluator
@@ -258,7 +280,7 @@ def seeded_shortages(migrated_db):
         )
         c.commit()
 
-    # Fresh stats so the (pinned) planner prices real row counts, not defaults.
+    # Fresh stats so the planner prices real row counts, not defaults.
     with psycopg.connect(migrated_db, autocommit=True) as c:
         c.execute("ANALYZE shortages")
 
@@ -275,11 +297,11 @@ def seeded_shortages(migrated_db):
 # ---------------------------------------------------------------------------
 
 
-def _explain_json(conn, sql: str, params) -> dict:
+def _explain_json(conn, query: str, params) -> dict:
     """EXPLAIN (FORMAT JSON) of a parameterized query; returns the root Plan
     node. psycopg's server-side binding parameterizes the inner statement, so
     the planner prices it exactly as the evaluator's own execute() would."""
-    row = conn.execute("EXPLAIN (FORMAT JSON) " + sql, params).fetchone()
+    row = conn.execute("EXPLAIN (FORMAT JSON) " + query, params).fetchone()
     plan = row["QUERY PLAN"]
     if isinstance(plan, str):  # depending on server/driver json adaptation
         plan = json.loads(plan)
@@ -292,12 +314,77 @@ def _walk(plan: dict):
         yield from _walk(child)
 
 
-def _pin_index_only_paths(conn):
-    """Price Seq Scan and Bitmap Scan paths out for the current transaction —
-    see the module docstring (point 2) for why this is required at CI volume.
-    SET LOCAL only: the `conn` fixture's rollback discards the pins."""
-    conn.execute("SET LOCAL enable_seqscan = off")
-    conn.execute("SET LOCAL enable_bitmapscan = off")
+# Every DROP INDEX-able index on shortages EXCEPT the one under proof:
+# constraint-backed indexes (shortages_pkey) are excluded because DROP INDEX
+# would refuse them — and none of them serves this query anyway. Dynamic on
+# purpose: a future migration adding a shortages index can never silently
+# re-introduce a competing access path into the probe below.
+_DROPPABLE_COMPETITOR_INDEXES_SQL = """
+    SELECT c.relname AS indexname
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_class t ON t.oid = i.indrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'public'
+      AND t.relname = 'shortages'
+      AND c.relname <> %(keep)s
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid
+      )
+    ORDER BY c.relname
+"""
+
+
+@contextmanager
+def _competitors_neutralized(conn):
+    """SAVEPOINT-scoped probe environment: transactionally DROP every
+    competing shortages index and price Seq/Bitmap Scan paths out, so the
+    ONLY remaining way to serve `_load_observed_shortages` is the 075 index
+    (or the constraint-backed shortages_pkey, whose full-scan-plus-Sort plan
+    the assertions would reject). See module docstring, point 2, for why
+    proving the index's FORM this way is deterministic while proving the
+    planner's PREFERENCE at CI volume is not.
+
+    Everything is undone by ROLLBACK TO SAVEPOINT — DROP INDEX is
+    transactional in PostgreSQL, and SET LOCAL issued after a savepoint is
+    likewise cancelled by rolling back to it — so no state leaks to the rest
+    of the transaction, whatever the `conn` fixture commits or rolls back
+    afterwards."""
+    # The `conn` fixture is autocommit=False (tests/integration/conftest.py),
+    # so the execute below opens (or joins) a transaction and SAVEPOINT is
+    # always legal. If the fixture ever flips to autocommit, fail loudly
+    # instead of silently probing a DB whose indexes we just really dropped.
+    assert conn.autocommit is False, (
+        "_competitors_neutralized requires a transactional connection: "
+        "with autocommit the DROP INDEX below would be permanent"
+    )
+    conn.execute("SAVEPOINT idx_proof")
+    try:
+        competitors = [
+            r["indexname"]
+            for r in conn.execute(
+                _DROPPABLE_COMPETITOR_INDEXES_SQL, {"keep": INDEX_NAME}
+            ).fetchall()
+        ]
+        # Sanity on the discovery query itself: every known droppable
+        # pre-existing index must be in the drop set (shortages_pkey is the
+        # single constraint-backed one). An empty/short list here would mean
+        # the probe below proves nothing.
+        expected_min = PRE_EXISTING_SHORTAGES_INDEXES - {"shortages_pkey"}
+        assert expected_min <= set(competitors), sorted(competitors)
+        assert INDEX_NAME not in competitors
+
+        for name in competitors:
+            conn.execute(
+                sql.SQL("DROP INDEX {}").format(sql.Identifier("public", name))
+            )
+        # Belt and braces on top of the drops: even a Seq Scan / Bitmap Scan
+        # over the surviving indexes must be priced out, not just beaten.
+        conn.execute("SET LOCAL enable_seqscan = off")
+        conn.execute("SET LOCAL enable_bitmapscan = off")
+        yield
+    finally:
+        conn.execute("ROLLBACK TO SAVEPOINT idx_proof")
 
 
 def _norm(s: str) -> str:
@@ -385,21 +472,27 @@ class TestIndexUsability:
     def test_explain_references_index_no_seqscan_no_sort(
         self, conn, seeded_shortages
     ):
-        """The core PERF-1 PR-A proof: the exact `_load_observed_shortages`
-        query is servable by idx_shortages_scenario_item_loc_active as an
-        ordered index scan — no Seq Scan (the 35-minute pilot symptom), and
-        no Sort node (the DISTINCT ON ordering comes straight off the btree:
-        equality on the leading scenario_id column makes the trailing
-        (item_id, location_id, severity_score DESC, shortage_date) columns
-        provide the ORDER BY)."""
-        _pin_index_only_paths(conn)
-        plan = _explain_json(
-            conn, OBSERVED_SHORTAGES_SQL, (seeded_shortages["scenario_a"], AS_OF)
-        )
+        """The core PERF-1 PR-A proof — the index's FORM: the exact
+        `_load_observed_shortages` query is servable by
+        idx_shortages_scenario_item_loc_active as an ordered index scan —
+        no Seq Scan (the 35-minute pilot symptom), no Sort node (the
+        DISTINCT ON ordering comes straight off the btree: equality on the
+        leading scenario_id column makes the trailing (item_id, location_id,
+        severity_score DESC, shortage_date) columns provide the ORDER BY),
+        and scenario_id served as an Index Cond, never a Filter. Competing
+        access paths are neutralized first — see module docstring, point 2,
+        for why the planner's unassisted preference at CI volume proves
+        nothing about this index."""
+        with _competitors_neutralized(conn):
+            plan = _explain_json(
+                conn,
+                OBSERVED_SHORTAGES_SQL,
+                (seeded_shortages["scenario_a"], AS_OF),
+            )
         nodes = list(_walk(plan))
 
-        index_names = {n.get("Index Name") for n in nodes} - {None}
-        assert INDEX_NAME in index_names, json.dumps(plan, indent=2)
+        index_nodes = [n for n in nodes if n.get("Index Name") == INDEX_NAME]
+        assert index_nodes, json.dumps(plan, indent=2)
 
         seq_scans = [n for n in nodes if n.get("Node Type") == "Seq Scan"]
         assert not seq_scans, json.dumps(plan, indent=2)
@@ -409,22 +502,41 @@ class TestIndexUsability:
         sorts = [n for n in nodes if "Sort" in n.get("Node Type", "")]
         assert not sorts, json.dumps(plan, indent=2)
 
+        # The WHERE equality must ride the index (leading-column match),
+        # not get re-checked row-by-row after the fetch. The deparsed
+        # condition renders the bound parameter as either `$1` or a literal
+        # depending on server/driver — asserting on the column name covers
+        # both.
+        idx = index_nodes[0]
+        assert "scenario_id" in idx.get("Index Cond", ""), json.dumps(
+            plan, indent=2
+        )
+        assert "scenario_id" not in (idx.get("Filter") or ""), json.dumps(
+            plan, indent=2
+        )
+
     def test_forced_index_rows_equal_default_plan_rows(
         self, conn, seeded_shortages
     ):
-        """Truth consistency: the partial index returns byte-identical rows to
-        whatever plan the unpinned planner picks (Seq Scan at this volume) —
-        the index is a pure access-path change, never a result change."""
+        """Truth consistency — the real contract: the partial index returns
+        byte-identical rows to whatever plan the default planner picks with
+        every index present. Both sides EXECUTE the real query (not just
+        EXPLAIN it): default plan first, OUTSIDE the savepoint; index-forced
+        plan second, inside `_competitors_neutralized` where the 075 index
+        is the only remaining access path. The index must change the access
+        path, never the result set."""
         params = (seeded_shortages["scenario_a"], AS_OF)
 
-        _pin_index_only_paths(conn)
-        # Belt and braces: only compare if the pins really engaged the index.
-        plan = _explain_json(conn, OBSERVED_SHORTAGES_SQL, params)
-        assert any(n.get("Index Name") == INDEX_NAME for n in _walk(plan))
-        forced_rows = conn.execute(OBSERVED_SHORTAGES_SQL, params).fetchall()
-        conn.rollback()  # discard SET LOCAL pins -> default planner again
-
         default_rows = conn.execute(OBSERVED_SHORTAGES_SQL, params).fetchall()
+
+        with _competitors_neutralized(conn):
+            # Belt and braces: only compare if the probe really engaged the
+            # index for this execution.
+            plan = _explain_json(conn, OBSERVED_SHORTAGES_SQL, params)
+            assert any(
+                n.get("Index Name") == INDEX_NAME for n in _walk(plan)
+            ), json.dumps(plan, indent=2)
+            forced_rows = conn.execute(OBSERVED_SHORTAGES_SQL, params).fetchall()
 
         assert forced_rows == default_rows
         assert len(forced_rows) == N_COORDINATES
