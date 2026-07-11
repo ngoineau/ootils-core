@@ -23,3 +23,10 @@ build/
 !.env.example
 .github/
 # scripts/ is intentionally included in the image (seed, export tools)
+# rust/ is only read by Dockerfile's WITH_RUST=1 build path (and never at
+# all by the WITH_RUST=0 default) — target/ is local build output, can
+# reach several hundred MB to GB, and must never bloat the build context
+# sent to the daemon even when unused.
+rust/target/
+rust/**/target/
+

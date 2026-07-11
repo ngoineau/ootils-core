@@ -49,6 +49,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Opt-in Rust kernel wheel (OOTILS_ENGINE=rust availability — the
+      # runtime default engine stays 'sql' regardless, see Dockerfile).
+      # Default 0 = today's build, no rust: toolchain pulled. Override with
+      # `WITH_RUST=1 docker compose build` or a `.env` entry.
+      args:
+        WITH_RUST: ${WITH_RUST:-0}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       OOTILS_API_TOKEN: ${OOTILS_API_TOKEN}

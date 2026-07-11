@@ -108,18 +108,26 @@ fn parse_uuid(s: &str) -> PyResult<Uuid> {
 ///   - "n_demands": int
 ///   - "n_series_seeds": int
 ///   - "elapsed_ms": float (server-side wall clock from connect to return)
+///
+/// `password`, when given, is passed to `postgres::Config::password()`
+/// rather than embedded in `dsn` — same explicit-credential contract as
+/// `propagate_and_write` (never a `PGPASSWORD` env read on the Rust side).
+/// Optional/keyword-only for backward compatibility with callers (e.g.
+/// `scripts/parity_3way.py`) that pass a DSN with an embedded password.
 #[pyfunction]
+#[pyo3(signature = (dsn, calc_run_id_str, scenario_id_str, password=None))]
 fn load_subgraph_stats<'py>(
     py: Python<'py>,
     dsn: &str,
     calc_run_id_str: &str,
     scenario_id_str: &str,
+    password: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let calc_run_id = parse_uuid(calc_run_id_str)?;
     let scenario_id = parse_uuid(scenario_id_str)?;
 
     let t0 = std::time::Instant::now();
-    let mut loader = io::Loader::connect(dsn).map_err(|e| {
+    let mut loader = io::Loader::connect(dsn, password).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("postgres connect failed: {e}"))
     })?;
     let sg = loader
@@ -153,12 +161,17 @@ fn load_subgraph_stats<'py>(
 ///   - "shortage_qty" : str (Decimal)
 ///
 /// Also returns metadata in a separate dict (`stats`) with timings.
+///
+/// `password` follows the same explicit-credential contract as
+/// `propagate_and_write` — see its docstring below.
 #[pyfunction]
+#[pyo3(signature = (dsn, calc_run_id_str, scenario_id_str, password=None))]
 fn project_subgraph<'py>(
     py: Python<'py>,
     dsn: &str,
     calc_run_id_str: &str,
     scenario_id_str: &str,
+    password: Option<&str>,
 ) -> PyResult<(
     Vec<Bound<'py, pyo3::types::PyDict>>,
     Bound<'py, pyo3::types::PyDict>,
@@ -167,7 +180,7 @@ fn project_subgraph<'py>(
     let scenario_id = parse_uuid(scenario_id_str)?;
 
     let t_load_start = std::time::Instant::now();
-    let mut loader = io::Loader::connect(dsn).map_err(|e| {
+    let mut loader = io::Loader::connect(dsn, password).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("postgres connect failed: {e}"))
     })?;
     let sg = loader
@@ -208,10 +221,29 @@ fn project_subgraph<'py>(
 }
 
 /// Week 4: full propagate-and-write — load dirty subgraph, compute every
-/// PI in memory, COPY the projection into a temp table, UPDATE FROM
-/// the temp table, and clear `dirty_nodes` for this calc_run. Everything
-/// happens inside one transaction (atomic — same contract as the SQL
-/// engine).
+/// PI in memory, then persist via UNNEST or COPY + `UPDATE ... FROM`
+/// (see `writeback::write_projection`).
+///
+/// CORRECTION (this docstring previously — wrongly — claimed this call
+/// "clears `dirty_nodes`" and runs "inside one transaction (atomic — same
+/// contract as the SQL engine)". Neither is true, and callers must not
+/// assume either:
+///   - `dirty_nodes` is NEVER cleared here. `writeback::write_projection`
+///     commits its own `nodes` UPDATE on ITS transaction, full stop —
+///     clearing `dirty_nodes` (`CLEAR_DIRTY_SQL`) happens in Python, on a
+///     SEPARATE connection, AFTER this call returns and after
+///     `SHORTAGES_SQL` has run (see propagator_rust.py). This is
+///     deliberate: if this call fails, `dirty_nodes` staying intact is
+///     what makes the next propagation attempt for the same scenario
+///     self-healing (it just recomputes the same PIs).
+///   - There is no single atomic transaction spanning event-insert,
+///     dirty-marking, this call, and shortage detection. Python commits
+///     the event + dirty_nodes rows BEFORE calling this function (a
+///     required boundary — this function opens ITS OWN Postgres session,
+///     separate from Python's `db`, and that session must be able to see
+///     rows Python just wrote). See propagator_rust.py's
+///     `_propagate_via_rust` for the full multi-phase contract and its
+///     failure-handling path.
 ///
 /// Returns a dict with timing breakdown + counts:
 ///   - n_dirty_pis, n_supplies, n_demands, n_series_seeds
@@ -222,19 +254,38 @@ fn project_subgraph<'py>(
 /// based, severity score) is intentionally left to the Python wrapper
 /// which calls SHORTAGES_SQL afterwards. The Rust side only persists
 /// the projection results onto `nodes`.
+///
+/// `password` (0.2.0+): passed to `postgres::Config::password()` for the
+/// connection this call opens, instead of relying on a `PGPASSWORD`
+/// environment variable (removed in 0.2.0 — see pool.rs/io.rs). `dsn` is
+/// expected to carry no password. Callers on a wheel built before 0.2.0
+/// exposed this function with 3 positional args (no `password`); calling
+/// the 0.2.0+ signature against such a wheel raises a `TypeError` from
+/// PyO3's argument-count check — see propagator_rust.py's wheel-mismatch
+/// handling around this call.
 #[pyfunction]
+// All four arguments are REQUIRED positional — no defaults. Without this
+// explicit signature, PyO3 refuses to compile: an `Option<_>` parameter
+// followed by non-Option parameters is ambiguous (it can't tell whether
+// the `Option` means "has an implicit default" or "required, but the
+// value itself may be None"). It's the latter here: a caller MUST pass
+// something for `password` (`None` or a string) — see the wheel-mismatch
+// TypeError this is relied on to produce in propagator_rust.py.
+#[pyo3(signature = (dsn, password, calc_run_id_str, scenario_id_str))]
 fn propagate_and_write<'py>(
     py: Python<'py>,
     dsn: &str,
+    password: Option<&str>,
     calc_run_id_str: &str,
     scenario_id_str: &str,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let calc_run_id = parse_uuid(calc_run_id_str)?;
     let scenario_id = parse_uuid(scenario_id_str)?;
 
-    let stats = writeback::propagate_and_write(dsn, calc_run_id, scenario_id).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("propagate_and_write failed: {e}"))
-    })?;
+    let stats =
+        writeback::propagate_and_write(dsn, password, calc_run_id, scenario_id).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("propagate_and_write failed: {e}"))
+        })?;
 
     let d = pyo3::types::PyDict::new_bound(py);
     d.set_item("n_dirty_pis", stats.n_dirty_pis)?;

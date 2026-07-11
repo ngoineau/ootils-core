@@ -326,10 +326,11 @@ fn write_projection_copy(
 
 pub fn propagate_and_write(
     dsn: &str,
+    password: Option<&str>,
     calc_run_id: Uuid,
     scenario_id: Uuid,
 ) -> Result<FullStats, Box<dyn std::error::Error>> {
-    let stats = crate::pool::with_client(dsn, |client| {
+    let stats = crate::pool::with_client(dsn, password, |client| {
         let t_load_start = std::time::Instant::now();
         let sg = crate::io::load_subgraph(client, calc_run_id, scenario_id)?;
         let load_ms = t_load_start.elapsed().as_secs_f64() * 1000.0;

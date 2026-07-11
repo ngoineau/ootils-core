@@ -7,18 +7,23 @@ Inherits the Python `PropagationEngine` for everything except the
 
   1. Load dirty subgraph (PIs + supplies + demands + seed openings)
   2. Compute every PI in memory (parity-validated week 3)
-  3. COPY the projection into a temp table + UPDATE FROM
-  4. Clear `dirty_nodes` for this calc_run
+  3. UNNEST/COPY the projection + UPDATE FROM (does NOT clear dirty_nodes —
+     see `_propagate_via_rust` below)
 
 Shortage *detection* (safety-stock vs. closing_stock, persisted to the
 `shortages` table) stays in SQL — the wrapper calls SHORTAGES_SQL from
-`propagator_sql` after the Rust pass finishes. Same contract, same
-shortage rows.
+`propagator_sql` after the Rust pass finishes, then clears `dirty_nodes`.
+Same contract, same shortage rows.
 
 Boundary:
 - Python keeps the calc_run lifecycle, advisory lock, scenario state
   machine, agent tools, FastAPI routes — everything that changes often.
 - Rust owns the read + compute + bulk writeback — the stable hot path.
+- Rust's Postgres session is separate from Python's `db` connection, and
+  the connection credential (password) is passed explicitly on every call
+  — never via a `PGPASSWORD` environment variable (that was racy: process
+  env is shared mutable state across concurrent requests). See
+  `_propagate_via_rust` for the full boundary-commit + failure contract.
 """
 from __future__ import annotations
 
@@ -121,44 +126,80 @@ class RustPropagationEngine(PropagationEngine):
         db.execute(CLEAR_DIRTY_SQL, params)
 
     def _propagate_via_rust(self, calc_run: "CalcRun", db: DictRowConnection) -> None:
-        """Delegate the heavy lifting to ootils_kernel."""
-        # Commit dirty_nodes inserts so Rust (separate session) can see them.
+        """Delegate the heavy lifting to ootils_kernel.
+
+        Boundary-commit contract (why this commits mid-request):
+        `ootils_kernel.propagate_and_write` opens its OWN, separate
+        Postgres session (process-wide cached connection, see
+        rust/ootils_kernel/src/pool.rs) — it is NOT `db`. That Rust
+        session reads the dirty subgraph this request just built (the
+        `events` row, the `calc_runs` row for this run, and the
+        `dirty_nodes` rows flushed by `process_event` before `_propagate`
+        was called). None of that is visible to a different session until
+        it is committed on `db`. `db.commit()` below is that boundary: it
+        makes the event + calc_run(running) + dirty_nodes durable BEFORE
+        Rust ever connects, at the cost of no longer being a single atomic
+        transaction with the rest of this request.
+
+        Consequence for failure handling: from this point on, retrying is
+        the recovery mechanism, not rollback. If the Rust call itself
+        raises, the `SAVEPOINT propagation_start` that `process_event`
+        (propagator.py) set up before calling into `_propagate` no longer
+        exists — it died with the commit above (a COMMIT ends the
+        transaction and drops every savepoint in it). `_fail_after_boundary_commit`
+        handles that explicitly: it persists the failure record directly
+        (calc_run -> 'failed', advisory lock released — `fail_calc_run`)
+        and durably (its own commit), then re-opens an EMPTY savepoint
+        under the same name so `process_event`'s later, generic
+        `ROLLBACK TO SAVEPOINT propagation_start` becomes a harmless no-op
+        instead of a hard error that would itself abort the connection and
+        swallow the real failure. `dirty_nodes` is deliberately left
+        untouched throughout this path — nothing here clears it — so the
+        next propagation attempt for this scenario recomputes the exact
+        same PIs (self-healing retry).
+        """
         db.commit()
 
-        # F-017: build a DSN WITHOUT the password embedded — pass the
-        # password via PGPASSWORD instead. tokio-postgres + libpq
-        # consult that env var when the connection string omits it.
-        # An embedded password ends up in any log that includes the
-        # DSN string (PyO3 panic message, tracing field, etc.); the
-        # env-var approach is the documented safe pattern.
         info = db.info
+        # DSN carries no credential — safe to appear in a PyO3 panic
+        # message, a tracing field, or a log line. The password is
+        # threaded through as an explicit argument all the way to
+        # postgres::Config::password() on the Rust side (ootils_kernel
+        # >= 0.2.0) — never a PGPASSWORD env var, which was racy the
+        # moment two propagations ran concurrently in this process (env
+        # is shared mutable state; see the pre-0.2.0 version of this
+        # method for the mutate/restore dance this replaces).
         dsn = (
             f"host={info.host} port={info.port} "
             f"user={info.user} "
             f"dbname={info.dbname}"
         )
-        if info.password:
-            # Localized scope: set + restore so we don't pollute the
-            # process env for other callers.
-            prior = os.environ.get("PGPASSWORD")
-            os.environ["PGPASSWORD"] = info.password
-            try:
-                stats = ootils_kernel.propagate_and_write(
-                    dsn,
-                    str(calc_run.calc_run_id),
-                    str(calc_run.scenario_id),
-                )
-            finally:
-                if prior is None:
-                    os.environ.pop("PGPASSWORD", None)
-                else:
-                    os.environ["PGPASSWORD"] = prior
-        else:
+        password = info.password or None
+
+        try:
             stats = ootils_kernel.propagate_and_write(
                 dsn,
+                password,
                 str(calc_run.calc_run_id),
                 str(calc_run.scenario_id),
             )
+        except TypeError as exc:
+            # A wheel built against ootils_kernel < 0.2.0 exposes
+            # propagate_and_write(dsn, calc_run_id, scenario_id) — 3
+            # positional args, no password. Calling the 0.2.0+ 4-arg form
+            # against it raises TypeError from PyO3's argument-count
+            # check, not a domain/DB error — surface that distinctly
+            # instead of a confusing generic failure.
+            wheel_version = getattr(ootils_kernel, "version", lambda: "unknown")()
+            message = (
+                f"wheel ootils_kernel < 0.2.0 incompatible, rebuild via "
+                f"WITH_RUST=1 (detected version={wheel_version!r})"
+            )
+            self._fail_after_boundary_commit(calc_run, db, message)
+            raise RuntimeError(message) from exc
+        except Exception as exc:
+            self._fail_after_boundary_commit(calc_run, db, str(exc))
+            raise
 
         calc_run.nodes_recalculated += stats["n_dirty_pis"]
 
@@ -189,3 +230,36 @@ class RustPropagationEngine(PropagationEngine):
         if self._shortage_detector is not None:
             db.execute(SHORTAGES_SQL, params)
         db.execute(CLEAR_DIRTY_SQL, params)
+
+    def _fail_after_boundary_commit(
+        self,
+        calc_run: "CalcRun",
+        db: DictRowConnection,
+        error_message: str,
+    ) -> None:
+        """Persist a Rust-path failure that happened AFTER `_propagate_via_rust`'s
+        boundary commit — see that method's docstring for the full contract.
+
+        `process_event` (propagator.py) always tries
+        `ROLLBACK TO SAVEPOINT propagation_start` on the way out of its
+        `except` block. That savepoint was defined in the transaction the
+        boundary commit above just ended, so left alone the ROLLBACK TO
+        SAVEPOINT would itself raise ("savepoint ... does not exist"),
+        aborting the connection before `fail_calc_run` ever runs — losing
+        the failure record and leaving the scenario's advisory lock stuck
+        until the pooled connection eventually recycles.
+
+        Fix: mark + commit the failure HERE, then re-open an empty
+        savepoint under the same name so `process_event`'s rollback is a
+        harmless no-op and its own (now redundant) `fail_calc_run` call is
+        safe to run again — it will be undone by the request's final
+        rollback, which is fine, since the failure was already made
+        durable by the `db.commit()` below.
+
+        `dirty_nodes` is intentionally untouched by this method — nothing
+        here clears it, so the next propagation attempt for this scenario
+        recomputes the same PIs (self-healing retry).
+        """
+        self._calc_run_mgr.fail_calc_run(calc_run, error_message, db)
+        db.commit()
+        db.execute("SAVEPOINT propagation_start")

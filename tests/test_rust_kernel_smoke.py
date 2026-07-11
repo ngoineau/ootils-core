@@ -25,7 +25,10 @@ ootils_kernel = pytest.importorskip(
 
 
 def test_version_reachable() -> None:
-    assert ootils_kernel.version() == "0.1.0"
+    # 0.2.0 = the PGPASSWORD-fix wheel: propagate_and_write takes the password
+    # as an explicit 2nd positional argument (see propagator_rust.py's
+    # wheel-mismatch detection, which keys off this exact version boundary).
+    assert ootils_kernel.version() == "0.2.0"
 
 
 @pytest.mark.parametrize(

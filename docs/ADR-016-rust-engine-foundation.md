@@ -197,6 +197,113 @@ En cas d'abort, le crate Rust reste dans le repo (foundation pour une
 future tentative ou pour Architecture B), mais `OOTILS_ENGINE` reste
 sur `sql` par défaut sans exposer `rust` comme option.
 
+## Addendum 2026-07-11 — Industrialisation (PR-C, worktree `feat/rust-pyo3-industrialization`)
+
+Ne change ni le statut `Accepted` ni les décisions de scope ci-dessus —
+documente quatre décisions d'industrialisation prises sur cette fondation.
+Défaut `OOTILS_ENGINE=sql` **inchangé** de bout en bout.
+
+### 1. Build Docker gaté par `WITH_RUST`
+
+`Dockerfile` gagne `ARG WITH_RUST=0`. Build par défaut (`WITH_RUST=0`) :
+byte-for-byte identique au build pré-PR-C — aucune image `rust:1.82-slim`
+tirée, aucun toolchain cargo/maturin téléchargé. `WITH_RUST=1` ajoute un
+stage `rust-builder` qui compile le wheel `ootils_kernel` via
+`maturin build --release` et l'installe dans l'image finale. Technique de
+gating : **sélection de stage par ARG** (`FROM selected-${WITH_RUST} AS
+selected`), pas un `RUN` conditionnel — un `RUN if` ne peut pas empêcher un
+`FROM` inconditionnel d'être tiré ; BuildKit ne construit que les ancêtres du
+stage réellement sélectionné. `docker-compose.yml`'s `api.build.args.WITH_RUST`
+vaut `0` par défaut, surchargeable via `.env` ou `WITH_RUST=1 docker compose
+build`. `.dockerignore` exclut `rust/target/` (plusieurs centaines de Mo —
+sinon envoyé au daemon même à `WITH_RUST=0`). Le moteur par défaut au
+runtime n'est pas touché : `OOTILS_ENGINE` reste non défini dans
+`Dockerfile`/`docker-compose.yml`, donc résout à `sql` quel que soit
+`WITH_RUST`. **Non validé par un `docker build` réel** (pas de daemon Docker
+dans le sandbox de build) — validation statique seulement (`docker compose
+config` avec/sans override, relecture manuelle) ; un `docker build .` et un
+`docker build --build-arg WITH_RUST=1 .` réels restent un point de
+validation ouvert (CI ou environnement avec daemon).
+
+### 2. Fix PGPASSWORD racy
+
+La signature PyO3 `propagate_and_write(dsn, password, calc_run_id_str,
+scenario_id_str)` (`rust/ootils_kernel/src/lib.rs:255-262`) prend désormais
+le mot de passe Postgres en argument explicite REQUIS au lieu d'une lecture
+de `PGPASSWORD` — l'ancienne approche mutait `os.environ["PGPASSWORD"]`
+autour de l'appel, racy dès que deux propagations tournent en concurrence
+dans un même process (état mutable partagé). Threadé de bout en bout :
+`lib.rs` → `writeback::propagate_and_write` → `pool::with_client` (un nouveau
+champ `password` sur `PoolEntry` force une reconnexion s'il change) →
+`io::connect_client` (`postgres::Config::password()`). Côté Python
+(`propagator_rust.py::_propagate_via_rust`, docstring lignes 128-160) : `dsn`
+est construit SANS credential (safe à logger) et `password` passé
+explicitement. `ootils_kernel` bumpé 0.1.0 → 0.2.0 (`Cargo.toml` ET
+`pyproject.toml`) pour marquer le changement de signature cassant ; un wheel
+buildé avant 0.2.0 expose l'ancienne forme à 3 arguments — l'appeler avec 4
+lève un `TypeError`, intercepté explicitement et re-levé en
+`RuntimeError("wheel ootils_kernel < 0.2.0 incompatible, rebuild via
+WITH_RUST=1 ...")` (`propagator_rust.py:186-199`). Confirmé : aucun chemin
+côté Rust ne lit `PGPASSWORD` (les crates `postgres`/`tokio-postgres` ne la
+lisent de toute façon jamais).
+
+### 3. Commit mi-requête — documenté et durci, PAS refondu
+
+Le `db.commit()` en milieu de fonction de `_propagate_via_rust`
+(`propagator_rust.py:128-160`, inchangé — Rust ouvre SA PROPRE session
+Postgres, qui doit voir les lignes event/calc_run/dirty_nodes que Python
+vient d'écrire) est maintenant documenté intégralement en place, et un vrai
+bug qu'il exposait est corrigé : un échec Rust APRÈS ce commit faisait
+échouer le `ROLLBACK TO SAVEPOINT propagation_start` générique de
+`process_event` (`propagator.py`, inchangé) — le savepoint mourait avec le
+commit précédent — ce qui court-circuitait `fail_calc_run` et laissait le
+calc_run bloqué en `running` + le lock advisory du scénario retenu jusqu'au
+recyclage de la connexion poolée (`OOTILS_DB_POOL_MAX_LIFETIME_SECONDS`,
+1800s par défaut). Fix, scopé entièrement dans `propagator_rust.py`
+(`propagator.py` non touché) : `_fail_after_boundary_commit`
+(`propagator_rust.py:234-265`) marque le calc_run `failed` via
+`fail_calc_run` (qui relâche aussi le lock advisory de façon non
+transactionnelle), commite cela durablement, puis rouvre un `SAVEPOINT
+propagation_start` vide pour que le `ROLLBACK TO SAVEPOINT` ultérieur de
+`process_event` devienne un no-op inoffensif au lieu d'une erreur dure.
+`dirty_nodes` reste intact tout du long — la prochaine tentative de
+propagation du scénario s'auto-guérit en recalculant les mêmes PIs. Le
+docstring de `propagate_and_write` dans `lib.rs` est corrigé pour supprimer
+deux affirmations fausses (« clear dirty_nodes », « une transaction
+atomique ») et expliciter le vrai contrat multi-phases. Une **refonte**
+complète vers un modèle snapshot-export/transaction unique était
+explicitement hors scope de cette PR — signalée comme follow-up, non
+tentée ici.
+
+### 4. Parité CI baseline + fork overlay — écrite, PAS ENCORE câblée en CI
+
+`tests/integration/test_rust_parity_integration.py` prouve que
+`RustPropagationEngine` reproduit `SqlPropagationEngine` à l'identique
+(champs de projection PI + lignes `shortages`) à la fois sur le graphe
+baseline nu ET sur un fork portant un override de sécurité stock ADR-025
+(`scenario_planning_overrides`) — le test qui garantit que le swap de moteur
+ne peut pas silencieusement dé-forker la détection overlay-aware — plus le
+contrat de récupération après échec mi-requête du point 3. **Trou honnête** :
+ce fichier n'est actuellement PAS exercé par la CI. Le job `integration` de
+`ci.yml` lance `tests/integration/` contre un vrai Postgres mais n'installe
+jamais le wheel `ootils_kernel` (l'extra `[dev]` de `pyproject.toml` n'en
+dépend pas) — le garde `pytest.importorskip("ootils_kernel", ...)` du fichier
+le fait donc SKIP silencieusement. `rust-build.yml` build+installe bien le
+wheel, mais n'a pas de service Postgres et ne lance que
+`tests/test_rust_kernel_smoke.py`, jamais `tests/integration/`. Combler ce
+trou — soit installer le wheel dans le job `integration`, soit ajouter un
+service Postgres à `rust-build.yml` et y pointer ce fichier — reste un
+follow-up ouvert, non fait par cet addendum.
+
+### Défaut moteur — inchangé
+
+`OOTILS_ENGINE` reste `sql` de bout en bout de ce chantier. `rust`
+(Architecture A) et `rust-svc` (Architecture B) restent opt-in. Le seul
+chemin vers un changement de défaut est l'item roadmap **SCALE-2**
+(`docs/ROADMAP-AGENTS-2026-H2.md` §6 — ADR d'arbitrage porté par
+l'architecte, Rust default-on vs lazy CoW vs statu quo), non résolu à ce
+jour.
+
 ## References
 
 - [POC kernel Rust — 32× speedup mesuré](../poc/rust_kernel/)

@@ -14,9 +14,10 @@
 
 use chrono::NaiveDate;
 use postgres::types::Type;
-use postgres::{Client, NoTls};
+use postgres::{Client, Config, NoTls};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 use uuid::Uuid;
 
 // -------------------------------------------------------------------- //
@@ -70,6 +71,33 @@ impl Subgraph {
 }
 
 // -------------------------------------------------------------------- //
+//  Connection helper — password passed explicitly, never via PGPASSWORD.
+// -------------------------------------------------------------------- //
+
+/// Open a Postgres client from a DSN, with an optional password supplied
+/// out-of-band via `postgres::Config::password()` instead of embedding it
+/// in `dsn` or relying on the `PGPASSWORD` environment variable.
+///
+/// Why: `PGPASSWORD` is process-wide, mutable state — setting it from
+/// Python around this call is racy the moment more than one propagation
+/// runs concurrently in the same process (thread pool executors, async
+/// handlers). `Config::password()` scopes the credential to exactly this
+/// connection attempt with no shared mutable state involved. `dsn` is
+/// expected to carry no password (so it stays safe to log / show in a
+/// PyO3 panic message); `password` is the one place the secret flows.
+///
+/// `None` means: don't call `.password()` at all — if `dsn` itself embeds
+/// a password (e.g. `postgres://user:pass@host/db`), that value is used
+/// as-is, same as the previous `Client::connect(dsn, NoTls)` behaviour.
+pub fn connect_client(dsn: &str, password: Option<&str>) -> Result<Client, postgres::Error> {
+    let mut config = Config::from_str(dsn)?;
+    if let Some(pw) = password {
+        config.password(pw);
+    }
+    config.connect(NoTls)
+}
+
+// -------------------------------------------------------------------- //
 //  Loader
 // -------------------------------------------------------------------- //
 
@@ -78,8 +106,8 @@ pub struct Loader {
 }
 
 impl Loader {
-    pub fn connect(dsn: &str) -> Result<Self, postgres::Error> {
-        let client = Client::connect(dsn, NoTls)?;
+    pub fn connect(dsn: &str, password: Option<&str>) -> Result<Self, postgres::Error> {
+        let client = connect_client(dsn, password)?;
         Ok(Self { client })
     }
 
