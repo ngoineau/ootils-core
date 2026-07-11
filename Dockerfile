@@ -13,10 +13,13 @@
 # gained a Rust option — no `rust:` base image is ever pulled, no
 # cargo/maturin toolchain is ever downloaded, no extra layers.
 #
-# WITH_RUST=1: adds a `rust-builder` stage (rust:1.82-slim, matching the
-# MSRV pinned in rust/Cargo.toml's `[workspace.package] rust-version`) that
-# compiles the ootils_kernel wheel via maturin, then installs it into the
-# final image.
+# WITH_RUST=1: adds a `rust-builder` stage (rust:1.96-slim -- newer than the
+# MSRV pinned in rust/Cargo.toml's `[workspace.package] rust-version`
+# (1.82): a transitive dependency (crypto-common 0.2.2) requires
+# edition2024, which Cargo 1.82 cannot resolve -- confirmed by a real
+# WITH_RUST=1 build failure on the VM. 1.96 also aligns with
+# Dockerfile.engine's builder stage.) that compiles the ootils_kernel wheel
+# via maturin, then installs it into the final image.
 #
 # How the gating actually works (read before "simplifying" this):
 # Dockerfile syntax has no if/else. A naive `RUN if [ "$WITH_RUST" = 1 ];
@@ -29,7 +32,7 @@
 # resolves `${WITH_RUST}` before constructing its build DAG and only
 # builds the ANCESTORS of the stage actually reached — so when WITH_RUST=0,
 # `selected-1` (and everything under it: `py-with-rust`, `rust-builder`,
-# and the `rust:1.82-slim` base image) is never touched, never pulled,
+# and the `rust:1.96-slim` base image) is never touched, never pulled,
 # never built. This requires the BuildKit builder, which is the default for
 # `docker build` / `docker compose build` on any current Docker Engine (the
 # same assumption this repo already makes for Dockerfile.engine).
@@ -56,7 +59,7 @@ COPY scripts/ /app/scripts/
 RUN pip install --no-cache-dir .
 
 # ---- Stage: Rust wheel builder (ONLY reached when WITH_RUST=1, see above) -
-FROM rust:1.82-slim AS rust-builder
+FROM rust:1.96-slim AS rust-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-dev python3-venv \

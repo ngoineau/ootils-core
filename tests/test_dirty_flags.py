@@ -6,7 +6,9 @@ Covers every method and branch in dirty.py:
   - clear_dirty (key exists vs key missing)
   - get_dirty_nodes (in-memory hit vs Postgres fallback)
   - is_dirty (node present vs absent, key missing)
-  - flush_to_postgres (with nodes vs empty set)
+  - flush_to_postgres (with nodes vs empty set; both INSERT branches — native
+    db.executemany vs the psycopg3 cursor fallback — and the post-INSERT
+    `ANALYZE dirty_nodes` that keeps PROPAGATE_SQL's planner estimates honest)
   - load_from_postgres
 """
 from __future__ import annotations
@@ -247,6 +249,8 @@ class TestFlushToPostgres:
         # key not even in _dirty
         mgr.flush_to_postgres(run, scenario, db)
         db.executemany.assert_not_called()
+        # Early return preserved: no INSERT means no ANALYZE either.
+        db.execute.assert_not_called()
 
     def test_empty_set_after_mark(self):
         mgr = DirtyFlagManager()
@@ -257,6 +261,81 @@ class TestFlushToPostgres:
         mgr.mark_dirty(set(), scenario, run, db)
         mgr.flush_to_postgres(run, scenario, db)
         db.executemany.assert_not_called()
+        # Early return preserved: no INSERT means no ANALYZE either.
+        db.execute.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # PERF2 guard: the just-inserted dirty set is read straight back by
+    # PROPAGATE_SQL / SHORTAGES_SQL in the same transaction. Without fresh
+    # stats the planner estimates rows=1 and re-runs the inflows/outflows
+    # GroupAggregate per row (measured 200x, 43 nodes/s on a 2000-node set).
+    # flush_to_postgres must therefore issue a static, parameterless
+    # `ANALYZE dirty_nodes` AFTER the INSERT — on BOTH insert branches —
+    # and never on an empty set (the early return above).
+    # ------------------------------------------------------------------
+
+    def test_nonempty_flush_analyzes_after_insert_native_branch(self):
+        """Native branch (db exposes a callable executemany): the INSERT goes
+        through db.executemany and is followed — in that order — by exactly
+        one db.execute("ANALYZE dirty_nodes")."""
+        mgr = DirtyFlagManager()
+        db = _mock_db()
+        scenario = uuid4()
+        run = uuid4()
+
+        order: list[str] = []
+        db.executemany.side_effect = lambda *a, **k: order.append("insert")
+        db.execute.side_effect = lambda *a, **k: order.append("analyze")
+
+        mgr.mark_dirty({uuid4(), uuid4()}, scenario, run, db)
+        mgr.flush_to_postgres(run, scenario, db)
+
+        db.executemany.assert_called_once()
+        assert "INSERT INTO dirty_nodes" in db.executemany.call_args[0][0]
+        # Exactly one ANALYZE, static SQL, no bound parameters.
+        db.execute.assert_called_once_with("ANALYZE dirty_nodes")
+        # And strictly AFTER the INSERT (stats must cover the new rows).
+        assert order == ["insert", "analyze"]
+
+    def test_nonempty_flush_analyzes_after_insert_cursor_fallback(self):
+        """Fallback branch (psycopg3 connections have no executemany, so the
+        INSERT goes through cursor().executemany): ANALYZE must run on this
+        path too, after the INSERT. The pre-existing tests never exercise this
+        branch because MagicMock always exposes a callable executemany."""
+        mgr = DirtyFlagManager()
+        db = _mock_db()
+        # Forces getattr(db, "executemany", None) -> None, like a real
+        # psycopg3 Connection (attribute absent).
+        del db.executemany
+        cursor = db.cursor.return_value.__enter__.return_value
+        scenario = uuid4()
+        run = uuid4()
+
+        order: list[str] = []
+        cursor.executemany.side_effect = lambda *a, **k: order.append("insert")
+        db.execute.side_effect = lambda *a, **k: order.append("analyze")
+
+        mgr.mark_dirty({uuid4()}, scenario, run, db)
+        mgr.flush_to_postgres(run, scenario, db)
+
+        cursor.executemany.assert_called_once()
+        assert "INSERT INTO dirty_nodes" in cursor.executemany.call_args[0][0]
+        db.execute.assert_called_once_with("ANALYZE dirty_nodes")
+        assert order == ["insert", "analyze"]
+
+    def test_empty_set_no_analyze_cursor_fallback(self):
+        """Early return on an empty set also short-circuits the fallback
+        branch: no cursor is ever opened, no ANALYZE is ever issued."""
+        mgr = DirtyFlagManager()
+        db = _mock_db()
+        del db.executemany
+        scenario = uuid4()
+        run = uuid4()
+
+        mgr.flush_to_postgres(run, scenario, db)
+
+        db.cursor.assert_not_called()
+        db.execute.assert_not_called()
 
 
 # ===========================================================================

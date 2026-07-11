@@ -152,11 +152,23 @@ class DirtyFlagManager:
         executemany = getattr(db, "executemany", None)
         if callable(executemany):
             executemany(sql, rows)
-            return
+        else:
+            # psycopg3 connections do not expose executemany(), so fall back to a cursor.
+            with db.cursor() as cur:
+                cur.executemany(sql, rows)
 
-        # psycopg3 connections do not expose executemany(), so fall back to a cursor.
-        with db.cursor() as cur:
-            cur.executemany(sql, rows)
+        # Real constraint (2026-07 VM re-bench): this bulk INSERT is read
+        # right back by PROPAGATE_SQL/SHORTAGES_SQL (and the Rust writeback
+        # path once its session opens post-commit). Without fresh stats on
+        # dirty_nodes, the planner estimates rows=1 on the just-inserted
+        # batch, picks a Nested Loop Left Join, and re-runs the
+        # inflows/outflows GroupAggregate PER ROW instead of once --
+        # measured 200x slowdown (43 nodes/s vs the expected throughput) on
+        # a 2000-row dirty set. ANALYZE takes a ShareUpdateExclusive lock
+        # that self-conflicts across concurrent scenario calc runs (their
+        # ANALYZEs briefly serialize) but never blocks INSERT/SELECT/DELETE
+        # on this table -- an accepted, bounded cost against an O(N^2) plan.
+        db.execute("ANALYZE dirty_nodes")
 
     def load_from_postgres(
         self,
