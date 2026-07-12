@@ -1,0 +1,103 @@
+-- ============================================================
+-- Migration 077 — edges composite index: investigated, KEPT (ADR-040)
+-- ============================================================
+-- Chantier: ADR-040-fork-bulk-copy-fk-derogation.md (fork ~3x fix).
+--
+-- NUMBERING NOTE (why this file is 077 while 076 does not exist yet): the
+-- 076 slot is TAKEN by the sibling PR PURGE-1 (ADR-039), in fabrication at
+-- the same time as this one. The runner applies migrations in filename
+-- order and records each independently in schema_migrations, so a
+-- temporarily missing 076 has no effect — when PURGE-1 lands, its 076 is
+-- simply applied at the next boot even on databases where 077 is already
+-- recorded. Precedent: 074 (reserved by PARAM-1) was still unshipped when
+-- 075 landed.
+--
+-- ORIGINAL PLAN (per the profiling session that produced ADR-040): the
+-- edges table carries two indexes covering the same four columns --
+--
+--   idx_edges_composite_lookup  (migration 014) -- plain, ALL rows
+--       ON edges (from_node_id, to_node_id, edge_type, scenario_id)
+--   uq_edges_composite          (migration 015) -- UNIQUE, PARTIAL
+--       ON edges (from_node_id, to_node_id, edge_type, scenario_id)
+--       WHERE active = TRUE
+--
+-- -- and index-maintenance cost during the scenario-fork bulk edge copy
+-- (~2.2s of the profiled fork wall time, migration 077's original mandate)
+-- looked like a plausible place to shed one redundant index. The plan was
+-- to DROP idx_edges_composite_lookup, since uq_edges_composite already
+-- enforces the same uniqueness and is *smaller* (partial).
+--
+-- INVESTIGATION (this migration, before touching anything -- both required
+-- by the ADR-040 task spec):
+--
+-- (1) Read-side usage on the VM's bench databases (`pg_stat_user_indexes`,
+--     2026-07-12, ootils_bench_s / _m / _l -- NOT ootils_pilote_test, which
+--     is off-limits to ad-hoc probing):
+--
+--         db             | idx_edges_composite_lookup.idx_scan
+--         ---------------+--------------------------------------
+--         ootils_bench_s | 98
+--         ootils_bench_m | 1104
+--         ootils_bench_l | 432
+--
+--     idx_scan > 0 on every scale checked -- the planner IS choosing this
+--     index over its partial sibling for some live query shape. Per the
+--     ADR-040 task's own guard ("si idx_scan > 0 sur l'index candidat, ne
+--     le drop pas"), that alone stops the drop.
+--
+-- (2) Code-side root cause (`grep`, confirms why idx_scan > 0): every other
+--     read against this 4-column key filters `active = TRUE` and is
+--     already served by the partial index (migration 002's
+--     idx_edges_from_type/idx_edges_to_type/idx_edges_scenario_type cover
+--     the narrower lookups; uq_edges_composite covers the full 4-column key
+--     WHEN active=TRUE is implied). But
+--     `GraphStore.upsert_edge` (engine/kernel/graph/store.py) --
+--     the pegging path's hot upsert, called once per allocation edge from
+--     `engine/kernel/allocation/engine.py` -- does NOT filter on `active`
+--     in its existing-row lookup:
+--
+--         SELECT edge_id FROM edges
+--         WHERE from_node_id = %s AND to_node_id = %s
+--           AND edge_type = %s AND scenario_id = %s
+--
+--     A partial index whose predicate (`active = TRUE`) is not implied by
+--     the query's WHERE clause cannot be used as the sole access path by
+--     the planner (it might miss a matching active=FALSE row) -- so this
+--     specific, hot, allocation-path query depends on the FULL
+--     (non-partial) idx_edges_composite_lookup. Dropping it would silently
+--     regress `upsert_edge` to a sequential scan on every allocation run.
+--
+-- DECISION: idx_edges_composite_lookup is KEPT. This migration makes no
+-- schema change -- it is a deliberate no-op, recorded here (rather than
+-- only in the ADR) so a future reader hitting "migration 077" in
+-- schema_migrations finds the investigation, not a mystery gap. The
+-- ~2.2s of index-maintenance cost during the fork's bulk edge INSERT is
+-- accepted as-is; ADR-040's throughput win comes entirely from the
+-- session_replication_role derogation (FK trigger validation), not from
+-- shedding an index.
+--
+-- REOPENING THIS (if ever): would need BOTH (a) idx_scan staying at 0 on a
+-- representative window of production traffic -- not just a bench replay --
+-- AND (b) `upsert_edge`'s lookup rewritten to filter `active = TRUE` (or a
+-- second, explicit active-agnostic index added first). Until both hold,
+-- the DROP below stays commented out; do not uncomment without re-running
+-- this same two-part check.
+--
+--     -- DROP INDEX IF EXISTS idx_edges_composite_lookup;
+--     -- -- Recreate (reversibility record, per migration 014):
+--     -- CREATE INDEX IF NOT EXISTS idx_edges_composite_lookup
+--     --     ON edges (from_node_id, to_node_id, edge_type, scenario_id);
+--
+-- Idempotence: this file contains no DDL, so it is trivially a clean
+-- no-op on any re-run (the runner still records it in schema_migrations
+-- exactly once).
+--
+-- ref: ADR-040-fork-bulk-copy-fk-derogation.md.
+-- ============================================================
+
+BEGIN;
+
+-- Deliberate no-op -- see header. Nothing to apply.
+SELECT 1;
+
+COMMIT;

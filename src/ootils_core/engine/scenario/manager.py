@@ -94,9 +94,14 @@ class ScenarioManager:
     Forking strategy: explicit deep-copy via bulk INSERT…SELECT through two
     temp mapping tables (_series_map, _node_map). One scenario fork costs a
     constant ~10 SQL statements regardless of source row count — see
-    REVIEW-2026-05 R10 / docs/ADR-012-scenario-fork-bulk.md. True lazy CoW
-    (no copy at create time, scenario-chain read fallback at the GraphStore
-    layer) is a future ADR.
+    REVIEW-2026-05 R10 / docs/ADR-012-scenario-fork-bulk.md. The nodes/edges
+    bulk copy additionally disables row-level FK trigger validation for its
+    two INSERT...SELECT statements when the connection's role permits it
+    (`session_replication_role = 'replica'`, SET LOCAL-scoped), compensated
+    by set-based integrity checks run unconditionally right after — see
+    ADR-040-fork-bulk-copy-fk-derogation.md. True lazy CoW (no copy at
+    create time, scenario-chain read fallback at the GraphStore layer) is a
+    future ADR.
 
     All methods accept a psycopg3 Connection.  The caller owns commit/rollback
     — this class never calls conn.commit() directly.
@@ -309,72 +314,191 @@ class ScenarioManager:
                 "the bulk path requires both temp mapping tables to be present."
             )
 
-        # Bulk-insert nodes with series remapping via JOIN, plus a second
-        # self-join on _node_map to remap parent_node_id (see the column
-        # coverage note in the docstring above for the rationale on every
-        # post-002 column, including the two deliberately NOT copied
-        # verbatim: mrp_run_id and last_calc_seq).
-        result = db.execute(
-            """
-            INSERT INTO nodes (
-                node_id, node_type, scenario_id, item_id, location_id,
-                quantity, qty_uom,
-                time_grain, time_ref, time_span_start, time_span_end,
-                is_dirty, active,
-                projection_series_id, bucket_sequence,
-                opening_stock, inflows, outflows, closing_stock,
-                has_shortage, shortage_qty,
-                has_exact_date_inputs, has_week_inputs, has_month_inputs,
-                external_id, is_firm, planned_order_type, parent_node_id,
-                mrp_run_id, last_calc_seq, last_calc_run_id,
-                created_at, updated_at
+        # ------------------------------------------------------------------
+        # FK trigger derogation for the two bulk copies below (ADR-040).
+        #
+        # Profiling (bench_s, 2026-07-12, statement-by-statement) found 76%
+        # of total fork wall time is row-by-row FK trigger validation fired
+        # by these two INSERT...SELECT statements (nodes: 72K rows / 2.79s;
+        # edges: 100K rows / 5.70s), even though the copy is FK-valid BY
+        # CONSTRUCTION:
+        #   - nodes.item_id / nodes.location_id are copied verbatim (`n.item_id`,
+        #     `n.location_id`) from source rows that already passed FK
+        #     validation when first written; items/locations are
+        #     scenario-independent reference data, never forked, so the
+        #     referenced row still exists.
+        #   - nodes.scenario_id is the new scenario_id, whose row was inserted
+        #     as the very first statement of create_scenario, in this same
+        #     transaction.
+        #   - nodes.parent_node_id is resolved through the _node_map self-join
+        #     (`pm.new_id`), so by construction it is either NULL or a node_id
+        #     this very statement inserts (#459 column-coverage fix).
+        #   - edges.from_node_id / edges.to_node_id are resolved through the
+        #     _node_map JOIN, so by construction every value equals a node_id
+        #     the statement immediately above just inserted; edges.scenario_id
+        #     is the same new, already-valid scenario_id.
+        # Skipping trigger-driven re-validation of already-valid data is a
+        # performance derogation, not a correctness one. It is compensated
+        # fail-loudly by two set-based checks that run UNCONDITIONALLY right
+        # after the copy, regardless of which path (fast or fallback) ran:
+        # the pre-existing orphan-edge check (#158) and the node-FK check
+        # added below. Both cost ~100ms combined and would catch any future
+        # regression that broke the "copy of already-valid data" invariant
+        # above (e.g. a bug that let item/location rows be hard-deleted out
+        # from under an active scenario).
+        #
+        # `session_replication_role = 'replica'` disables ALL triggers for
+        # the session, not just FK ones — that is why it is SET LOCAL
+        # (transaction-scoped, reverts automatically at COMMIT/ROLLBACK) and
+        # additionally reset to 'origin' explicitly right after the two
+        # INSERTs, before any other work happens on this connection.
+        #
+        # Setting session_replication_role requires the connection's role to
+        # hold SET privilege on that GUC (PG15+: `GRANT SET ON PARAMETER
+        # session_replication_role TO <role>`; pre-PG15 it is superuser-only).
+        # A permission-denied SET aborts the enclosing Postgres transaction,
+        # so the attempt is wrapped in a SAVEPOINT: on InsufficientPrivilege
+        # we roll back to the savepoint (undoing only the failed SET, not the
+        # scenario row already inserted), log one warning, and fall through
+        # to the ordinary triggers-on copy. The fork must succeed on every
+        # deployment, granted or not — see _enable_replica_role_for_fork.
+        replica_role_active = _enable_replica_role_for_fork(db)
+        try:
+            # Bulk-insert nodes with series remapping via JOIN, plus a second
+            # self-join on _node_map to remap parent_node_id (see the column
+            # coverage note in the docstring above for the rationale on every
+            # post-002 column, including the two deliberately NOT copied
+            # verbatim: mrp_run_id and last_calc_seq).
+            result = db.execute(
+                """
+                INSERT INTO nodes (
+                    node_id, node_type, scenario_id, item_id, location_id,
+                    quantity, qty_uom,
+                    time_grain, time_ref, time_span_start, time_span_end,
+                    is_dirty, active,
+                    projection_series_id, bucket_sequence,
+                    opening_stock, inflows, outflows, closing_stock,
+                    has_shortage, shortage_qty,
+                    has_exact_date_inputs, has_week_inputs, has_month_inputs,
+                    external_id, is_firm, planned_order_type, parent_node_id,
+                    mrp_run_id, last_calc_seq, last_calc_run_id,
+                    created_at, updated_at
+                )
+                SELECT
+                    m.new_id, n.node_type, %s, n.item_id, n.location_id,
+                    n.quantity, n.qty_uom,
+                    n.time_grain, n.time_ref, n.time_span_start, n.time_span_end,
+                    FALSE, TRUE,
+                    COALESCE(sm.new_id, n.projection_series_id), n.bucket_sequence,
+                    n.opening_stock, n.inflows, n.outflows, n.closing_stock,
+                    n.has_shortage, n.shortage_qty,
+                    n.has_exact_date_inputs, n.has_week_inputs, n.has_month_inputs,
+                    n.external_id, n.is_firm, n.planned_order_type, pm.new_id,
+                    NULL, NULL, NULL,
+                    NOW(), NOW()
+                FROM nodes n
+                JOIN _node_map m ON m.old_id = n.node_id
+                LEFT JOIN _series_map sm ON sm.old_id = n.projection_series_id
+                LEFT JOIN _node_map pm ON pm.old_id = n.parent_node_id
+                WHERE n.scenario_id = %s AND n.active = TRUE
+                """,
+                (target_scenario_id, source_scenario_id),
             )
-            SELECT
-                m.new_id, n.node_type, %s, n.item_id, n.location_id,
-                n.quantity, n.qty_uom,
-                n.time_grain, n.time_ref, n.time_span_start, n.time_span_end,
-                FALSE, TRUE,
-                COALESCE(sm.new_id, n.projection_series_id), n.bucket_sequence,
-                n.opening_stock, n.inflows, n.outflows, n.closing_stock,
-                n.has_shortage, n.shortage_qty,
-                n.has_exact_date_inputs, n.has_week_inputs, n.has_month_inputs,
-                n.external_id, n.is_firm, n.planned_order_type, pm.new_id,
-                NULL, NULL, NULL,
-                NOW(), NOW()
-            FROM nodes n
-            JOIN _node_map m ON m.old_id = n.node_id
-            LEFT JOIN _series_map sm ON sm.old_id = n.projection_series_id
-            LEFT JOIN _node_map pm ON pm.old_id = n.parent_node_id
-            WHERE n.scenario_id = %s AND n.active = TRUE
-            """,
-            (target_scenario_id, source_scenario_id),
-        )
-        count = result.rowcount or 0
+            count = result.rowcount or 0
 
-        # Bulk-insert edges with both endpoints remapped via JOIN.
-        # Edges whose endpoints are missing from _node_map are dropped here —
-        # the orphan check below would fail for them anyway.
-        edge_result = db.execute(
-            """
-            INSERT INTO edges (
-                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
-                priority, weight_ratio, effective_start, effective_end,
-                active, created_at
+            # Bulk-insert edges with both endpoints remapped via JOIN.
+            # Edges whose endpoints are missing from _node_map are dropped here —
+            # the orphan check below would fail for them anyway.
+            edge_result = db.execute(
+                """
+                INSERT INTO edges (
+                    edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                    priority, weight_ratio, effective_start, effective_end,
+                    active, created_at
+                )
+                SELECT
+                    gen_random_uuid(), e.edge_type, mf.new_id, mt.new_id, %s,
+                    e.priority, e.weight_ratio, e.effective_start, e.effective_end,
+                    TRUE, NOW()
+                FROM edges e
+                JOIN _node_map mf ON mf.old_id = e.from_node_id
+                JOIN _node_map mt ON mt.old_id = e.to_node_id
+                WHERE e.scenario_id = %s AND e.active = TRUE
+                """,
+                (target_scenario_id, source_scenario_id),
             )
-            SELECT
-                gen_random_uuid(), e.edge_type, mf.new_id, mt.new_id, %s,
-                e.priority, e.weight_ratio, e.effective_start, e.effective_end,
-                TRUE, NOW()
-            FROM edges e
-            JOIN _node_map mf ON mf.old_id = e.from_node_id
-            JOIN _node_map mt ON mt.old_id = e.to_node_id
-            WHERE e.scenario_id = %s AND e.active = TRUE
-            """,
-            (target_scenario_id, source_scenario_id),
-        )
-        edge_count = edge_result.rowcount or 0
+            edge_count = edge_result.rowcount or 0
+        finally:
+            if replica_role_active:
+                try:
+                    _restore_origin_role(db)
+                except psycopg.errors.InFailedSqlTransaction:
+                    # One of the two INSERTs above raised and left the
+                    # transaction aborted (SET LOCAL cannot run on an
+                    # aborted transaction). Not a problem: session_
+                    # replication_role is transaction-scoped and reverts to
+                    # 'origin' automatically once the caller rolls back —
+                    # and swallowing this here (rather than letting it
+                    # propagate) preserves the ORIGINAL insert exception as
+                    # the one the caller sees, instead of masking it with
+                    # this unrelated follow-up error.
+                    pass
 
         _ = series_map_available  # silence unused warning; the check above is the gate
+
+        # Post-copy integrity check (compensatory, ADR-040): verify every
+        # copied node's FK-carrying columns still resolve. Runs
+        # unconditionally — whether or not the fast path above engaged — so
+        # correctness never depends on which path a given deployment took.
+        # Covered columns:
+        #   - item_id / location_id: plain existence in the reference tables.
+        #   - projection_series_id: existence in the NEW scenario's series —
+        #     deliberately STRICTER than the FK (which only checks existence
+        #     anywhere): the COALESCE(sm.new_id, n.projection_series_id)
+        #     fallback in the node INSERT above would otherwise let a node
+        #     keep a SOURCE-scenario series reference (FK-valid, but a
+        #     cross-scenario leak the fork must never produce).
+        #   - scenario_id is deliberately NOT checked: the scenarios row for
+        #     target_scenario_id was inserted as the very first statement of
+        #     create_scenario in this same transaction, so the reference is
+        #     valid by construction — checking it would be a tautology.
+        node_fk_row = db.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM nodes n
+            WHERE n.scenario_id = %s
+              AND (
+                (n.item_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM items i WHERE i.item_id = n.item_id
+                ))
+                OR (n.location_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM locations l WHERE l.location_id = n.location_id
+                ))
+                OR (n.projection_series_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM projection_series ps
+                    WHERE ps.series_id = n.projection_series_id
+                      AND ps.scenario_id = %s
+                ))
+              )
+            """,
+            (target_scenario_id, target_scenario_id),
+        ).fetchone()
+        node_fk_violation_count = int(node_fk_row["cnt"]) if node_fk_row else 0
+        if node_fk_violation_count > 0:
+            logger.error(
+                "scenario.copy_nodes: %d node(s) with a dangling item_id/"
+                "location_id/projection_series_id reference detected in new "
+                "scenario %s — FK integrity is broken; scenario creation "
+                "should be rolled back",
+                node_fk_violation_count,
+                target_scenario_id,
+            )
+            raise RuntimeError(
+                f"Scenario copy produced {node_fk_violation_count} node(s) with a "
+                f"dangling item_id/location_id/projection_series_id reference in "
+                f"{target_scenario_id}. "
+                "This indicates a data integrity issue in the source scenario. "
+                "The transaction has been aborted."
+            )
 
         # Post-copy integrity check: verify no active edges in the new scenario
         # reference node_ids outside the copied set (fix for issue #158).
@@ -955,6 +1079,60 @@ class ScenarioManager:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _enable_replica_role_for_fork(db: DictRowConnection) -> bool:
+    """
+    Attempt to disable trigger firing (`session_replication_role = 'replica'`,
+    SET LOCAL) for the duration of the two bulk node/edge INSERT...SELECT
+    statements in `_copy_nodes`. See ADR-040 and the derogation comment at
+    the `_copy_nodes` call site for why this is safe there and nowhere else.
+
+    Requires the connection's role to hold SET privilege on the
+    `session_replication_role` GUC (PG15+: `GRANT SET ON PARAMETER
+    session_replication_role TO <role>`; earlier versions restrict it to
+    superuser). A permission-denied SET aborts the enclosing Postgres
+    transaction, so the attempt is wrapped in a SAVEPOINT: on failure we
+    roll back to the savepoint (undoing only the failed SET — the scenario
+    row already inserted earlier in create_scenario's transaction is
+    untouched), release it (both branches leave no savepoint behind), log
+    ONE warning, and the caller falls through to the ordinary triggers-on
+    copy. Only `InsufficientPrivilege` is treated as the expected "no
+    grant" case; any other error propagates (fail-loudly — this is not a
+    blanket except).
+
+    Returns True if replica mode is now active for this transaction (the
+    caller MUST call `_restore_origin_role` before any further work), False
+    if the fallback (triggers-on) path must be used.
+    """
+    db.execute("SAVEPOINT scenario_fork_replica_role")
+    try:
+        db.execute("SET LOCAL session_replication_role = 'replica'")
+    except psycopg.errors.InsufficientPrivilege:
+        db.execute("ROLLBACK TO SAVEPOINT scenario_fork_replica_role")
+        db.execute("RELEASE SAVEPOINT scenario_fork_replica_role")
+        logger.warning(
+            "scenario.fork_fast_path_denied role lacks SET privilege on "
+            "session_replication_role (PG15+: GRANT SET ON PARAMETER "
+            "session_replication_role TO <role>) — falling back to the "
+            "triggers-on copy path for this fork"
+        )
+        return False
+    else:
+        db.execute("RELEASE SAVEPOINT scenario_fork_replica_role")
+        return True
+
+
+def _restore_origin_role(db: DictRowConnection) -> None:
+    """
+    Re-enable trigger firing before any further work happens on the
+    connection. `SET LOCAL session_replication_role = 'replica'` already
+    reverts automatically at COMMIT/ROLLBACK, but we reset explicitly right
+    after the two bulk INSERTs so the window during which triggers are off
+    is as narrow as possible — see ADR-040.
+    """
+    db.execute("SET LOCAL session_replication_role = 'origin'")
+
 
 # Allowed field names for override and dynamic UPDATE (whitelist)
 _ALLOWED_FIELDS: frozenset[str] = frozenset(
