@@ -615,3 +615,11 @@ Using Redis as a fast dirty-flag store, SQLite for persistent data. Adds an oper
 - [Edge Dictionary — V1](edge-dictionary.md)
 - [SQLite Limits and Performance](https://www.sqlite.org/limits.html)
 - [SQLite WAL Mode](https://www.sqlite.org/wal.html)
+
+---
+
+## Amendment — 2026-07-12 (ADR-039, PURGE-1)
+
+Decision 4, point 4 above ("Make `events` insert-only from day one") gets its one sanctioned exception. [ADR-039](ADR-039-scenario-archive-cleanup.md) (PURGE-1, migration 076) deletes an archived, TTL-elapsed, purged scenario's own `events` rows as part of its FK-safe whitelist sweep (`src/ootils_core/engine/maintenance/purge.py`) — those rows lose their reason to exist once the scenario itself is purged (only its `scenarios` row survives, as a tombstone with `purged_at` stamped; the row is never hard-deleted, per ADR-011). The ONE event row that survives its own scenario's purge is the `purge_executed` confirmation, emitted AFTER the events-table delete step, so it is never wiped by its own sweep.
+
+This carve-out is scoped exclusively to PURGE-1's fork-purge lifecycle. It does **not** reopen insert-only semantics for the baseline's events or for any live (non-purged) scenario's events, which remain exactly the permanent, append-only audit log this ADR intended — and which CLAUDE.md's "insert-only applies to the payload, not the bookkeeping flag" note still governs unchanged.

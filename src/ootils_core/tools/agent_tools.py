@@ -439,7 +439,11 @@ def archive_scenario(db, scenario_id: str) -> None:
     connection, this function COMMITS.
     """
     db.execute(
-        "UPDATE scenarios SET status = 'archived', updated_at = now() WHERE scenario_id = %s",
+        """
+        UPDATE scenarios
+        SET status = 'archived', archived_at = now(), updated_at = now()
+        WHERE scenario_id = %s
+        """,
         (scenario_id,),
     )
     db.commit()

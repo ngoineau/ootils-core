@@ -49,13 +49,24 @@ sync with the migration 071 header block):
       field_changed   = 'outcome_evaluated' (discriminant)
       new_quantity    = count of recommendations classified in the run
       new_text        = evaluation run ref (UUID as text)
+  purge_executed:
+      field_changed   = the purge kind ('fork_purge' | 'shortage_retention') —
+                        the discriminant (migration 076, PURGE-1)
+      old_text        = executed_by (who/what triggered the run)
+      new_text        = maintenance_purge_runs.run_id (UUID as text)
+      new_quantity    = rows_deleted_total for this scenario's run
 
 ``scenario_id`` (NOT NULL, migration 002) scopes the event to the fork/baseline.
 snapshot_captured / outcome_evaluated are baseline-only by nature (ADR-030) but
-the column contract is identical.
+the column contract is identical. purge_executed is emitted once per scenario
+touched by a purge run (engine/maintenance/purge.py) — for fork_purge that is
+the purged scenario itself; for shortage_retention it is each scenario whose
+resolved shortages were swept, so a single retention run can emit several
+events, one per affected scenario (still RUN granularity — one per scenario's
+own delete, never per shortage row).
 
 Keep FLEET_EVENT_TYPES in sync with the events.event_type CHECK constraint
-(migration 071) and with VALID_EVENT_TYPES in api/routers/events.py.
+(migrations 071 + 076) and with VALID_EVENT_TYPES in api/routers/events.py.
 """
 from __future__ import annotations
 
@@ -77,6 +88,7 @@ FLEET_EVENT_TYPES: frozenset[str] = frozenset(
         "calc_run_finished",
         "snapshot_captured",
         "outcome_evaluated",
+        "purge_executed",
     }
 )
 

@@ -52,3 +52,9 @@ Il n'y a **pas** un moteur gagnant et un moteur perdant : chacun est canonique s
 - `src/ootils_core/engine/orchestration/propagator_sql.py:SHORTAGES_SQL` — détection SQL + valorisation #342.
 - `scripts/agent_shortage_watcher.py` — le consommateur read-only type de la vérité B.
 - `tests/integration/test_shortage_truth_consistency_integration.py` — le garde-fou.
+
+---
+
+## Amendement — 2026-07-12 (ADR-039, PURGE-1)
+
+Un troisième acteur touche désormais `shortages`, mais borné à un rôle de garbage-collection sur de l'historique déjà mort, jamais à la vérité de pénurie elle-même. [ADR-039](ADR-039-scenario-archive-cleanup.md) (PURGE-1, migration 076) introduit `apply_shortage_retention` (`src/ootils_core/engine/maintenance/purge.py`), qui supprime les lignes `status='resolved'` plus vieilles qu'une fenêtre de rétention (défaut 30 jours) ET hors du dernier `calc_run` `completed` du scénario. Ce sweep ne crée, ne valorise et ne résout **jamais** une pénurie — `status='active'` est codé en dur comme non-éligible, jamais un paramètre — et ne touche jamais la vue la plus récente et auditable d'un scénario (son dernier `calc_run` complété est explicitement protégé). `ShortageDetector` reste l'écrivain **exclusif** de la SÉMANTIQUE de pénurie : création, valorisation `$` (§4 ci-dessus), chaîne causale ADR-004, cycle de vie `resolve_stale`. PURGE-1 ne fait que borner la RÉTENTION de l'historique déjà résolu — une opération de maintenance déléguée, jamais un second écrivain de vérité. Voir ADR-039 pour le détail complet, y compris la garde CI qui garantit que `shortages` reste dans la whitelist FK-safe de purge de fork (pénuries d'un scénario ARCHIVÉ purgé) indépendamment de ce sweep de rétention (qui, lui, tourne sur tout scénario, vivant ou archivé).

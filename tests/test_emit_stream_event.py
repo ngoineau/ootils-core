@@ -223,17 +223,28 @@ def test_fleet_types_are_a_subset_of_router_valid_types() -> None:
     )
 
 
-def test_fleet_types_present_in_migration_071_check() -> None:
-    """Static cross-check against the migration file itself (DB-free): every
-    fleet type must appear verbatim in the 071 CHECK constraint, so the
-    Python emitter and the SQL CHECK cannot drift without a red unit test."""
+def test_fleet_types_present_in_migration_check() -> None:
+    """Static cross-check against the migration files themselves (DB-free):
+    every fleet type must appear verbatim in ONE of the migrations that widens
+    events.event_type's CHECK constraint for a fleet-emission type, so the
+    Python emitter and the SQL CHECK cannot drift without a red unit test.
+
+    Migration 071 (#401 AN-1) introduced the first 5 fleet types; migration
+    076 (PURGE-1) added the 6th (purge_executed) on top. A type is expected
+    to appear in EXACTLY ONE of these (the migration that introduced it),
+    but this check only needs "present in at least one" — the CHECK
+    constraint itself is always the FULL cumulative list (each widening
+    migration reproduces every earlier type verbatim), so a type missing
+    from every widening migration this test scans is the real drift signal.
+    """
     from pathlib import Path
 
     from ootils_core.engine.events.emit import FLEET_EVENT_TYPES
 
-    mig = Path(__file__).parent.parent / (
-        "src/ootils_core/db/migrations/071_events_fleet_types.sql"
+    migrations_dir = Path(__file__).parent.parent / "src/ootils_core/db/migrations"
+    sql = "\n".join(
+        (migrations_dir / name).read_text(encoding="utf-8")
+        for name in ("071_events_fleet_types.sql", "076_maintenance_purge.sql")
     )
-    sql = mig.read_text(encoding="utf-8")
     missing = [t for t in FLEET_EVENT_TYPES if f"'{t}'" not in sql]
-    assert not missing, f"types absent from migration 071 CHECK: {missing}"
+    assert not missing, f"types absent from migrations 071/076 CHECK: {missing}"

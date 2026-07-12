@@ -321,7 +321,11 @@ def delete_scenario(
     if row["is_baseline"]:
         raise HTTPException(status_code=400, detail="Cannot delete a baseline scenario")
     db.execute(
-        "UPDATE scenarios SET status = 'archived', updated_at = now() WHERE scenario_id = %s",
+        """
+        UPDATE scenarios
+        SET status = 'archived', archived_at = now(), updated_at = now()
+        WHERE scenario_id = %s
+        """,
         (scenario_id,),
     )
     # Best-effort engine-side cleanup if the engine is running and
