@@ -225,10 +225,53 @@ class ScenarioManager:
         Bulk path: ~5 SQL statements regardless of node count.
         - 2 statements build temp mapping tables (_node_map, optionally _series_map).
         - 1 INSERT…SELECT copies nodes, remapping series via JOIN on the
-          series mapping (which the caller materialised in _copy_projection_series).
+          series mapping (which the caller materialised in _copy_projection_series)
+          and remapping parent_node_id via a second self-join on _node_map.
         - 1 INSERT…SELECT copies edges with both endpoints remapped via JOIN.
         - 1 SELECT runs the post-copy orphan-edge integrity check.
         Was: 1 INSERT per row — see REVIEW-2026-05 R10.
+
+        Column coverage (every `nodes` column added after the migration-002
+        baseline schema must be listed here explicitly — silent omission is
+        a data-loss bug, see the fork-loses-is_firm incident):
+        - external_id (009), planned_order_type (024), is_firm (061): plain
+          identity/state attributes of the node, copied verbatim like
+          item_id/location_id — they describe *what the node is*, not
+          *which scenario computed it*.
+        - parent_node_id (024): a self-referencing FK (PlannedSupply
+          RELEASE → its RECEIPT). Remapped through a second join on
+          _node_map so the copy points at the copy's own sibling, never
+          at a cross-scenario node_id. LEFT JOIN (no COALESCE fallback):
+          if the parent wasn't copied, NULL is safer than a dangling
+          cross-scenario reference.
+        - mrp_run_id (024): deliberately reset to NULL, not copied. Two
+          reasons: (1) the copy was not produced by that MRP run — no
+          run has executed in the new scenario yet, so carrying the old
+          run_id would misrepresent provenance; (2)
+          `GraphIntegration.cleanup_previous_run(run_id=...)`
+          (engine/mrp/graph_integration.py) purges `WHERE mrp_run_id = %s`
+          with NO scenario_id filter — currently safe only because a
+          mrp_run_id is 1:1 with one scenario's engine run. Copying it
+          verbatim would make that value collide across scenarios and
+          turn a dormant purge path into a cross-scenario data-loss risk
+          the moment it's wired to an endpoint.
+        - last_calc_seq (037): reset to NULL for the same reason as
+          mrp_run_id — it is a write-behind anti-replay guard scoped to
+          *this exact node_id's* rust-svc write history (Architecture B).
+          The copy is a brand-new node_id that rust-svc has never
+          written; NULL means "never written by rust-svc", which is
+          the truthful state. Carrying over a stale seq would let a
+          legitimate first write to the new node be wrongly rejected
+          as an older replay.
+        - last_calc_run_id (present since the 002 baseline, but was
+          already silently omitted from this INSERT before this fix —
+          same class of bug as is_firm, just older): reset to NULL, made
+          explicit here rather than left as an accidental omission. Same
+          provenance argument as mrp_run_id — the value is a real FK to
+          calc_runs(calc_run_id), and that calc_run ran against the
+          SOURCE scenario_id, not the new fork's. No calc_run has
+          computed anything in the new scenario yet (the fork copy
+          itself is not a calc_run), so NULL is the truthful state.
         """
         # Build node mapping in a temp table so the edge JOIN can resolve
         # both endpoints in a single INSERT…SELECT.
@@ -266,7 +309,11 @@ class ScenarioManager:
                 "the bulk path requires both temp mapping tables to be present."
             )
 
-        # Bulk-insert nodes with series remapping via JOIN.
+        # Bulk-insert nodes with series remapping via JOIN, plus a second
+        # self-join on _node_map to remap parent_node_id (see the column
+        # coverage note in the docstring above for the rationale on every
+        # post-002 column, including the two deliberately NOT copied
+        # verbatim: mrp_run_id and last_calc_seq).
         result = db.execute(
             """
             INSERT INTO nodes (
@@ -278,6 +325,8 @@ class ScenarioManager:
                 opening_stock, inflows, outflows, closing_stock,
                 has_shortage, shortage_qty,
                 has_exact_date_inputs, has_week_inputs, has_month_inputs,
+                external_id, is_firm, planned_order_type, parent_node_id,
+                mrp_run_id, last_calc_seq, last_calc_run_id,
                 created_at, updated_at
             )
             SELECT
@@ -289,10 +338,13 @@ class ScenarioManager:
                 n.opening_stock, n.inflows, n.outflows, n.closing_stock,
                 n.has_shortage, n.shortage_qty,
                 n.has_exact_date_inputs, n.has_week_inputs, n.has_month_inputs,
+                n.external_id, n.is_firm, n.planned_order_type, pm.new_id,
+                NULL, NULL, NULL,
                 NOW(), NOW()
             FROM nodes n
             JOIN _node_map m ON m.old_id = n.node_id
             LEFT JOIN _series_map sm ON sm.old_id = n.projection_series_id
+            LEFT JOIN _node_map pm ON pm.old_id = n.parent_node_id
             WHERE n.scenario_id = %s AND n.active = TRUE
             """,
             (target_scenario_id, source_scenario_id),
