@@ -581,8 +581,10 @@ def _apply_one(
         RETURNING run_id
         """,
         (scenario_id, ttl_days, _to_jsonb(per_table_counts), rows_deleted_total, executed_by),
-    ).fetchone()["run_id"]
-    run_id = _coerce_uuid(run_id)
+    ).fetchone()
+    if run_id is None:  # INSERT..RETURNING yields exactly one row — fail loudly
+        raise RuntimeError("maintenance_purge_runs INSERT returned no row")
+    run_id = _coerce_uuid(run_id["run_id"])
 
     # Emitted AFTER the events-table delete above (whitelist position 9), so
     # this confirmation event survives its own scenario's purge pass — the
@@ -782,8 +784,10 @@ def _apply_shortage_retention_one(
         RETURNING run_id
         """,
         (scenario_id, retention_days, _to_jsonb(per_table_counts), deleted, executed_by),
-    ).fetchone()["run_id"]
-    run_id = _coerce_uuid(run_id)
+    ).fetchone()
+    if run_id is None:  # INSERT..RETURNING yields exactly one row — fail loudly
+        raise RuntimeError("maintenance_purge_runs INSERT returned no row")
+    run_id = _coerce_uuid(run_id["run_id"])
 
     emit_stream_event(
         conn,
