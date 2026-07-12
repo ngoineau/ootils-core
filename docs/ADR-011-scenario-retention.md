@@ -69,3 +69,9 @@ The hybrid model (option C) is not rejected; it is deferred until the cleanup st
 - Bug fixed: `src/ootils_core/db/migrations/021_mrp_lot_sizing_params.sql:21`
 - Test: `tests/integration/test_scenario_fk_retention.py`
 - Review source: `docs/REVIEW-2026-05.md`
+
+---
+
+## Amendment — 2026-07-12 (ADR-039, PURGE-1)
+
+The "Reste à faire" follow-up named above — `ADR-NNN-scenario-archive-cleanup.md` — is closed by [ADR-039](ADR-039-scenario-archive-cleanup.md) (chantier **PURGE-1**). ADR-039 answers the three questions this ADR left open: (1) yes, an archived scenario's child data is reclaimed once past a TTL (default 7 days, pilot-tunable) — but the `scenarios` row itself is still never hard-deleted, exactly as decided here; (2) "regenerable" is defined table-by-table via a curated, CI-guarded whitelist (`PURGE_WHITELIST` in `engine/maintenance/purge.py`) — the governed-recommendation audit family (`recommendations`, `agent_runs`, `scenario_promotions`, etc.) is explicitly exempted, never purged; (3) V1 ships a CLI (`scripts/purge_maintenance.py`, dry-run by default) plus a read-only HTTP preview (`GET /v1/maintenance/purge-preview`) — no HTTP apply endpoint, by deliberate architect decision (a destructive multi-table delete stays an operator-run CLI job). Option A (`ON DELETE RESTRICT` everywhere) stands unchanged: PURGE-1 purges *payload*, never the `scenarios` row, so every FK decision made in this ADR remains exactly as accepted here. The Option C hybrid model this ADR deferred is still not adopted — PURGE-1 is a bounded, explicit application-level sweep, not a schema-level `CASCADE` change.

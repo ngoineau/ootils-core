@@ -874,11 +874,12 @@ class ScenarioManager:
         db.execute(
             """
             UPDATE scenarios
-            SET status     = 'archived',
-                updated_at = %s
+            SET status      = 'archived',
+                archived_at = %s,
+                updated_at  = %s
             WHERE scenario_id = %s
             """,
-            (now, scenario_id),
+            (now, now, scenario_id),
         )
 
         # 4. Create scenario_merge event (baseline scope)

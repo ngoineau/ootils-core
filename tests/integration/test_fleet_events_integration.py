@@ -922,4 +922,5 @@ def test_fleet_event_types_do_not_drift_from_router_valid_set():
     assert FLEET_EVENT_TYPES == {
         "recommendation_created", "shortage_detected", "calc_run_finished",
         "snapshot_captured", "outcome_evaluated",
+        "purge_executed",  # PURGE-1 (ADR-039, migration 076)
     }

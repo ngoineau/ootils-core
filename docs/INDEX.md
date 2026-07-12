@@ -25,7 +25,7 @@ The current-state ADRs to read first:
 - [`ADR-001-graph-model.md`](ADR-001-graph-model.md) — The graph model: nodes, edges, scenarios.
 - [`ADR-003-incremental-propagation.md`](ADR-003-incremental-propagation.md) — Deterministic incremental propagation.
 - [`ADR-004-explainability.md`](ADR-004-explainability.md) — Causal step traces for shortage roots.
-- [`ADR-011-scenario-retention.md`](ADR-011-scenario-retention.md) — FK retention policy; soft-delete only.
+- [`ADR-011-scenario-retention.md`](ADR-011-scenario-retention.md) — FK retention policy; soft-delete only. Its "Reste à faire" follow-up (archived-scenario cleanup) is closed by [ADR-039](ADR-039-scenario-archive-cleanup.md).
 - [`ADR-012-scenario-fork-bulk.md`](ADR-012-scenario-fork-bulk.md) — Bulk `INSERT…SELECT` scenario fork (27.5× faster). Lazy CoW deferred to ADR-013.
 
 Elastic time (sprint of iteration, ADR-002 is the final version to read):
@@ -85,6 +85,7 @@ Every ADR under `docs/`, numbered. The curated "read first" lists above are the 
 - [`ADR-035-buy-program-segmentation.md`](ADR-035-buy-program-segmentation.md) — Buy-program segmentation (DEM-2 PR1): read-only, zero-migration ΔFVA proof — new dense per-program reader, single-source `buy_program_bucket()` taxonomy (honest `UNKNOWN` bucket), reuses `compute_fva` unchanged.
 - [`ADR-036-human-window.md`](ADR-036-human-window.md) — Human window (EXP-1 PR1): server-rendered `GET /ui` shell + `GET /v1/whoami`, read-only client over the existing API, no cookie/session, kill switch default OFF.
 - [`ADR-037-daily-run-and-governed-ingest.md`](ADR-037-daily-run-and-governed-ingest.md) — Daily run & governed ingest (INT-1 PR1): versioned `feed_contracts` registry (migration 073) + pilot-editable YAML under `config/feed-contracts/`; supersedes [ADR-013](ADR-013-external-interfaces.md) D4 for the daily-run case (governed option (a): auto-approve iff DQ green AND all guards green, red guard on a blocking feed escalates via the L3 webhook). PR1 is registry-only — no runtime read yet (daily_runs + guard evaluation land in PR2/PR3, REST surface in PR4).
+- [`ADR-039-scenario-archive-cleanup.md`](ADR-039-scenario-archive-cleanup.md) — Fork purge + shortage retention (PURGE-1, migration 076): closes the ADR-011 follow-up — TTL-driven deletion of an archived scenario's child rows (never the `scenarios` row, tombstoned via `purged_at`) through a CI-guarded FK-safe whitelist, plus a separate bounded GC of long-resolved `shortages`. Dry-run-by-default CLI + read-only `GET /v1/maintenance/purge-preview`; no HTTP apply endpoint in V1. Amends [ADR-005](ADR-005-storage-layer.md) (events insert-only carve-out) and [ADR-021](ADR-021-shortage-truth.md) (delegated shortage-retention GC).
 
 ## Feature specs (SPEC-*)
 
