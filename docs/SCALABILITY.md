@@ -194,6 +194,15 @@ Two structural lessons, both now measured rather than estimated:
   (475 nps vs ~4 000 nps) — HTTP stack + remote-LAN DB round-trips dominate.
   The 7.7-minute synchronous HTTP request is issue #193 (async calc workers)
   demonstrating itself.
+  **⚠ Correction (2026-07-11, #455):** this "~8× is all HTTP/LAN" reading was
+  partly wrong. The 2026-07 VM re-bench uncovered a latent O(N²) plan
+  regression in the SQL engine — stale `dirty_nodes` stats made the planner
+  pick a per-row nested loop (43 nps vs the expected ~8 400). The pilot's
+  464 s run went through that pathology, so an unknown (likely large) share
+  of it was the stats bug, **not** HTTP/LAN. Fixed by `ANALYZE dirty_nodes`
+  in `flush_to_postgres` (#455). The SCALE-1 API-path re-profiling must
+  re-decompose the 464 s **after** this fix ships to the pilot before
+  attributing the remainder to the transport layer.
 - **The deep-copy fork is O(N) in STORAGE as well as time**: each pilot fork
   duplicates the full node/edge set (211 K → the fork carried 431 K rows after
   bootstrap). Five concurrent forks of a bootstrapped pilot base would add

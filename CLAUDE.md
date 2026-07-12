@@ -123,6 +123,8 @@ HTTP request → Bearer-token auth (`api/auth.py`) → router in `api/routers/<d
 ### Propagation model (ADR-003)
 Event-driven, incremental, deterministic. An event marks a subgraph dirty; compute happens in topo order; unchanged nodes stop the cascade (they do not propagate further). Every change is attributable. Determinism is a hard constraint — **no randomness in the core engine**.
 
+**Planner-stats invariant (#455):** any bulk INSERT into a table the planner reads back *within the same request* must be followed by an explicit `ANALYZE`. Canonical site: `DirtyFlagManager.flush_to_postgres` (`engine/kernel/graph/dirty.py`) runs `ANALYZE dirty_nodes` after the batch INSERT — without it, `PROPAGATE_SQL`/`SHORTAGES_SQL` see stale `rows=1` stats, the planner picks a per-row nested loop, and full propagation collapses to O(N²) (measured 272× slower: 1 099 s vs 4 s on 47 520 PI). All propagation flavors (sql/python/rust in-process) go through this site; rust-svc computes in RAM and is out of scope. Perf note (`docs/PERF-BASELINE.md` § re-bench 2026-07-11): once stats are fresh, **SQL and in-process Rust are within ±4%** end-to-end — the "Rust wins at every scale" framing was an artifact of the stale-stats bug; Rust's real leverage is the in-RAM rust-svc architecture (SCALE-2), not per-node compute.
+
 ## Conventions that aren't obvious from the code
 
 - **Tests run against real Postgres, no mocks.** Point `DATABASE_URL` at a throwaway DB. Pure-Python helper functions (and Pydantic-validation 422 boundary tests) live in `tests/test_*.py` and don't need a DB. DB-touching tests live in `tests/integration/test_*_integration.py` and use the `conn` / `seeded_db` fixtures.

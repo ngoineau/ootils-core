@@ -333,4 +333,73 @@ DATABASE_URL="postgresql://ootils:ootils@<host>:5432/ootils_bench_m" \
     python scripts/bench_incremental.py --n 20 --warmup 5 --engine sql
 ```
 
+---
+
+## Re-bench 2026-07-11 — VM engine-direct, moteur SQL assaini (#455) + saveur `rust` (PyO3 0.2.0)
+
+Premier re-bench après (a) l'industrialisation de la wheel PyO3 (#454, wheel
+`ootils_kernel` 0.2.0 buildée via `docker build --build-arg WITH_RUST=1` sur la
+VM) et (b) le fix de la régression O(N²) du moteur SQL (#455, `ANALYZE
+dirty_nodes` dans `flush_to_postgres`). Bases `ootils_bench_{s,m,l}` sur la VM
+pilote (`docker-compose.override.yml` : 8 GB shared_buffers, 4 workers,
+`shm_size=1g`), débit comparé sur `dirty_node_count` (non biaisé entre moteurs,
+cf. `CalcRun` docstring). Harness `scripts/bench_engine_comparison.py`.
+
+### Propagation complète (temps du graphe entier)
+
+| Profil | PI actifs | Python | **SQL avant #455 (bug stats)** | **SQL après #455** | Rust (PyO3) |
+|---|---|---|---|---|---|
+| S | 47 520 | 16,6 s (2 861 nps) | **1 099 s (43 nps)** | **4,04 s (11 768 nps)** | 3,95 s (12 035 nps) |
+| M | 111 240 | 30,9 s (3 602 nps) | pathologique | 6,48 s (17 159 nps) | 6,23 s (17 845 nps) |
+| L | 226 800 | 67,5 s (3 362 nps) | pathologique | 16,3 s (13 909 nps) | 16,8 s (13 473 nps) |
+
+**Le vrai gain = le fix #455 : profil S de 1 099 s → 4,04 s (272×)** — le moteur
+par défaut retrouve (et dépasse légèrement, grâce au tuning PG du 09/07) son
+niveau sain de mai (5,6 s sur S). La régression était non-déterministe : le
+`bench_engine_comparison` de mai était rapide par accident de fraîcheur de
+stats.
+
+**SQL ≈ Rust à ±4 % end-to-end** sur les 3 profils (SQL gagne même sur L :
+16,3 vs 16,8 s). L'ancien claim « Rust gagne partout / full-L 9,5 s vs SQL
+36,8 s » (ex-commentaire `propagator_rust.py`) était mesuré contre le SQL
+**cassé** (stats périmées) ; une fois les stats fraîches, l'avantage in-process
+s'évapore, parce que le wall de propagation est dominé par l'orchestration
+Python/SQL autour du kernel (persistance shortages, calc_run, resolve_stale),
+pas par le compute par nœud — cohérent avec le profiling Tier-3 (« compute =
+7,5 % du wall »). Le kernel Rust pur reste rapide (0,80 s pour 111 k PIs en
+direct, cf. parité ci-dessous), mais ce n'est que ~7,5 % du travail total.
+
+### Incrémental (latence événement réel, `bench_incremental.py --n 30`)
+
+| Profil | Moteur | p50 | p95 | débit |
+|---|---|---|---|---|
+| M (111 k) | SQL | ~38 ms | ~80 ms | 971 nps |
+| M (111 k) | Rust | ~48 ms | **341 ms** | 671 nps |
+| L (227 k) | SQL | ~66 ms | ~100 ms | 583 nps |
+| L (227 k) | Rust | ~69 ms | ~103 ms | 586 nps |
+
+Sur le chemin chaud incrémental (ce que font réellement les agents), **SQL ≥
+Rust** : à parité sur L, et SQL meilleur sur M avec une queue p95 bien plus
+basse (le Rust in-process paie une connexion PG dédiée + handshake par appel).
+
+### Parité 3-way (`parity_3way.py`, profil M)
+
+`0 mismatch` SQL vs Python **et** Rust vs Python sur 111 240 PIs communs —
+déterminisme intact entre les trois moteurs. Temps engine-direct : Python
+30,7 s / SQL 5,5 s / **Rust 0,80 s** (load 570 ms + compute 55 ms) — le 0,80 s
+Rust est le kernel PUR, sans l'orchestration Python qui domine le end-to-end de
+6,2 s ci-dessus.
+
+### Conséquence pour SCALE-2
+
+Le dossier pour faire de **Rust-in-process (PyO3) le défaut** est faible : aucun
+gain de vitesse mesurable sur un SQL sain, plus le coût de packaging/build. La
+vraie valeur de Rust est ailleurs — l'architecture **rust-svc in-RAM** (fork
+O(1), zéro round-trip PG), qui est un pari différent avec ses blockers connus
+(ADR-017, cf. `docs/RUNBOOK-rust-engine-service.md`). Ce re-bench recentre donc
+l'arbitrage : Rust ≠ « moteur plus rapide », Rust = « architecture de scénarios
+en mémoire ».
+
+---
+
 À mettre à jour à chaque modification du propagator ou de la couche SQL.
