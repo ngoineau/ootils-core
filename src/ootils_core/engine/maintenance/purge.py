@@ -573,7 +573,7 @@ def _apply_one(
     # this module never assumes dict-style access without pinning it itself
     # (same defensive pattern as engine/outcome/evaluator.py).
     insert_cur = conn.cursor(row_factory=dict_row)
-    run_id = insert_cur.execute(
+    run_row = insert_cur.execute(
         """
         INSERT INTO maintenance_purge_runs
             (scenario_id, mode, ttl_days, per_table_counts, rows_deleted_total, executed_by)
@@ -582,9 +582,9 @@ def _apply_one(
         """,
         (scenario_id, ttl_days, _to_jsonb(per_table_counts), rows_deleted_total, executed_by),
     ).fetchone()
-    if run_id is None:  # INSERT..RETURNING yields exactly one row — fail loudly
+    if run_row is None:  # INSERT..RETURNING yields exactly one row — fail loudly
         raise RuntimeError("maintenance_purge_runs INSERT returned no row")
-    run_id = _coerce_uuid(run_id["run_id"])
+    run_id = _coerce_uuid(run_row["run_id"])
 
     # Emitted AFTER the events-table delete above (whitelist position 9), so
     # this confirmation event survives its own scenario's purge pass — the
@@ -776,7 +776,7 @@ def _apply_shortage_retention_one(
     per_table_counts = {"shortages": deleted}
     # Pinned dict_row cursor — see the identical comment in _apply_one.
     insert_cur = conn.cursor(row_factory=dict_row)
-    run_id = insert_cur.execute(
+    run_row = insert_cur.execute(
         """
         INSERT INTO maintenance_purge_runs
             (scenario_id, mode, ttl_days, per_table_counts, rows_deleted_total, executed_by)
@@ -785,9 +785,9 @@ def _apply_shortage_retention_one(
         """,
         (scenario_id, retention_days, _to_jsonb(per_table_counts), deleted, executed_by),
     ).fetchone()
-    if run_id is None:  # INSERT..RETURNING yields exactly one row — fail loudly
+    if run_row is None:  # INSERT..RETURNING yields exactly one row — fail loudly
         raise RuntimeError("maintenance_purge_runs INSERT returned no row")
-    run_id = _coerce_uuid(run_id["run_id"])
+    run_id = _coerce_uuid(run_row["run_id"])
 
     emit_stream_event(
         conn,
