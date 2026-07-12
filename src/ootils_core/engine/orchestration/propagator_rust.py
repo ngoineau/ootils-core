@@ -56,15 +56,24 @@ logger = logging.getLogger(__name__)
 
 
 # Crossover point: below this many dirty PIs, fall back to the SQL
-# inline path. Measured on profile L after the week-5 perf optims
-# (connection pool + UNNEST writeback + combined UNION ALL load):
-#   -    91 PIs : SQL 95ms vs Rust ~40ms (warm pool)  → Rust 2.4× FASTER
-#   -  5000 PIs : Rust still wins
-#   - 50000+ PIs: Rust wins decisively (full prop L: 9.5s vs 36.8s)
+# inline path.
 #
-# Default 0 = always use Rust (post-week-5 optims made it win at every
-# scale we've measured). Set OOTILS_RUST_MIN_DIRTY > 0 to force the
-# SQL fallback below a threshold if regressions show up.
+# HISTORY / CAUTION: an earlier version of this comment claimed "Rust
+# wins at every scale (full prop L: 9.5s vs 36.8s)". The 36.8s SQL
+# figure was measured against a SQL engine with STALE dirty_nodes stats
+# — the O(N²) nested-loop pathology fixed in #455 (ANALYZE dirty_nodes
+# in flush_to_postgres). The 2026-07-11 VM re-bench with the fix live
+# shows SQL and Rust are within ±4% end-to-end on profiles S/M/L (SQL
+# even wins on L: 16.3s vs 16.8s), because propagation wall time is
+# dominated by the Python/SQL orchestration around the kernel (shortage
+# persistence, calc_run, resolve_stale), not the per-node compute — the
+# Rust kernel itself is fast (0.8s for 111k PIs engine-direct) but that
+# is ~7.5% of the wall. See docs/PERF-BASELINE.md (§ re-bench 2026-07-11).
+# In-process Rust is therefore NOT a decisive speedup over healthy SQL;
+# the real Rust lever is the rust-svc in-RAM architecture (SCALE-2).
+#
+# Default 0 = use Rust whenever OOTILS_ENGINE=rust is opted into. Set
+# OOTILS_RUST_MIN_DIRTY > 0 to force the SQL fallback below a threshold.
 RUST_DISPATCH_THRESHOLD = int(os.environ.get("OOTILS_RUST_MIN_DIRTY", "0"))
 
 
