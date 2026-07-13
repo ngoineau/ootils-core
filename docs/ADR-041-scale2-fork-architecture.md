@@ -1,8 +1,18 @@
 # ADR-041 — SCALE-2 : arbitrage de l’architecture de fork (Rust ArcSwap vs lazy-CoW SQL vs statu quo)
 
-**Statut** : **Proposed** — la décision finale appartient au pilote (🎯).
-**Date** : 2026-07-12
+**Statut** : **Accepted** — décision pilote 2026-07-13.
+**Date** : 2026-07-12 (accepté 2026-07-13)
 **Auteur** : architecte ootils-core
+
+> **Décision rendue (2026-07-13)** — Réponse pilote à Q1/Q2 (§5) : la douleur
+> était le **fork gouverné**, et les **5,93 s mesurés** post-ADR-040 sur la
+> pilote (#460 mergée le 12/07, mieux que les ~8 s prédits ici) sont
+> **acceptables**. La recommandation §4 est adoptée telle quelle : statu quo
+> verrouillé (`OOTILS_ENGINE=sql`), sandbox B2 **non déclenché**, lazy-CoW
+> **différé**, PyO3-défaut **rejeté** ; réouverture uniquement par les seuils
+> T1/T2/T3. Q5/Q6 (frontière de gouvernance et expressivité du sandbox)
+> restent volontairement **sans réponse** : elles ne se posent que si T1 se
+> déclenche, et seront tranchées dans l'ADR de suivi prévu au §6.
 **Déclencheur** : `docs/ROADMAP-AGENTS-2026-H2.md` §6, item **SCALE-2** (lignes 155-157) + décision pilote 2026-07-11 « le fork lent est un VRAI problème ».
 **Dépend de / relie** : [ADR-012 fork bulk INSERT…SELECT](ADR-012-scenario-fork-bulk.md), [ADR-016 Rust Architecture A](ADR-016-rust-engine-foundation.md), [ADR-017 Rust Architecture B (rust-svc)](ADR-017-architecture-b-rust-engine-service.md), [ADR-018 per-scenario propagation](ADR-018-per-scenario-propagation.md), ADR-039 (PURGE-1, recyclage forks archivés — **en fabrication**), ADR-040 (fork quick-fix `session_replication_role` — **en cours**).
 **Invariant en jeu** : CLAUDE.md « *the default does not flip without an ADR* ». Cet ADR est le véhicule décisionnel exigé par la roadmap. **Sa recommandation ne flippe PAS `OOTILS_ENGINE` (reste `sql`)** — voir §4.
