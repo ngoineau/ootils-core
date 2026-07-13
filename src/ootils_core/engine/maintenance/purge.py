@@ -21,6 +21,22 @@ depth against a stale/hand-built plan or a concurrent write) before touching
 anything. Neither function commits — the caller owns the transaction
 (``get_db`` for the API, the CLI's own connection).
 
+FK-TRIGGER DEROGATION on the whitelist DELETE loop (ADR-040 extension,
+2026-07-12): the first real production purge (1.66M rows) took 2h22
+(8 541 s) — dominated by row-by-row RI trigger re-validation on each DELETE,
+the same class of cost ADR-040 already found and encadred at the
+scenario-fork COPY site (#460). ``_delete_whitelist_for_scenario`` applies
+the identical, shared derogation (``ootils_core.db.replica_role``, SET LOCAL
+``session_replication_role='replica'`` around the DELETE loop, transparent
+fallback on ``InsufficientPrivilege``) — safe by the SAME argument, applied
+to DELETE instead of INSERT: ``PURGE_WHITELIST``'s order deletes every
+referencing table before the table it references, so by the time any given
+table's DELETE runs nothing left in the whitelist still points at rows this
+statement removes. Compensated fail-loudly, unconditionally on both paths,
+by ``_verify_whitelist_emptied`` (one UNION ALL set-based recount) right
+after the DELETE loop returns — a residual row raises ``RuntimeError``
+before the caller can ever commit a partial purge.
+
 THE FK-SAFE WHITELIST (``PURGE_WHITELIST``) is the one thing a scenario-fork
 purge must get exactly right: deleting a table before something that still
 references it raises ``ForeignKeyViolation``. The order below was derived by
@@ -108,10 +124,12 @@ from dataclasses import dataclass
 from typing import Optional
 from uuid import UUID
 
+import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from ootils_core.db.replica_role import enable_replica_role, restore_origin_role
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.events.emit import emit_stream_event
 
@@ -318,6 +336,22 @@ _GHOST_MEMBERS_COUNT_SQL = (
     "WHERE ghost_id IN (SELECT ghost_id FROM ghost_nodes WHERE scenario_id = %s)"
 )
 
+# One UNION ALL of every whitelist table's own COUNT query (ADR-040
+# extension, 2026-07-12) — the compensatory check run unconditionally after
+# _delete_whitelist_for_scenario, regardless of which trigger-firing path it
+# took. Built once from _TABLE_QUERIES so it can never drift from the
+# per-table COUNT/DELETE pair above; scenario_id is bound once per branch,
+# in PURGE_WHITELIST order. The matching parameter count is captured HERE,
+# alongside the SQL, rather than re-derived from a live len(PURGE_WHITELIST)
+# at call time — the two must never be able to drift apart, even under a
+# test monkeypatch of the PURGE_WHITELIST module global.
+_VERIFY_WHITELIST_EMPTY_SQL = (
+    "SELECT COALESCE(SUM(n), 0) AS total FROM (\n"
+    + "\nUNION ALL\n".join(_TABLE_QUERIES[table][0] for table in PURGE_WHITELIST)
+    + "\n) _residual"
+)
+_VERIFY_WHITELIST_EMPTY_PARAM_COUNT = len(PURGE_WHITELIST)
+
 
 # ---------------------------------------------------------------------------
 # Fork purge — plan (SELECT-only) / apply (the sole writer)
@@ -499,19 +533,108 @@ def _nullify_self_referencing_parent(conn: DictRowConnection, scenario_id: UUID)
     )
 
 
+# Savepoint name for the purge site's FK-trigger derogation window (ADR-040
+# extension, 2026-07-12) — deliberately distinct from replica_role's
+# DEFAULT_SAVEPOINT_NAME (the fork-copy site, engine/scenario/manager.py) so
+# the two derogation windows can never collide if ever nested/sequenced on
+# the same connection.
+_PURGE_DELETE_SAVEPOINT_NAME = "purge_delete_replica_role"
+
+
 def _delete_whitelist_for_scenario(
     conn: DictRowConnection, scenario_id: UUID
 ) -> dict[str, int]:
     """The sole writer of the FK-safe whitelist deletes, in PURGE_WHITELIST
     order. Returns ACTUAL deleted-row counts (cursor.rowcount), never a
     stale pre-count — a plan built earlier may be out of date by the time
-    apply runs."""
-    counts: dict[str, int] = {}
-    for table in PURGE_WHITELIST:
-        _, delete_sql = _TABLE_QUERIES[table]
-        cur = conn.execute(delete_sql, (scenario_id,))
-        counts[table] = cur.rowcount if cur.rowcount is not None else 0
+    apply runs.
+
+    FK-trigger derogation (ADR-040 extension, 2026-07-12): a real-world
+    purge of 1.66M rows across every whitelist table took 2h22 (8 541 s) —
+    profiling attributed the overwhelming majority of that to row-by-row RI
+    trigger re-validation fired by each DELETE, the same class of cost
+    ADR-040 already found and encadred at the fork-copy site (#460).
+
+    Contract: safety here is BY CONSTRUCTION, not by luck. PURGE_WHITELIST's
+    order (module docstring) deletes every table that REFERENCES a given
+    table strictly BEFORE that referenced table itself (e.g. `edges` before
+    `nodes`, `shortages` before `nodes`/`calc_runs`) — by the time any given
+    table's DELETE runs, nothing left in the whitelist still points at rows
+    this statement is about to remove that hasn't already been removed
+    itself. Postgres's per-row FK re-validation on each DELETE is therefore
+    redundant work on an already-safe deletion order, exactly ADR-040's
+    "derogation is a performance choice, not a correctness one" argument —
+    applied here to DELETE instead of INSERT. It is compensated fail-loudly,
+    unconditionally (both the fast and the fallback path), by
+    `_verify_whitelist_emptied` right after this function returns.
+    """
+    replica_role_active = enable_replica_role(
+        conn,
+        savepoint_name=_PURGE_DELETE_SAVEPOINT_NAME,
+        log_event="purge.delete_fast_path_denied",
+        fallback_description="triggers-on delete path for this purge",
+    )
+    try:
+        counts: dict[str, int] = {}
+        for table in PURGE_WHITELIST:
+            _, delete_sql = _TABLE_QUERIES[table]
+            cur = conn.execute(delete_sql, (scenario_id,))
+            counts[table] = cur.rowcount if cur.rowcount is not None else 0
+    finally:
+        if replica_role_active:
+            try:
+                restore_origin_role(conn)
+            except psycopg.errors.InFailedSqlTransaction:
+                # One of the DELETEs above raised and left the transaction
+                # aborted (SET LOCAL cannot run on an aborted transaction).
+                # Not a problem: session_replication_role is transaction-
+                # scoped and reverts to 'origin' automatically once the
+                # caller rolls back — and swallowing this here (rather than
+                # letting it propagate) preserves the ORIGINAL delete
+                # exception as the one the caller sees, instead of masking
+                # it with this unrelated follow-up error.
+                pass
     return counts
+
+
+def _verify_whitelist_emptied(conn: DictRowConnection, scenario_id: UUID) -> None:
+    """Compensatory set-based check (ADR-040 extension, 2026-07-12): runs
+    UNCONDITIONALLY right after `_delete_whitelist_for_scenario`, regardless
+    of which trigger-firing path it took — correctness must never depend on
+    which path a given deployment happened to use, same principle as the
+    fork-copy site's post-copy checks.
+
+    One UNION ALL query (~10ms on tables the DELETE loop just emptied)
+    re-counts every PURGE_WHITELIST table scoped to this scenario_id. Any
+    residual row means the purge is about to commit a PARTIAL delete —
+    raising here aborts `apply_fork_purge` before the caller can ever commit
+    that state (the caller owns the transaction; this function never
+    commits or rolls back itself).
+
+    `scenarios` (the tombstone row, never deleted by design) and
+    `maintenance_purge_runs` (this very run's own audit row, not inserted
+    yet at the point this check runs) are legitimate survivors and are
+    intentionally NOT part of PURGE_WHITELIST, hence not part of this check.
+    """
+    cur = conn.cursor(row_factory=dict_row)
+    row = cur.execute(
+        _VERIFY_WHITELIST_EMPTY_SQL,
+        (scenario_id,) * _VERIFY_WHITELIST_EMPTY_PARAM_COUNT,
+    ).fetchone()
+    total = int(row["total"]) if row is not None else 0
+    if total > 0:
+        logger.error(
+            "purge.fork.residual_rows scenario_id=%s residual_total=%d — "
+            "whitelist DELETE left residual rows across PURGE_WHITELIST "
+            "tables; aborting before commit",
+            scenario_id,
+            total,
+        )
+        raise RuntimeError(
+            f"purge: {total} residual row(s) survive across PURGE_WHITELIST "
+            f"tables for scenario {scenario_id} after the whitelist DELETE "
+            "loop — refusing to let the caller commit a partial purge."
+        )
 
 
 def _analyze_tables(conn: DictRowConnection, tables: set[str]) -> None:
@@ -561,6 +684,7 @@ def _apply_one(
 
     _nullify_self_referencing_parent(conn, scenario_id)
     per_table_counts = _delete_whitelist_for_scenario(conn, scenario_id)
+    _verify_whitelist_emptied(conn, scenario_id)
     rows_deleted_total = sum(per_table_counts.values())
 
     conn.execute(

@@ -433,11 +433,40 @@ def _seed_fork_payload(conn, *, fork: UUID, fork_pi: UUID, calc_run_id: UUID,
 # ===========================================================================
 
 
-def test_fork_purge_lifecycle_dry_run_apply_idempotent(conn):
+@pytest.mark.parametrize(
+    "force_fallback", [False, True], ids=["fast-path", "forced-fallback"]
+)
+def test_fork_purge_lifecycle_dry_run_apply_idempotent(conn, monkeypatch, force_fallback):
     """The flagship path. Real fork, real propagation (the shortage row comes
     out of SHORTAGES_SQL, never hand-inserted), payload across every
     whitelist table, backdated archive — then the three phases locked by the
-    module docstring's contract 1."""
+    module docstring's contract 1.
+
+    Parametrized (ADR-040 extension, 2026-07-12) over both trigger-firing
+    paths of the whitelist DELETE loop: ``fast-path`` lets
+    ``_delete_whitelist_for_scenario`` engage the real
+    ``session_replication_role='replica'`` derogation when the test role's
+    privileges allow it (silently falling back on its own otherwise — same
+    as production); ``forced-fallback`` monkeypatches
+    ``engine.maintenance.purge.enable_replica_role`` with the exact
+    observable effect of an ``InsufficientPrivilege`` denial (the same
+    savepoint dance the real handler performs, then ``False``) — the
+    ``test_fork_replica_parity_integration.py`` pattern, applied to the
+    purge site. Every assertion below is identical across both: the
+    lifecycle's OUTCOME must never depend on which path the DELETE loop
+    took, only its cost does (ADR-040's core claim).
+    """
+    if force_fallback:
+        from ootils_core.engine.maintenance import purge as purge_module
+
+        def _denied(conn_, *, savepoint_name, log_event=None, fallback_description=None):
+            conn_.execute(f"SAVEPOINT {savepoint_name}")
+            conn_.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            conn_.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            return False
+
+        monkeypatch.setattr(purge_module, "enable_replica_role", _denied)
+
     item_id = _seed_item(conn)
     location_id = _seed_location(conn)
     _seed_planning_params(conn, item_id, location_id)
@@ -566,6 +595,65 @@ def test_fork_purge_lifecycle_dry_run_apply_idempotent(conn):
     # A fresh plan no longer surfaces the purged fork.
     fresh = plan_fork_purge(conn, ttl_days=7)
     assert fork not in {c.scenario_id for c in fresh.candidates}
+
+
+# ===========================================================================
+# 1b. Compensatory check (ADR-040 extension, 2026-07-12) — proves
+#     _verify_whitelist_emptied actually fires and blocks a partial commit.
+# ===========================================================================
+
+
+def test_verify_whitelist_emptied_raises_on_residual_row(conn, monkeypatch):
+    """A future regression that made the whitelist DELETE loop skip a table
+    must never be allowed to commit a partial purge. Simulated by
+    monkeypatching the `PURGE_WHITELIST` module global to drop 'shortages'
+    from the DELETE loop's own iteration — `_delete_whitelist_for_scenario`
+    and `plan_fork_purge` both read that SAME live global, so the fork's
+    shortage row is never deleted — while `_VERIFY_WHITELIST_EMPTY_SQL`
+    (built once at import time from the UN-patched, real 13-table
+    whitelist, per its own module-level comment) still counts every real
+    table, including the one just skipped: the residual shortage row is
+    exactly what the check is designed to catch.
+
+    Proves the fail-loudly contract end to end: `apply_fork_purge` raises
+    RuntimeError, and after the caller's rollback NOTHING was committed —
+    no purged_at stamp, no maintenance_purge_runs row, no purge_executed
+    event, and the shortage row (the one the patched whitelist skipped) is
+    still exactly there.
+    """
+    from ootils_core.engine.maintenance import purge as purge_module
+
+    item_id = _seed_item(conn)
+    location_id = _seed_location(conn)
+    _seed_planning_params(conn, item_id, location_id)
+    _seed_pi_bucket(conn, scenario_id=BASELINE, item_id=item_id, location_id=location_id)
+    conn.commit()
+
+    fork = _fork(conn, "purge-residual-check")
+    fork_pi = _fork_pi_node(conn, fork, item_id)
+    engine = _build_sql_engine(conn)
+    _propagate_bucket(engine, conn, scenario_id=fork, node_id=fork_pi)
+    assert _scoped_counts(conn, fork)["shortages"] == 1, "fork must carry a real shortage"
+
+    _archive(conn, fork, days_ago=30)
+
+    truncated_whitelist = tuple(t for t in purge_module.PURGE_WHITELIST if t != "shortages")
+    monkeypatch.setattr(purge_module, "PURGE_WHITELIST", truncated_whitelist)
+
+    plan = plan_fork_purge(conn, ttl_days=7)
+    my_plan = _plan_for(plan, fork)
+
+    with pytest.raises(RuntimeError, match="residual row"):
+        apply_fork_purge(conn, my_plan, executed_by="test:residual-check")
+    conn.rollback()
+
+    assert _scenario_row(conn, fork)["purged_at"] is None
+    assert _purge_runs_for(conn, fork) == []
+    assert _purge_events_for(conn, fork) == []
+    assert _scoped_counts(conn, fork)["shortages"] == 1, (
+        "the row the patched whitelist skipped must still be there — "
+        "nothing partial was committed"
+    )
 
 
 # ===========================================================================

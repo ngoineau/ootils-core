@@ -19,6 +19,10 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from ootils_core.db.replica_role import (
+    enable_replica_role as _enable_replica_role_for_fork,
+)
+from ootils_core.db.replica_role import restore_origin_role as _restore_origin_role
 from ootils_core.db.types import DictRowConnection
 from ootils_core.models import (
     Scenario,
@@ -1080,59 +1084,15 @@ class ScenarioManager:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-
-def _enable_replica_role_for_fork(db: DictRowConnection) -> bool:
-    """
-    Attempt to disable trigger firing (`session_replication_role = 'replica'`,
-    SET LOCAL) for the duration of the two bulk node/edge INSERT...SELECT
-    statements in `_copy_nodes`. See ADR-040 and the derogation comment at
-    the `_copy_nodes` call site for why this is safe there and nowhere else.
-
-    Requires the connection's role to hold SET privilege on the
-    `session_replication_role` GUC (PG15+: `GRANT SET ON PARAMETER
-    session_replication_role TO <role>`; earlier versions restrict it to
-    superuser). A permission-denied SET aborts the enclosing Postgres
-    transaction, so the attempt is wrapped in a SAVEPOINT: on failure we
-    roll back to the savepoint (undoing only the failed SET — the scenario
-    row already inserted earlier in create_scenario's transaction is
-    untouched), release it (both branches leave no savepoint behind), log
-    ONE warning, and the caller falls through to the ordinary triggers-on
-    copy. Only `InsufficientPrivilege` is treated as the expected "no
-    grant" case; any other error propagates (fail-loudly — this is not a
-    blanket except).
-
-    Returns True if replica mode is now active for this transaction (the
-    caller MUST call `_restore_origin_role` before any further work), False
-    if the fallback (triggers-on) path must be used.
-    """
-    db.execute("SAVEPOINT scenario_fork_replica_role")
-    try:
-        db.execute("SET LOCAL session_replication_role = 'replica'")
-    except psycopg.errors.InsufficientPrivilege:
-        db.execute("ROLLBACK TO SAVEPOINT scenario_fork_replica_role")
-        db.execute("RELEASE SAVEPOINT scenario_fork_replica_role")
-        logger.warning(
-            "scenario.fork_fast_path_denied role lacks SET privilege on "
-            "session_replication_role (PG15+: GRANT SET ON PARAMETER "
-            "session_replication_role TO <role>) — falling back to the "
-            "triggers-on copy path for this fork"
-        )
-        return False
-    else:
-        db.execute("RELEASE SAVEPOINT scenario_fork_replica_role")
-        return True
-
-
-def _restore_origin_role(db: DictRowConnection) -> None:
-    """
-    Re-enable trigger firing before any further work happens on the
-    connection. `SET LOCAL session_replication_role = 'replica'` already
-    reverts automatically at COMMIT/ROLLBACK, but we reset explicitly right
-    after the two bulk INSERTs so the window during which triggers are off
-    is as narrow as possible — see ADR-040.
-    """
-    db.execute("SET LOCAL session_replication_role = 'origin'")
+#
+# _enable_replica_role_for_fork / _restore_origin_role: module-level aliases
+# onto ootils_core.db.replica_role (shared with engine/maintenance/purge.py's
+# whitelist DELETE loop, ADR-040's 2026-07-12 extension). Kept as aliases
+# rather than inline calls so tests/integration/test_fork_replica_parity_
+# integration.py's `monkeypatch.setattr(manager_module,
+# "_enable_replica_role_for_fork", ...)` keeps working unmodified: _copy_nodes
+# resolves this name as a module global at call time, so patching the
+# attribute on this module still intercepts it after the extraction.
 
 
 # Allowed field names for override and dynamic UPDATE (whitelist)
