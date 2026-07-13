@@ -152,6 +152,32 @@ def _seed_planning_params(conn, item_id: UUID, location_id: UUID) -> None:
     )
 
 
+def _cleanup_baseline_seed(conn, item_id: UUID, location_id: UUID) -> None:
+    """Remove this test's COMMITTED baseline seed rows.
+
+    The lifecycle test must commit its baseline seed (the deep-copy fork
+    reads it from another statement), so the ``conn`` fixture's rollback
+    teardown cannot undo it. Without this finalizer, a parametrized rerun
+    ([fast-path] then [forced-fallback]) forks a baseline that still carries
+    the PREVIOUS run's PI — the deep-copy copies every active baseline node,
+    inflating the fork's node count and breaking the strict seed-sanity
+    assertions (CI failure: ``assert 3 == 2``). Runs via
+    ``request.addfinalizer`` so a mid-test failure cleans up too."""
+    conn.rollback()  # drop any aborted in-flight transaction first
+    conn.execute(
+        "DELETE FROM nodes WHERE scenario_id = %s AND item_id = %s",
+        (BASELINE, item_id),
+    )
+    conn.execute(
+        "DELETE FROM projection_series WHERE scenario_id = %s AND item_id = %s",
+        (BASELINE, item_id),
+    )
+    conn.execute("DELETE FROM item_planning_params WHERE item_id = %s", (item_id,))
+    conn.execute("DELETE FROM items WHERE item_id = %s", (item_id,))
+    conn.execute("DELETE FROM locations WHERE location_id = %s", (location_id,))
+    conn.commit()
+
+
 def _seed_pi_bucket(conn, *, scenario_id, item_id, location_id) -> UUID:
     """A bucket-0 ProjectedInventory node in its own projection_series, no
     replenishes/consumes edges — projects to closing_stock=0, which is
@@ -436,7 +462,9 @@ def _seed_fork_payload(conn, *, fork: UUID, fork_pi: UUID, calc_run_id: UUID,
 @pytest.mark.parametrize(
     "force_fallback", [False, True], ids=["fast-path", "forced-fallback"]
 )
-def test_fork_purge_lifecycle_dry_run_apply_idempotent(conn, monkeypatch, force_fallback):
+def test_fork_purge_lifecycle_dry_run_apply_idempotent(
+    conn, monkeypatch, force_fallback, request
+):
     """The flagship path. Real fork, real propagation (the shortage row comes
     out of SHORTAGES_SQL, never hand-inserted), payload across every
     whitelist table, backdated archive — then the three phases locked by the
@@ -469,6 +497,7 @@ def test_fork_purge_lifecycle_dry_run_apply_idempotent(conn, monkeypatch, force_
 
     item_id = _seed_item(conn)
     location_id = _seed_location(conn)
+    request.addfinalizer(lambda: _cleanup_baseline_seed(conn, item_id, location_id))
     _seed_planning_params(conn, item_id, location_id)
     _seed_pi_bucket(conn, scenario_id=BASELINE, item_id=item_id, location_id=location_id)
     conn.commit()
