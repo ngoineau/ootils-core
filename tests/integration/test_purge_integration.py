@@ -153,7 +153,7 @@ def _seed_planning_params(conn, item_id: UUID, location_id: UUID) -> None:
 
 
 def _cleanup_baseline_seed(conn, item_id: UUID, location_id: UUID) -> None:
-    """Remove this test's COMMITTED baseline seed rows.
+    """Neutralize this test's COMMITTED baseline seed for the next run.
 
     The lifecycle test must commit its baseline seed (the deep-copy fork
     reads it from another statement), so the ``conn`` fixture's rollback
@@ -161,20 +161,26 @@ def _cleanup_baseline_seed(conn, item_id: UUID, location_id: UUID) -> None:
     ([fast-path] then [forced-fallback]) forks a baseline that still carries
     the PREVIOUS run's PI — the deep-copy copies every active baseline node,
     inflating the fork's node count and breaking the strict seed-sanity
-    assertions (CI failure: ``assert 3 == 2``). Runs via
-    ``request.addfinalizer`` so a mid-test failure cleans up too."""
+    assertions (CI failure: ``assert 3 == 2``).
+
+    DEACTIVATE, never DELETE: a delete-cascade here is unwinnable — on a
+    mid-test failure the fork's un-purged payload still references the item
+    (``nodes_item_id_fkey``), and the seeded ghost membership does too
+    (``ghost_members_item_id_fkey``); one FK violation aborts the whole
+    cleanup transaction and the pollution survives (both observed in CI).
+    The deep-copy's pollution vector is exactly ``WHERE n.active = TRUE``,
+    so flipping the baseline seed inactive closes it with a single UPDATE
+    that can violate nothing. The inert seed rows (item/location/params)
+    stay behind as uniquely-named test residue — same convention as the
+    other committing tests in this file. Runs via ``request.addfinalizer``
+    so a mid-test failure cleans up too."""
+    _ = location_id  # kept in the signature for symmetry with the seed call
     conn.rollback()  # drop any aborted in-flight transaction first
     conn.execute(
-        "DELETE FROM nodes WHERE scenario_id = %s AND item_id = %s",
+        "UPDATE nodes SET active = FALSE, updated_at = NOW() "
+        "WHERE scenario_id = %s AND item_id = %s",
         (BASELINE, item_id),
     )
-    conn.execute(
-        "DELETE FROM projection_series WHERE scenario_id = %s AND item_id = %s",
-        (BASELINE, item_id),
-    )
-    conn.execute("DELETE FROM item_planning_params WHERE item_id = %s", (item_id,))
-    conn.execute("DELETE FROM items WHERE item_id = %s", (item_id,))
-    conn.execute("DELETE FROM locations WHERE location_id = %s", (location_id,))
     conn.commit()
 
 
