@@ -59,7 +59,7 @@ COPY scripts/ /app/scripts/
 RUN pip install --no-cache-dir .
 
 # ---- Stage: Rust wheel builder (ONLY reached when WITH_RUST=1, see above) -
-FROM rust:1.96-slim AS rust-builder
+FROM rust:1.97-slim AS rust-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-dev python3-venv \
