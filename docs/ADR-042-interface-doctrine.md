@@ -51,6 +51,19 @@ Chaque flux est coupé en deux moitiés autour d'un fichier pivot TSV nommé `<e
 | `forecasts` | Hebdomadaire | Advisory | 🎯 Q2 ouverte : source ERP ou Pyramide (le module de prévision propre au dépôt). |
 | Référentiel (`items`/`locations`/`suppliers`/`supplier_items`/`item_planning_params`/BOM) | À la demande | Advisory | **Jamais dans le run bloquant quotidien** — un changement de référentiel ne doit pas retarder le run pénurie du jour. |
 
+**Historiques de calibrage** (ajout décision pilote 2026-07-13, « GO famille historiques ») :
+
+Troisième famille, distincte des photos quotidiennes de l'ouvert : les **historiques du réalisé**, carburant du calibrage des paramètres (chantier PARAM-1). Cadence lente, **jamais bloquants** pour le run quotidien, chargement **append-only** (on empile l'historique, on n'écrase jamais — même logique que `demand_history`).
+
+| Flux | Cadence | Criticité | Ce qu'il calibre |
+|---|---|---|---|
+| `po_receipts_history` (PO clôturés : date commande → date réception réelle) | Mensuel | Advisory | **Délais fournisseurs réels** vs `lead_time_*` théoriques de l'ERP — le premier paramètre que PARAM-1 doit challenger — et fiabilité fournisseur (OTIF). |
+| `wo_closed_history` (OF clôturés) | Mensuel | Advisory | Délais de fabrication réels, rendements. |
+| `consumption_history` (sorties de stock composants) | Mensuel | Advisory | Stock de sécurité des **composants** — `demand_history` couvre les ventes (produits finis), pas la consommation induite par la BOM. |
+| `transfers_history` (transferts inter-sites réalisés) | Mensuel | Advisory | Flux inter-sites réels, calibrage des lanes DRP. Distinct de la question ouverte « transferts *ouverts* en flux quotidien » (voir Supersessions). |
+
+Déjà couvert, à ne PAS dupliquer : l'**historique de la demande** (`demand_history`, commandes clients historisées à la prise de commande — règle pilote « forecast on booking ») est déjà chargé au bootstrap (~1,8 Go sur la base pilote) et alimente Pyramide/FVA/drift ; `returns_history` (migration 050) existe également. Ces flux historiques sont des **prérequis de PARAM-1** (PR-6+) : aucun d'eux n'est nécessaire aux PR-2/3/4 du run quotidien. Contrats colonnes et `feed_contracts` YAML : à écrire au moment de PARAM-1 (voir Q7 ci-dessous).
+
 **Sortants** :
 
 | Flux | Cadence | Contenu |
@@ -138,6 +151,7 @@ Delta/CDC ; SFTP ou API/webhooks ERP directs ; write-back ERP (jamais, sous aucu
 - **Q3 — Colonnes exactes des 4 TSV manquants ou à corriger.** Vérification faite dans ce PR (`docs/contracts/TSV-FILES-SPEC.md`) : `on_hand.tsv` (§2.6) et `purchase_orders.tsv` (§2.7) ont déjà un contrat colonnes complet. `customer_orders.tsv` (§2.8) a **aussi déjà** un contrat colonnes complet (avec sa limitation V1.0 documentée : pas de `customer_external_id`/`channel`/`region` — modélisé via une `customer_virtual` location). Ce qui manque réellement pour `customer_orders` n'est donc **pas** le contrat colonnes mais le **`feed_contracts` YAML** (aucun des 3 seed YAML de `config/feed-contracts/` ne couvre `customer_orders`, alors même que le pilote vient de le déclarer `blocking` — §1 ci-dessus). À l'inverse, **`work_orders.tsv` n'a AUCUN contrat colonnes** dans `TSV-FILES-SPEC.md` — il n'apparaît même pas dans sa table des matières §0 (11 entités listées, pas `work_orders`) — alors que son `feed_contracts` YAML (`open-work-orders.yaml`) existe déjà. Donc concrètement : **`customer-orders.yaml` (feed_contract) reste à écrire, et la section `work_orders.tsv` de `TSV-FILES-SPEC.md` reste à écrire** — deux manques disjoints, pas le même artefact.
 - **Q4 — Cadences/fenêtres/planchers réels.** Les valeurs des 3 YAML seed (`cadence`, `arrival_window_minutes`, `volume_guard_min_rows`, `volume_guard_max_pct_delta`) sont des **placeholders réalistes explicitement marqués comme tels** dans leurs commentaires (ADR-037 §🎯 Pilote) — à recalibrer contre le volume réel du système du pilote.
 - **Q6 — Destination préférée du compte-rendu.** Fichier `daily_report_<date>.txt` seul, `/ui`, ou combinaison ? Non tranché (décision 5 ci-dessus).
+- **Q7 — Historiques de calibrage : disponibilité et profondeur.** L'ERP peut-il extraire les PO clôturés (avec dates de réception réelles), les OF clôturés, les consommations et les transferts réalisés — et sur quelle profondeur (12 mois ? 24 ?) ? Conditionne la richesse du calibrage PARAM-1 (décision 1, famille historiques). Non bloquant pour les PR-2/3/4.
 
 ---
 

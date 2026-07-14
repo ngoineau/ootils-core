@@ -50,6 +50,19 @@ Le fichier est **le contrat**. Tant que le fichier respecte le format attendu (c
 
 **Pourquoi le référentiel n'est jamais bloquant** : un changement de fiche article ou de site ne doit jamais retarder le calcul de pénurie du jour. Le référentiel se met à jour à son propre rythme, indépendamment du run quotidien.
 
+### 2.1bis Les historiques de calibrage (ajout du 13/07/2026)
+
+En plus des photos quotidiennes ci-dessus, Ootils a besoin — à un rythme beaucoup plus lent — de **l'historique du réalisé**. Pourquoi : pour vérifier si les paramètres de planification de l'ERP disent la vérité. Exemple concret : si l'ERP affiche « délai fournisseur : 30 jours » mais que l'historique des réceptions montre 45 jours en réalité, tous les calculs partent avec 15 jours de retard incorporé. C'est l'historique qui permet de le prouver et de proposer la correction.
+
+| Historique | Ce qu'il permet de vérifier | Cadence |
+|---|---|---|
+| **Commandes fournisseurs clôturées** (date de commande → date de réception réelle) | Les délais fournisseurs réels vs les délais théoriques — et la fiabilité de chaque fournisseur | Mensuel |
+| **Ordres de fabrication clôturés** | Les délais de fabrication réels, les rendements | Mensuel |
+| **Consommations** (sorties de stock des composants) | Le bon dimensionnement des stocks de sécurité des composants | Mensuel |
+| **Transferts réalisés** entre sites | Les flux réels entre entrepôts | Mensuel |
+
+Trois choses importantes : ces fichiers ne sont **jamais bloquants** (leur absence ne retarde jamais le calcul du jour) ; ils s'**empilent** (on ajoute l'historique du mois, on n'écrase rien) ; et **l'historique des commandes clients est déjà chargé** (c'est lui qui alimente les prévisions) — inutile de le renvoyer.
+
 ### 2.2 Ce qui sort d'Ootils
 
 | Flux | Que contient-il | Cadence |
@@ -141,6 +154,7 @@ Chaque jour, un compte-rendu (fichier texte déposé dans le dossier de sortie, 
 - **Colonnes exactes** : les formats de fichier pour le stock et les commandes fournisseurs sont déjà figés ; ceux pour les commandes clients et les ordres de fabrication restent à finaliser avec vous.
 - **Cadences réelles** : les horaires et tolérances de retard actuellement documentés sont des valeurs de démarrage raisonnables mais provisoires — à ajuster ensemble une fois le rythme réel de vos extractions connu.
 - **Compte-rendu** : quel format de consultation vous convient le mieux au quotidien ?
+- **Historiques** (§2.1bis) : pouvez-vous extraire les commandes fournisseurs clôturées (avec les dates de réception réelles), les ordres de fabrication clôturés, les consommations et les transferts réalisés — et sur quelle profondeur (12 mois ? 24 mois ?) Plus l'historique est profond, plus le calibrage des paramètres sera fiable. Rien d'urgent : ces fichiers ne servent qu'au chantier « paramètres », pas au run quotidien.
 
 ---
 
