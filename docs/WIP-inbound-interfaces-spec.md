@@ -1,5 +1,7 @@
 # WIP — Spécifications interfaces entrantes
 
+> **⚠️ SUPERSEDED/ARCHIVÉ — 2026-07-13.** Ce brouillon V0 (catalogue théorique M01-S04, jamais implémenté) est remplacé comme plan actif par [`ADR-042`](ADR-042-interface-doctrine.md) et sa face pilote [`DOCTRINE-INTERFACES.md`](DOCTRINE-INTERFACES.md), qui posent la doctrine V1 réellement décidée par le pilote (pivot fichier TSV, 4-5 flux gouvernés, pas 30+ interfaces catalogue). Le catalogue ci-dessous reste une référence de nommage pour d'éventuelles phases V2/V3, archivé tel quel, non réécrit.
+
 **Date** : 2026-05-25
 **Statut** : Brouillon V0 pour décantation.
 **Cadrage** : `CLAUDE.md` § North Star + `docs/AGENT-FLEET-CATALOG.md` §5bis (Pilotage interfaces).

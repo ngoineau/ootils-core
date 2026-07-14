@@ -138,3 +138,14 @@ Aucune FK depuis `daily_runs` (la table n'existe pas encore). Aucun endpoint RES
 - `src/ootils_core/notifications/l3_webhook.py` — le mécanisme d'escalade webhook L3 déjà en place dans le dépôt, réutilisé **par référence** pour PR3 (pas modifié par ce PR).
 - `src/ootils_core/staging/approve.py:approve_batch` — le point d'entrée d'approbation existant que PR3 appellera pour l'auto-approbation gouvernée.
 - `docs/ADR-013-external-interfaces.md` D4 — la décision partiellement supersédée par ce chantier pour le cas du run quotidien gouverné (voir §0 ; le fichier lui-même n'est pas patché dans ce PR).
+
+---
+
+## Amendement — 2026-07-13 (ADR-042)
+
+[ADR-042](ADR-042-interface-doctrine.md) (décision pilote 2026-07-13, doctrine complète des interfaces) reprend et referme ce chantier INT-1, avec deux conséquences directes sur le tableau §5 ci-dessus :
+
+- **La cible de PR3 change.** La ligne PR3 décrivait l'auto-approbation comme un appel à `staging/approve.py:approve_batch`. Ce point d'entrée est **enterré** par ADR-042 (décision 2, §2.1) — le pipeline `staging` n'a jamais été câblé jusqu'à `status='validated'` en usage réel (`staging/approve.py:154`) et n'est jamais retenu comme le chemin gouverné. PR3 (dans le plan renuméroté d'ADR-042 — voir son tableau de PRs) appellera à la place le nouveau service `engine/ingest/apply.py` (à écrire dans la PR-1 du plan ADR-042), qui devient l'unique écrivain canonique appelé à la fois par le pipeline gouverné et par l'endpoint `POST /v1/ingest/<entity>` (désormais fenced par `OOTILS_DIRECT_INGEST_ENABLED`).
+- **L'ordre des PRs change.** ADR-042 réordonne la livraison « la valeur d'abord » : la table `daily_runs` + les gardes runtime (ce qui était PR2 ici) et le moteur de décision gouvernée via `apply` (ce qui était PR3 ici) sont livrés **avant** la fermeture des deux chemins concurrents (fencer l'ingest direct, enterrer `staging` — regroupés dans la PR-1 du plan ADR-042, livrée en 5ᵉ position). Le webhook L3 (`notifications/l3_webhook.py`) référencé en PR3 reste inchangé — c'est le même mécanisme, seul son appelant côté auto-approbation change de cible.
+
+Voir ADR-042 pour la doctrine complète (flux V1, séquence entrante, sortant + réconciliation heuristique, compte-rendu, refus V1, questions 🎯 restantes).

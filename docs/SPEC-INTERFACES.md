@@ -1,5 +1,7 @@
 # Ootils Core — Specification Opérationnelle des Interfaces
 
+> **⚠️ SUPERSEDED (partiellement) — 2026-07-13.** La doctrine des interfaces V1 est désormais posée par [`ADR-042`](ADR-042-interface-doctrine.md) et sa face pilote [`DOCTRINE-INTERFACES.md`](DOCTRINE-INTERFACES.md) : pivot fichier TSV comme contrat, ingestion gouvernée par `feed_contracts`, réconciliation heuristique en sortie. Ce document reste une référence utile pour le catalogue plus large (agent-facing, MCP, webhooks, versioning API) au-delà du wedge V1 gouverné — mais pour tout ce qui touche à l'ingestion quotidienne entrante/sortante, ADR-042 fait autorité. Contenu conservé tel quel ci-dessous, non réécrit.
+>
 > Version 1.0 — 2026-04-18
 > Statut : **RÉFÉRENCE MIXTE (ACTUEL + CIBLE)** — ce document distingue ce qui existe aujourd'hui de ce qui est seulement proposé (`[PROPOSED]`). Il ne doit pas être lu comme une preuve que toutes les surfaces décrites sont déjà livrées.
 > Audiences : (a) intégrateurs humains, (b) connecteurs ERP (SAP / Dynamics / WMS), (c) agents IA (MCP / API directe).
