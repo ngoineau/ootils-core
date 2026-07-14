@@ -39,9 +39,9 @@ Operational concerns:
 - [`ADR-006-blockers-resolution.md`](ADR-006-blockers-resolution.md), [`ADR-007-showstoppers-resolution.md`](ADR-007-showstoppers-resolution.md), [`ADR-008-agent-operability-fixes.md`](ADR-008-agent-operability-fixes.md) — Punctual decisions during sprint hardening.
 - [`ADR-009-import-pipeline.md`](ADR-009-import-pipeline.md) — Ingest pipeline shape (2-step staging + DQ).
 - [`ADR-010-ghosts-tags.md`](ADR-010-ghosts-tags.md) — Ghost nodes and tags.
-- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009. D4 (mandatory human approval) is **partially superseded by [ADR-037](ADR-037-daily-run-and-governed-ingest.md)** for the governed daily-run case — D4 still stands for any ad-hoc upload outside a governed daily run.
+- [`ADR-013-external-interfaces.md`](ADR-013-external-interfaces.md) — File formats (TSV/CSV/XLSX/JSON), full-reload semantics, mandatory approval. Complements ADR-009. D4 (mandatory human approval) is **partially superseded by [ADR-037](ADR-037-daily-run-and-governed-ingest.md) and [ADR-042](ADR-042-interface-doctrine.md)** for the governed daily-run case — D4 still stands for any ad-hoc upload outside a governed daily run.
 
-### Full ADR register (001 → 037, chronological)
+### Full ADR register (001 → 042, chronological)
 
 Every ADR under `docs/`, numbered. The curated "read first" lists above are the entry points; this is the complete map.
 
@@ -84,16 +84,17 @@ Every ADR under `docs/`, numbered. The curated "read first" lists above are the 
 - [`ADR-034-scenario-compare.md`](ADR-034-scenario-compare.md) — Scenario compare (SC-1): read-only KPI comparison (shortages, stock value, fill rate) across 2-5 scenarios; stale computed with no new schema.
 - [`ADR-035-buy-program-segmentation.md`](ADR-035-buy-program-segmentation.md) — Buy-program segmentation (DEM-2 PR1): read-only, zero-migration ΔFVA proof — new dense per-program reader, single-source `buy_program_bucket()` taxonomy (honest `UNKNOWN` bucket), reuses `compute_fva` unchanged.
 - [`ADR-036-human-window.md`](ADR-036-human-window.md) — Human window (EXP-1 PR1): server-rendered `GET /ui` shell + `GET /v1/whoami`, read-only client over the existing API, no cookie/session, kill switch default OFF.
-- [`ADR-037-daily-run-and-governed-ingest.md`](ADR-037-daily-run-and-governed-ingest.md) — Daily run & governed ingest (INT-1 PR1): versioned `feed_contracts` registry (migration 073) + pilot-editable YAML under `config/feed-contracts/`; supersedes [ADR-013](ADR-013-external-interfaces.md) D4 for the daily-run case (governed option (a): auto-approve iff DQ green AND all guards green, red guard on a blocking feed escalates via the L3 webhook). PR1 is registry-only — no runtime read yet (daily_runs + guard evaluation land in PR2/PR3, REST surface in PR4).
+- [`ADR-037-daily-run-and-governed-ingest.md`](ADR-037-daily-run-and-governed-ingest.md) — Daily run & governed ingest (INT-1 PR1): versioned `feed_contracts` registry (migration 073) + pilot-editable YAML under `config/feed-contracts/`; supersedes [ADR-013](ADR-013-external-interfaces.md) D4 for the daily-run case (governed option (a): auto-approve iff DQ green AND all guards green, red guard on a blocking feed escalates via the L3 webhook). PR1 is registry-only — no runtime read yet; its PR2/PR3/PR4 plan is absorbed and reordered by [ADR-042](ADR-042-interface-doctrine.md) (§5 amended: PR3's auto-approval target moves from `staging/approve.py` to the future `engine/ingest/apply.py` service).
 - [`ADR-039-scenario-archive-cleanup.md`](ADR-039-scenario-archive-cleanup.md) — Fork purge + shortage retention (PURGE-1, migration 076): closes the ADR-011 follow-up — TTL-driven deletion of an archived scenario's child rows (never the `scenarios` row, tombstoned via `purged_at`) through a CI-guarded FK-safe whitelist, plus a separate bounded GC of long-resolved `shortages`. Dry-run-by-default CLI + read-only `GET /v1/maintenance/purge-preview`; no HTTP apply endpoint in V1. Amends [ADR-005](ADR-005-storage-layer.md) (events insert-only carve-out) and [ADR-021](ADR-021-shortage-truth.md) (delegated shortage-retention GC).
 - [`ADR-040-fork-bulk-copy-fk-derogation.md`](ADR-040-fork-bulk-copy-fk-derogation.md) — Framed FK-trigger derogation (`SET LOCAL session_replication_role='replica'`) around the fork's two bulk copies — 76% of fork wall time was row-by-row RI validation of a by-construction-valid copy; compensated fail-loudly by set-based checks, transparent fallback without the SET privilege. Measured: pilot fork 23.8 s → **5.93 s**. Extended 2026-07-12 to PURGE-1's whitelist DELETEs (shared helper `db/replica_role.py`).
 - [`ADR-041-scale2-fork-architecture.md`](ADR-041-scale2-fork-architecture.md) — **SCALE-2 arbitration, Accepted (pilot decision 2026-07-13)**: the pain was the governed fork, settled by ADR-040 (5.93 s) — status quo locked (`OOTILS_ENGINE=sql`), PyO3-default rejected for good (±4% re-bench), lazy-CoW deferred, rust-svc sandbox NOT triggered; reopening only via measurable thresholds T1/T2/T3. Resolves the RAM-vs-PG fork divergence by role assignment (PG = canonical/governed, RAM = interactive sandbox if T1 ever fires).
+- [`ADR-042-interface-doctrine.md`](ADR-042-interface-doctrine.md) — **Interface doctrine, Accepted (pilot decision 2026-07-13)**: closes the "4 concurrent ingestion paths" state (`staging` never wired past `status='validated'`, direct JSON ingest with DQ running after the canonical write, `bulk_ingest.py` bootstrap, `ingest_file.py` manual TSV drop) — pivot-file TSV as THE contract, `feed_contracts`-governed daily run (absorbs/reorders ADR-037 PR2/PR3/PR4), heuristic (no `ootils_ref`) outbound reconciliation, `customer_orders` promoted to blocking. `staging` is buried (its 20% deletion-ratio guard and rejection audit relocated, not lost); direct ingest is fenced behind a future `engine/ingest/apply.py` service + `OOTILS_DIRECT_INGEST_ENABLED`. Pilot-facing companion: [`DOCTRINE-INTERFACES.md`](DOCTRINE-INTERFACES.md). Open 🎯: forecast source, exact WO/CO feed contracts, real cadence/volume thresholds, report destination.
 
 ## Feature specs (SPEC-*)
 
 Read the SPEC matching the feature you are touching. SPECs are written before or during implementation; some have drifted from code — when in doubt, the code is authoritative.
 
-- [`SPEC-INTERFACES.md`](SPEC-INTERFACES.md) — Inbound/outbound interfaces.
+- [`SPEC-INTERFACES.md`](SPEC-INTERFACES.md) — Inbound/outbound interfaces. **Partially superseded** by [`ADR-042`](ADR-042-interface-doctrine.md) for V1 daily-run ingestion; kept as the broader agent-facing/MCP/webhooks catalogue.
 - [`SPEC-IMPORT-STATIC.md`](SPEC-IMPORT-STATIC.md) — Static (master) data import.
 - [`SPEC-IMPORT-DYNAMIC.md`](SPEC-IMPORT-DYNAMIC.md) — Dynamic (transactional) data import.
 - [`SPEC-INTEGRATION-STRATEGY.md`](SPEC-INTEGRATION-STRATEGY.md) — How import streams compose.
@@ -119,6 +120,7 @@ Read the SPEC matching the feature you are touching. SPECs are written before or
 ## User-facing
 
 - [`MANUEL-UTILISATEUR-DRAFT.md`](MANUEL-UTILISATEUR-DRAFT.md) — User manual (draft, FR).
+- [`DOCTRINE-INTERFACES.md`](DOCTRINE-INTERFACES.md) — Pilot-facing interface doctrine (FR): plain-language companion to [`ADR-042`](ADR-042-interface-doctrine.md) — the file-pivot contract, flow tables (cadence/criticality/owner), a walked-through daily run, what the daily report contains, and what's refused in V1 and why. Self-contained — meant to be shown as-is to the pilot's ERP team.
 
 ## Reviews & retrospectives
 

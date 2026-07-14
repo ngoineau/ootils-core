@@ -173,3 +173,14 @@ Aucun batch ne revient en arrière. Pour rejouer après correction côté ERP : 
 - `src/ootils_core/api/routers/ingest.py` (l'implémentation actuelle JSON-only à étendre)
 - `src/ootils_core/engine/dq/` (le DQ engine L1+L2 actuel)
 - Migration `007_import_pipeline.sql` (le schéma initial)
+
+---
+
+## Amendement — 2026-07-13 (ADR-037, ADR-042)
+
+D4 (« Approval obligatoire, pas d'auto-approve ») est **partiellement supersédée** :
+
+- D'abord par [ADR-037](ADR-037-daily-run-and-governed-ingest.md) (2026-07-11) pour le cas précis du **run quotidien couvert par un contrat `feed_contracts` actif** : l'auto-approbation devient possible ssi le pipeline DQ est vert ET toutes les gardes de flux sont vertes (option a) — une garde rouge sur un flux `blocking` bloque et escalade vers un humain, jamais un bypass silencieux.
+- Puis confirmée et étendue par [ADR-042](ADR-042-interface-doctrine.md) (décision pilote 2026-07-13), qui referme la doctrine complète des interfaces : le pipeline `staging` décrit par D2/D4/D5/D6 ci-dessus (schéma `staging`, `POST /v1/staging/batches/{id}/approve`, `/diff` pre-approval) est **enterré** — jamais câblé jusqu'à `status='validated'` en pratique — au profit d'un pipeline gouverné piloté par `feed_contracts`. Les deux gardes de valeur nommées en D4/Risques (le ratio de soft-delete 20 % et l'audit de rejet avec raison obligatoire) sont **relogées** comme gardes du nouveau pipeline, pas supprimées.
+
+D4 reste la doctrine par défaut pour tout batch **hors** run quotidien gouverné (un upload ad-hoc sans contrat de flux associé). D1 (formats fichiers) est également affiné par ADR-042 : les déploiements pilote n'utilisent que le TSV (règle pilote 2026-07-11, « pas de CSV, c'est un enfer ») — l'enum multi-formats de D1 reste valide pour d'autres déploiements, pas pour celui-ci. Voir ADR-042 pour le détail complet (doctrine, plan de PRs, questions ouvertes).
