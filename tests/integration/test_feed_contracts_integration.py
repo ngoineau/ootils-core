@@ -26,10 +26,14 @@ Covers the DB half of src/ootils_core/interfaces/contracts.py + migration 073:
      and schema; a second OotilsDB() bootstrap likewise (defensive-idempotence
      contract, canonical pattern of migration 063's header).
 
-feed_contracts has NO foreign key in either direction — deliberately (no
-daily_runs FK until PR3, no scenarios FK: global ingest-time config, not
-scenario-scoped) — asserted below, so the sibling "FK-ordered cleanup"
-pattern collapses to a single pre-test TRUNCATE.
+feed_contracts has NO OUTBOUND foreign key (no scenarios FK: global
+ingest-time config, not scenario-scoped). Since migration 078 (ADR-042 PR-2,
+which absorbed ADR-037's INT-1 PR2 earlier than the "PR3" this file
+originally predicted) it has exactly ONE inbound FK —
+daily_runs.feed_contract_id, ON DELETE RESTRICT — asserted below. The
+pre-test cleanup therefore truncates daily_runs alongside feed_contracts:
+Postgres refuses to TRUNCATE a referenced table alone, even when the
+referencing table is empty.
 """
 from __future__ import annotations
 
@@ -79,15 +83,17 @@ SEED_KEYS = ["on-hand", "open-purchase-orders", "open-work-orders"]
 
 @pytest.fixture(autouse=True)
 def _clean_feed_contracts(migrated_db):
-    """Pre-test TRUNCATE on its own autocommit connection. feed_contracts has
-    no FK in either direction (asserted by
-    test_no_fk_constraints_in_either_direction) so the FK-ordered cleanup is
-    a single statement. Pre-test only — a post-yield TRUNCATE could block on
-    the function-scoped `conn` fixture's still-open transaction; committed
+    """Pre-test TRUNCATE on its own autocommit connection. daily_runs
+    (migration 078, ADR-042 PR-2) references feed_contracts, and Postgres
+    refuses to truncate a referenced table alone even when the referencing
+    table is empty — both go in ONE statement, child listed with its parent
+    (asserted by test_fk_surface_no_outbound_inbound_daily_runs_only).
+    Pre-test only — a post-yield TRUNCATE could block on the
+    function-scoped `conn` fixture's still-open transaction; committed
     leftovers (the CLI tests commit) are swept by the NEXT test's pre-clean
     and by the module teardown's DROP of all public tables."""
     with psycopg.connect(migrated_db, autocommit=True) as c:
-        c.execute("TRUNCATE feed_contracts")
+        c.execute("TRUNCATE daily_runs, feed_contracts")
     yield
 
 
@@ -204,17 +210,27 @@ class TestMigration073Schema:
         assert "UNIQUE" in active_def
         assert "WHERE active" in active_def
 
-    def test_no_fk_constraints_in_either_direction(self, conn):
-        """No daily_runs FK yet (PR3), no scenarios FK (global ingest-time
-        config) — the registry stands alone in PR1."""
-        n = conn.execute(
+    def test_fk_surface_no_outbound_inbound_daily_runs_only(self, conn):
+        """No OUTBOUND FK (no scenarios FK: global ingest-time config, not
+        scenario-scoped). Exactly ONE inbound FK since migration 078
+        (ADR-042 PR-2, which absorbed the "PR3" this test originally
+        predicted): daily_runs.feed_contract_id, ON DELETE RESTRICT
+        (confdeltype 'r' — the explicit-RESTRICT repo convention, never the
+        Postgres-default NO ACTION)."""
+        outbound = conn.execute(
             "SELECT COUNT(*) AS n FROM pg_constraint "
-            "WHERE contype = 'f' AND ("
-            "    conrelid = 'feed_contracts'::regclass "
-            "    OR confrelid = 'feed_contracts'::regclass"
-            ")"
+            "WHERE contype = 'f' AND conrelid = 'feed_contracts'::regclass"
         ).fetchone()["n"]
-        assert n == 0
+        assert outbound == 0
+        inbound = conn.execute(
+            "SELECT conrelid::regclass::text AS source, confdeltype "
+            "FROM pg_constraint "
+            "WHERE contype = 'f' AND confrelid = 'feed_contracts'::regclass "
+            "ORDER BY conrelid::regclass::text"
+        ).fetchall()
+        assert [(r["source"], r["confdeltype"]) for r in inbound] == [
+            ("daily_runs", "r")
+        ]
 
     def test_feed_key_version_unique(self, conn):
         _raw_insert(conn, feed_key="uq-feed", version=1, active=True)
