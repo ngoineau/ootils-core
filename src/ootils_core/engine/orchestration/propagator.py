@@ -138,7 +138,13 @@ class PropagationEngine:
             # rewired from an old bucket to a new bucket before propagation,
             # so the old bucket is no longer reachable from the trigger node
             # via current outbound edges.
-            trigger_node = self._store.get_node(trigger_node_id, scenario_id)
+            # include_inactive=True: same rationale as expand_dirty_subgraph
+            # (ingest lifecycle retraction fix, 2026-07-17) — this lookup only
+            # reads item_id/location_id to widen the dirty PI window, so a
+            # trigger node deactivated by the same write must still resolve.
+            trigger_node = self._store.get_node(
+                trigger_node_id, scenario_id, include_inactive=True,
+            )
             if (
                 isinstance(trigger_node, Node)
                 and trigger_node.item_id is not None

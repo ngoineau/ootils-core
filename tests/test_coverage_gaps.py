@@ -930,7 +930,7 @@ class TestTraversalGaps:
         nodes = {trigger: node_trigger, b: node_b, c: node_c, d: node_d, e: None}
 
         store = MagicMock()
-        store.get_node.side_effect = lambda nid, sid: nodes.get(nid)
+        store.get_node.side_effect = lambda nid, sid, **_: nodes.get(nid)
         store.get_edges_from.side_effect = lambda nid, sid: edges_from.get(nid, [])
 
         traversal = GraphTraversal(store)

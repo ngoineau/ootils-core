@@ -133,7 +133,7 @@ class TestExpandDirtySubgraph:
         node_b = make_node(b, node_type="OnHandSupply", scenario_id=scenario)
         edge_ab = make_edge(a, b, scenario)
         store = MagicMock()
-        store.get_node.side_effect = lambda nid, sid: node_a if nid == a else node_b
+        store.get_node.side_effect = lambda nid, sid, **_: node_a if nid == a else node_b
         store.get_edges_from.side_effect = lambda nid, sid: [edge_ab] if nid == a else []
         traversal = GraphTraversal(store)
         result = traversal.expand_dirty_subgraph(a, scenario, (date(2025, 1, 1), date(2025, 12, 31)))
@@ -153,7 +153,7 @@ class TestExpandDirtySubgraph:
         )
         edge_ab = make_edge(a, b, scenario)
         store = MagicMock()
-        store.get_node.side_effect = lambda nid, sid: node_a if nid == a else node_b
+        store.get_node.side_effect = lambda nid, sid, **_: node_a if nid == a else node_b
         store.get_edges_from.side_effect = lambda nid, sid: [edge_ab] if nid == a else []
         traversal = GraphTraversal(store)
         result = traversal.expand_dirty_subgraph(a, scenario, (date(2025, 1, 1), date(2025, 12, 31)))
@@ -173,7 +173,7 @@ class TestExpandDirtySubgraph:
         )
         edge_ab = make_edge(a, b, scenario)
         store = MagicMock()
-        store.get_node.side_effect = lambda nid, sid: node_a if nid == a else node_b
+        store.get_node.side_effect = lambda nid, sid, **_: node_a if nid == a else node_b
         store.get_edges_from.side_effect = lambda nid, sid: [edge_ab] if nid == a else []
         traversal = GraphTraversal(store)
         result = traversal.expand_dirty_subgraph(a, scenario, (date(2025, 1, 1), date(2025, 12, 31)))
@@ -190,7 +190,7 @@ class TestExpandDirtySubgraph:
         edge_ab = make_edge(a, b, scenario)
         edge_ba = make_edge(b, a, scenario)
         store = MagicMock()
-        store.get_node.side_effect = lambda nid, sid: node_a if nid == a else node_b
+        store.get_node.side_effect = lambda nid, sid, **_: node_a if nid == a else node_b
         store.get_edges_from.side_effect = lambda nid, sid: [edge_ab] if nid == a else [edge_ba]
         traversal = GraphTraversal(store)
         # Should terminate (not loop forever) and include both nodes

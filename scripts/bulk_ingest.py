@@ -89,9 +89,14 @@ def _copy_tsv_to_temp(
 
 
 def _read_tsv_header(tsv_path: Path) -> list[str]:
-    """Read the header row of a TSV file."""
+    """Read the header row of a TSV file.
+
+    quoting=csv.QUOTE_NONE — same rationale as scripts/ingest_file.py's
+    parse_tsv: TSV-FILES-SPEC.md §1.1 mandates no quoting, and a header
+    name containing a literal `"` must not be silently mangled.
+    """
     with tsv_path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
+        reader = csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
         return [h.strip() for h in next(reader)]
 
 

@@ -117,6 +117,12 @@ def parse_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Parse a UTF-8 TSV file into (headers, rows-as-dicts).
 
     - Tabulation separator (no escape — values must not contain raw tabs).
+    - No quoting whatsoever (TSV-FILES-SPEC.md §1.1: "aucun guillemet"): a
+      literal `"` in a cell (e.g. an inch-mark item description like
+      `"U" BOLT 1/4"`) must be preserved verbatim, never treated as a CSV
+      quote character. `quoting=csv.QUOTE_NONE` is required here — the
+      default QUOTE_MINIMAL silently swallows a leading `"` and everything
+      up to the next `"`, corrupting the value.
     - First non-empty line is the header.
     - Empty lines are skipped.
     - BOM (UTF-8 signature) is tolerated and stripped.
@@ -128,7 +134,7 @@ def parse_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         raise ValueError(f"input file is empty: {path}")
 
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
+        reader = csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
         rows = [r for r in reader if any(cell.strip() for cell in r)]
 
     if not rows:
