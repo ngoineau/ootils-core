@@ -26,11 +26,22 @@ CONTRACT (deliberately minimal, V1):
     Slack incoming-webhook). The payload carries NO token and NO secret: only
     the recommendation id, action, decision level, the external item/location
     ids and a human-readable message.
+
+ADR-042 PR-3 ADDITION (``engine.ingest.apply``, migration 079): a governed
+daily run's ``blocking``-feed escalation reuses this SAME transport
+(``_post_payload``, factored out of ``post_l3_pending``) via a sibling
+payload/function, ``DailyRunEscalationPayload``/
+``notify_daily_run_escalation`` — a daily-run escalation is not a
+recommendation (no ``recommendation_id`` exists at that point) and is NOT
+gated by an ``L<n>`` level (ADR-037 §0 treats every ``blocking``-feed
+failure as human-escalation-worthy unconditionally). ``post_l3_pending``'s
+own public contract/behaviour is unchanged by this refactor.
 """
 from __future__ import annotations
 
 import logging
 import os
+from datetime import date
 from typing import Optional
 from uuid import UUID
 
@@ -115,21 +126,26 @@ def build_l3_payload(
     )
 
 
-def post_l3_pending(payload: L3PendingPayload, *, url: Optional[str] = None) -> bool:
-    """POST ``payload`` to the L3 webhook, best-effort.
+def _post_payload(payload: BaseModel, *, url: Optional[str], log_ref: str) -> bool:
+    """Shared best-effort POST, factored out of ``post_l3_pending`` so
+    ``notify_daily_run_escalation`` (ADR-042 PR-3, a non-recommendation
+    escalation) reuses the SAME transport/failure semantics instead of a
+    parallel implementation. ``log_ref`` is a secret-free identifier for the
+    log lines only (a recommendation id, or a daily-run feed_key) — never
+    part of the POSTed payload itself.
 
-    Returns True when the request was actually sent (completed without raising),
-    False when it was skipped (no URL configured, httpx unavailable) or failed.
-    Every failure is swallowed and logged at WARNING — this MUST NEVER raise, so
-    a caller can invoke it inside or around a DB transaction without risk."""
+    Returns True when the request was actually sent (completed without
+    raising), False when it was skipped (no URL configured, httpx
+    unavailable) or failed. Every failure is swallowed and logged at
+    WARNING — this MUST NEVER raise, so a caller can invoke it inside or
+    around a DB transaction without risk."""
     target = resolve_webhook_url(url)
     if target is None:
         # Opt-out: no destination configured. Silent by design.
         return False
     if not _HTTPX_AVAILABLE:
         logger.warning(
-            "l3_webhook.skipped reason=httpx_unavailable recommendation_id=%s",
-            payload.recommendation_id,
+            "l3_webhook.skipped reason=httpx_unavailable ref=%s", log_ref,
         )
         return False
 
@@ -141,28 +157,28 @@ def post_l3_pending(payload: L3PendingPayload, *, url: Optional[str] = None) -> 
         )
         if response.status_code >= 400:
             logger.warning(
-                "l3_webhook.non_2xx recommendation_id=%s status=%s",
-                payload.recommendation_id,
-                response.status_code,
+                "l3_webhook.non_2xx ref=%s status=%s", log_ref, response.status_code,
             )
         else:
             logger.info(
-                "l3_webhook.sent recommendation_id=%s action=%s level=%s status=%s",
-                payload.recommendation_id,
-                payload.action,
-                payload.decision_level,
-                response.status_code,
+                "l3_webhook.sent ref=%s status=%s", log_ref, response.status_code,
             )
         return True
     except Exception as exc:
         # Best-effort: never propagate. A missing/unreachable endpoint or a
-        # timeout must not affect the recommendation that was just persisted.
-        logger.warning(
-            "l3_webhook.failed recommendation_id=%s error=%s",
-            payload.recommendation_id,
-            exc,
-        )
+        # timeout must not affect the write that was just persisted.
+        logger.warning("l3_webhook.failed ref=%s error=%s", log_ref, exc)
         return False
+
+
+def post_l3_pending(payload: L3PendingPayload, *, url: Optional[str] = None) -> bool:
+    """POST ``payload`` to the L3 webhook, best-effort.
+
+    Returns True when the request was actually sent (completed without raising),
+    False when it was skipped (no URL configured, httpx unavailable) or failed.
+    Every failure is swallowed and logged at WARNING — this MUST NEVER raise, so
+    a caller can invoke it inside or around a DB transaction without risk."""
+    return _post_payload(payload, url=url, log_ref=str(payload.recommendation_id))
 
 
 def notify_l3_pending(
@@ -191,3 +207,51 @@ def notify_l3_pending(
         location_external_id=location_external_id,
     )
     return post_l3_pending(payload, url=url)
+
+
+class DailyRunEscalationPayload(BaseModel):
+    """The minimal typed body POSTed when a ``blocking`` feed's guard/DQ
+    verdict blocks a governed daily run's auto-approval (ADR-042 decision 3
+    step 7 / ADR-037 §0 option (a), PR-3, ``engine.ingest.apply``).
+
+    A daily-run escalation is not a recommendation awaiting approval — no
+    ``recommendation_id`` exists at this point — so it carries its own
+    minimal payload rather than reusing ``L3PendingPayload``. No secret, no
+    token: attribution is via ``feed_key`` and ``run_date``, both public
+    identifiers a human can act on."""
+
+    event: str = Field(default="daily_run_escalated")
+    run_date: date
+    feed_key: str
+    criticality: str
+    reason: str
+    message: str
+
+
+def notify_daily_run_escalation(
+    *,
+    run_date: date,
+    feed_key: str,
+    criticality: str,
+    reason: str,
+    message: str,
+    url: Optional[str] = None,
+) -> bool:
+    """Best-effort webhook ping for a daily-run escalation.
+
+    Reuses the SAME transport as ``notify_l3_pending``
+    (``OOTILS_WEBHOOK_L3_URL``, best-effort, no retry, no secret in the
+    payload — see ``_post_payload``). Unlike ``notify_l3_pending`` this is
+    NOT gated by an ``L<n>`` decision level: ADR-037 §0 treats ANY
+    ``blocking``-feed failure as human-escalation-worthy by construction —
+    there is no decision-ladder level attached to a daily run, so the
+    caller (``engine.ingest.apply.record_daily_run_decision``) already only
+    calls this for a FAILED ``blocking`` feed, and every call here fires."""
+    payload = DailyRunEscalationPayload(
+        run_date=run_date,
+        feed_key=feed_key,
+        criticality=criticality,
+        reason=reason,
+        message=message,
+    )
+    return _post_payload(payload, url=url, log_ref=f"daily_run:{feed_key}")
