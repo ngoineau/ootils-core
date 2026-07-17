@@ -46,10 +46,10 @@ The seven cases (one per backend contract, per the AN-1 hand-off):
      event skips (no agent_runs row); a tick after a calc_run_finished runs and
      advances the persisted cursor; and WITHOUT the flag the metrics stay
      byte-identical to legacy (no cursor key).
-  7. Migration-071 CHECK — emit_stream_event succeeds for each of the five
-     FLEET_EVENT_TYPES against the real constraint, catching any drift between
-     FLEET_EVENT_TYPES (emitter) <-> VALID_EVENT_TYPES (events router) <-> the
-     events.event_type CHECK (migration 071).
+  7. Migration-071/076/079 CHECK — emit_stream_event succeeds for each of the
+     seven FLEET_EVENT_TYPES against the real constraint, catching any drift
+     between FLEET_EVENT_TYPES (emitter) <-> VALID_EVENT_TYPES (events
+     router) <-> the events.event_type CHECK (migrations 071 + 076 + 079).
 
 Coverage note (justified level-below, case 5): the POST /v1/drp/run endpoint's
 recommendation_created emission uses the IDENTICAL, already-proven shared helper
@@ -891,8 +891,8 @@ def test_subscribe_flag_off_is_byte_identical_no_cursor(seeded_baseline):
 
 @pytest.mark.parametrize("event_type", sorted(FLEET_EVENT_TYPES))
 def test_migration_071_check_accepts_every_fleet_type(event_type, migrated_db):
-    """Each of the five FLEET_EVENT_TYPES must INSERT cleanly against the real
-    events.event_type CHECK (migration 071). A CHECK that lags the emitter would
+    """Each of the FLEET_EVENT_TYPES must INSERT cleanly against the real
+    events.event_type CHECK (migrations 071 + 076 + 079). A CHECK that lags the emitter would
     surface here as a psycopg CheckViolation, not a silent miss."""
     with _db_conn(migrated_db) as c:
         fork = _seed_fork(c, "fe-071")
@@ -923,4 +923,5 @@ def test_fleet_event_types_do_not_drift_from_router_valid_set():
         "recommendation_created", "shortage_detected", "calc_run_finished",
         "snapshot_captured", "outcome_evaluated",
         "purge_executed",  # PURGE-1 (ADR-039, migration 076)
+        "daily_run_completed",  # ADR-042 PR-3 / ADR-037 INT-1 PR3 (migration 079)
     }

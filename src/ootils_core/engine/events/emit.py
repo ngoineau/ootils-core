@@ -55,6 +55,19 @@ sync with the migration 071 header block):
       old_text        = executed_by (who/what triggered the run)
       new_text        = maintenance_purge_runs.run_id (UUID as text)
       new_quantity    = rows_deleted_total for this scenario's run
+  daily_run_completed:
+      field_changed   = the governed decision ('auto_approved' | 'escalated' |
+                        'degraded') — the discriminant (migration 079,
+                        ADR-042 PR-3 / ADR-037 INT-1 PR3)
+      new_date        = run_date the decision covers
+      new_quantity    = count of feeds included in the decision
+      old_text        = comma-joined feed_keys whose combined guard/DQ
+                        verdict was NOT green (the culprits), NULL when
+                        every feed was green (never an empty string —
+                        None-honest)
+      new_text        = not used (no companion audit table — the decision is
+                        derived on read from daily_runs, migration 078; this
+                        event row IS the durable record of the decision)
 
 ``scenario_id`` (NOT NULL, migration 002) scopes the event to the fork/baseline.
 snapshot_captured / outcome_evaluated are baseline-only by nature (ADR-030) but
@@ -66,7 +79,8 @@ events, one per affected scenario (still RUN granularity — one per scenario's
 own delete, never per shortage row).
 
 Keep FLEET_EVENT_TYPES in sync with the events.event_type CHECK constraint
-(migrations 071 + 076) and with VALID_EVENT_TYPES in api/routers/events.py.
+(migrations 071 + 076 + 079) and with VALID_EVENT_TYPES in
+api/routers/events.py.
 """
 from __future__ import annotations
 
@@ -77,10 +91,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-# The five fleet-emission types added by migration 071 (#401 AN-1). Validated
-# locally so a typo fails loudly in Python (ValueError) rather than as an opaque
-# psycopg CHECK violation at INSERT time. This set is the subset emit_stream_event
-# is meant to write; the DB CHECK (migration 071) is the full authoritative list.
+# The fleet-emission types added by migration 071 (#401 AN-1) + migration 076
+# (PURGE-1) + migration 079 (ADR-042 PR-3). Validated locally so a typo fails
+# loudly in Python (ValueError) rather than as an opaque psycopg CHECK
+# violation at INSERT time. This set is the subset emit_stream_event is meant
+# to write; the DB CHECK (migrations 071/076/079) is the full authoritative
+# list.
 FLEET_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "recommendation_created",
@@ -89,6 +105,7 @@ FLEET_EVENT_TYPES: frozenset[str] = frozenset(
         "snapshot_captured",
         "outcome_evaluated",
         "purge_executed",
+        "daily_run_completed",
     }
 )
 
