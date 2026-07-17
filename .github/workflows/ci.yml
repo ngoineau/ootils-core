@@ -70,7 +70,11 @@ jobs:
 
       - name: Install pip-audit + project
         run: |
-          pip install --upgrade pip
+          # setuptools >= 83 : PYSEC-2026-3447 (advisory publiee 2026-07,
+          # fix disponible) — on met a niveau l'outil d'environnement plutot
+          # que d'ajouter un ignore, contrairement aux ignores documentes
+          # ci-dessous qui n'ont PAS de fix atteignable.
+          pip install --upgrade pip "setuptools>=83"
           pip install pip-audit
           pip install -e ".[dev]"
 
