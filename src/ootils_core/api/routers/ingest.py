@@ -263,6 +263,21 @@ def _ensure_projection_series(
     """
     Ensure a ProjectionSeries + PI bucket nodes exist for (item, location, scenario).
     Creates them if missing. Returns True if created, False if already existed.
+
+    Also chains the 90 buckets with 'feeds_forward' edges (bucket[i] -> bucket[i+1],
+    weight_ratio=1.0), mirroring migration 019's backfill. Without this chain,
+    GraphTraversal.expand_dirty_subgraph's downstream BFS (traversal.py) has no
+    edge to walk past the single PI bucket a supply/demand node is wired to, so
+    incremental propagation (POST /v1/events) only ever recomputes that one
+    bucket and never cascades the closing_stock change to the rest of the
+    horizon — silently stale projections outside a full recompute (found via
+    the 2026-07-17 ingest lifecycle retraction test, which is the first test
+    to drive the incremental path in isolation; every other caller in this
+    file's test suite masks the gap with a full recompute, which recomputes
+    every PI node directly and never needs the edges). This bug predates and
+    is independent of the retraction fix: it affects every ProjectionSeries
+    created through this ingest path (never through the demo seed, which
+    migration 019 already backfilled).
     """
     from datetime import date, timedelta
 
@@ -297,9 +312,14 @@ def _ensure_projection_series(
     ).fetchone()
     actual_series_id = UUID(str(row["series_id"])) if row else series_id
 
+    bucket_node_ids: list[UUID] = []
+    bucket_spans: list[tuple[date, date]] = []
     for i in range(90):
         day_start = today + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
+        node_id = uuid4()
+        bucket_node_ids.append(node_id)
+        bucket_spans.append((day_start, day_end))
         db.execute(
             """
             INSERT INTO nodes (
@@ -320,14 +340,39 @@ def _ensure_projection_series(
             ON CONFLICT DO NOTHING
             """,
             (
-                uuid4(), scenario_id, item_id, location_id,
+                node_id, scenario_id, item_id, location_id,
                 day_start, day_end, day_start,
                 actual_series_id, i,
             ),
         )
 
+    # Chain consecutive buckets: PI[i].closing_stock -> PI[i+1].opening_stock
+    # (same contract as migration 019's backfill INSERT).
+    for i in range(len(bucket_node_ids) - 1):
+        from_id = bucket_node_ids[i]
+        to_id = bucket_node_ids[i + 1]
+        # Mirrors migration 019's backfill exactly: effective_start =
+        # n1.time_span_start, effective_end = n2.time_span_end.
+        effective_start, _ = bucket_spans[i]
+        _, effective_end = bucket_spans[i + 1]
+        db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio, effective_start, effective_end,
+                active, created_at
+            ) VALUES (
+                %s, 'feeds_forward', %s, %s, %s,
+                0, 1.0, %s, %s,
+                TRUE, now()
+            )
+            ON CONFLICT DO NOTHING
+            """,
+            (uuid4(), from_id, to_id, scenario_id, effective_start, effective_end),
+        )
+
     logger.info(
-        "_ensure_projection_series: created series + 90 PI buckets for item=%s loc=%s",
+        "_ensure_projection_series: created series + 90 PI buckets + 89 feeds_forward edges for item=%s loc=%s",
         item_id, location_id,
     )
     return True

@@ -20,6 +20,15 @@ Proof cycles here (each on its own item so projections never interfere):
   (e)     planning params: CREATED with omitted cells → DB DEFAULTs applied
           (forecast_consumption_strategy='max_only', consumption_window_days=7);
           SCD2 rotation with an omitted cell → previous value preserved.
+  (f)     feeds_forward chain SHAPE: a series created through the real ingest
+          path carries exactly N-1 edges strictly chaining consecutive
+          bucket_sequence values (no loop, no skip, no duplicate), all
+          active, weight_ratio=1.0 — the 2026-07-17 `_ensure_projection_series`
+          fix (before it, ingest-created series had ZERO feeds_forward edges
+          and incremental propagation never cascaded past the first bucket).
+  (g)     migration 080 backfill: a pre-fix series (PI nodes, no edges —
+          INSERTed directly) gets its exact N-1 chain from the migration SQL,
+          and a re-execution adds nothing (NOT EXISTS guard, idempotent).
 
 Propagation is driven through the REAL production path after a TSV load:
 POST /v1/calc/run {"full_recompute": true} (all active PI buckets re-derived;
@@ -42,6 +51,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg
@@ -114,6 +124,8 @@ def seed(api_client):
          "item_type": "component", "uom": "EA", "status": "active"},
         {"external_id": _ext("ITEM-PP2"), "name": "Planning params item 2",
          "item_type": "component", "uom": "EA", "status": "active"},
+        {"external_id": _ext("ITEM-CHAIN"), "name": "Feeds-forward chain item",
+         "item_type": "component", "uom": "EA", "status": "active"},
     ]
     resp = api_client.post("/v1/ingest/items", json={"items": items}, headers=AUTH)
     assert resp.status_code == 200, resp.text
@@ -140,6 +152,7 @@ def seed(api_client):
         "item_incr": _ext("ITEM-INCR"),
         "item_pp1": _ext("ITEM-PP1"),
         "item_pp2": _ext("ITEM-PP2"),
+        "item_chain": _ext("ITEM-CHAIN"),
         "loc": _ext("LOC"),
         "sup": _ext("SUP"),
     }
@@ -630,3 +643,258 @@ def test_planning_params_rotation_empty_cell_keeps_previous_value(api_client, se
         (seed["item_pp2"],),
     )
     assert len(history) == 2
+
+
+# ─────────────────────────────────────────────────────────────
+# (f) — feeds_forward chain SHAPE on a series created by the real ingest path
+# ─────────────────────────────────────────────────────────────
+
+
+def _series_id_for(item_ext: str, loc_ext: str) -> UUID:
+    row = _fetchone(
+        """
+        SELECT ps.series_id
+        FROM projection_series ps
+        JOIN items i ON i.item_id = ps.item_id
+        JOIN locations l ON l.location_id = ps.location_id
+        WHERE i.external_id = %s AND l.external_id = %s AND ps.scenario_id = %s
+        """,
+        (item_ext, loc_ext, BASELINE_SCENARIO_ID),
+    )
+    assert row is not None, f"no projection_series for {item_ext}@{loc_ext}"
+    return UUID(str(row["series_id"]))
+
+
+def test_new_series_feeds_forward_chain_shape(api_client, seed):
+    """Structural proof of the `_ensure_projection_series` fix: an ingest that
+    creates a NEW series must chain its N buckets with exactly N-1
+    feeds_forward edges — from=seq i → to=seq i+1, strictly consecutive, no
+    self-loop, no skip, no duplicate, never leaving the series — all active,
+    weight_ratio=1.0 (migration 019's contract). Before the fix this SELECT
+    returned ZERO rows for every ingest-created series."""
+    po_ext = _ext("PO-CHAIN")
+    resp = api_client.post(
+        "/v1/ingest/purchase-orders",
+        json={"purchase_orders": [{
+            "external_id": po_ext,
+            "item_external_id": seed["item_chain"],
+            "location_external_id": seed["loc"],
+            "supplier_external_id": seed["sup"],
+            "quantity": 10,
+            "uom": "EA",
+            "expected_delivery_date": (TODAY + timedelta(days=3)).isoformat(),
+            "status": "confirmed",
+        }]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["action"] == "inserted"
+
+    series_id = _series_id_for(seed["item_chain"], seed["loc"])
+
+    n_buckets = _fetchone(
+        """
+        SELECT COUNT(*) AS n FROM nodes
+        WHERE projection_series_id = %s
+          AND node_type = 'ProjectedInventory' AND active = TRUE
+        """,
+        (series_id,),
+    )["n"]
+    assert n_buckets == 90, f"expected the 90 daily PI buckets, got {n_buckets}"
+
+    # Every feeds_forward edge LEAVING a node of the series, with both ends'
+    # coordinates — the raw material for every structural assertion below.
+    rows = _fetchall(
+        """
+        SELECT n1.bucket_sequence AS from_seq,
+               n2.bucket_sequence AS to_seq,
+               n2.projection_series_id AS to_series,
+               e.active AS edge_active,
+               e.weight_ratio,
+               e.scenario_id
+        FROM edges e
+        JOIN nodes n1 ON n1.node_id = e.from_node_id
+        JOIN nodes n2 ON n2.node_id = e.to_node_id
+        WHERE e.edge_type = 'feeds_forward'
+          AND n1.projection_series_id = %s
+        ORDER BY n1.bucket_sequence
+        """,
+        (series_id,),
+    )
+
+    # Exactly N-1 edges for N buckets.
+    assert len(rows) == n_buckets - 1, (
+        f"expected {n_buckets - 1} feeds_forward edges for {n_buckets} "
+        f"buckets, got {len(rows)}"
+    )
+
+    # Strict consecutive chaining: the ordered (from, to) list IS the ideal
+    # chain — one comparison rules out loops (i,i), skips (i,i+2), backward
+    # edges, and duplicates all at once.
+    pairs = [(r["from_seq"], r["to_seq"]) for r in rows]
+    assert pairs == [(i, i + 1) for i in range(n_buckets - 1)], (
+        f"chain is not strictly consecutive: {pairs[:5]}... "
+    )
+
+    for r in rows:
+        # An edge must never jump to another series' bucket.
+        assert UUID(str(r["to_series"])) == series_id
+        assert r["edge_active"] is True
+        assert r["weight_ratio"] == 1
+        assert UUID(str(r["scenario_id"])) == BASELINE_SCENARIO_ID
+
+    # And nothing feeds INTO the series from outside it (no foreign edge
+    # masquerading as part of the chain).
+    inbound_foreign = _fetchone(
+        """
+        SELECT COUNT(*) AS n
+        FROM edges e
+        JOIN nodes n2 ON n2.node_id = e.to_node_id
+        JOIN nodes n1 ON n1.node_id = e.from_node_id
+        WHERE e.edge_type = 'feeds_forward'
+          AND n2.projection_series_id = %s
+          AND (n1.projection_series_id IS DISTINCT FROM %s)
+        """,
+        (series_id, series_id),
+    )["n"]
+    assert inbound_foreign == 0
+
+
+# ─────────────────────────────────────────────────────────────
+# (g) — migration 080: exact backfill of a pre-fix series + idempotence
+# ─────────────────────────────────────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_080 = (
+    _REPO_ROOT / "src" / "ootils_core" / "db" / "migrations"
+    / "080_backfill_feeds_forward_edges.sql"
+)
+
+
+class TestMigration080Backfill:
+    def test_backfill_exact_then_reexecution_is_noop(self, migrated_db, conn):
+        """Backfill + defensive-idempotence contract of migration 080 (same
+        NOT EXISTS guard as 019). Triple execution overall, mirroring
+        test_reexecuting_078_sql_is_noop — with ONE adaptation: unlike 078,
+        the 080 file carries NO internal BEGIN/COMMIT (a single INSERT ...
+        SELECT), so it runs INSIDE this test's transaction on the `conn`
+        fixture and everything — seed included — rolls back at teardown.
+        Execution #1 was the migrated_db boot (fresh DB, zero series: no-op);
+        #2 backfills the pre-fix series seeded below; #3 must add nothing.
+
+        Isolation lesson: nothing here ever COMMITs, so no finalizer is
+        needed — the rollback IS the cleanup (strictly safer than the
+        neutralizing finalizer used for the module's committed seeds)."""
+        today = date.today()
+        n_buckets = 5
+
+        # ── Seed the PRE-FIX state: item + location + series + N active PI
+        # buckets, and deliberately ZERO feeds_forward edges (what every
+        # ingest-created series looked like before `_ensure_projection_series`
+        # learned to chain them).
+        item_id, location_id, series_id = uuid4(), uuid4(), uuid4()
+        conn.execute(
+            """
+            INSERT INTO items (item_id, name, item_type, uom, status, external_id)
+            VALUES (%s, 'Mig080 backfill item', 'component', 'EA', 'active', %s)
+            """,
+            (item_id, _ext("MIG080-ITEM")),
+        )
+        conn.execute(
+            """
+            INSERT INTO locations (location_id, name, location_type, external_id)
+            VALUES (%s, 'Mig080 backfill DC', 'dc', %s)
+            """,
+            (location_id, _ext("MIG080-LOC")),
+        )
+        conn.execute(
+            """
+            INSERT INTO projection_series
+                (series_id, item_id, location_id, scenario_id,
+                 horizon_start, horizon_end)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (series_id, item_id, location_id, BASELINE_SCENARIO_ID,
+             today, today + timedelta(days=n_buckets)),
+        )
+        for i in range(n_buckets):
+            day_start = today + timedelta(days=i)
+            conn.execute(
+                """
+                INSERT INTO nodes (
+                    node_id, node_type, scenario_id, item_id, location_id,
+                    time_grain, time_span_start, time_span_end, time_ref,
+                    projection_series_id, bucket_sequence,
+                    opening_stock, inflows, outflows, closing_stock,
+                    is_dirty, active
+                ) VALUES (
+                    %s, 'ProjectedInventory', %s, %s, %s,
+                    'day', %s, %s, %s,
+                    %s, %s,
+                    0, 0, 0, 0,
+                    FALSE, TRUE
+                )
+                """,
+                (uuid4(), BASELINE_SCENARIO_ID, item_id, location_id,
+                 day_start, day_start + timedelta(days=1), day_start,
+                 series_id, i),
+            )
+
+        def _series_pairs() -> list[tuple[int, int]]:
+            return [
+                (r["from_seq"], r["to_seq"])
+                for r in conn.execute(
+                    """
+                    SELECT n1.bucket_sequence AS from_seq,
+                           n2.bucket_sequence AS to_seq
+                    FROM edges e
+                    JOIN nodes n1 ON n1.node_id = e.from_node_id
+                    JOIN nodes n2 ON n2.node_id = e.to_node_id
+                    WHERE e.edge_type = 'feeds_forward'
+                      AND n1.projection_series_id = %s
+                    ORDER BY n1.bucket_sequence
+                    """,
+                    (series_id,),
+                ).fetchall()
+            ]
+
+        def _global_ff_count() -> int:
+            return conn.execute(
+                "SELECT COUNT(*) AS n FROM edges WHERE edge_type = 'feeds_forward'"
+            ).fetchone()["n"]
+
+        assert _series_pairs() == [], "seed must start with ZERO edges (pre-fix state)"
+        n_global_before = _global_ff_count()
+
+        sql_text = MIGRATION_080.read_text(encoding="utf-8")
+
+        # ── Execution #2 (the backfill): exactly N-1 edges, strictly chained.
+        conn.execute(sql_text)
+        assert _series_pairs() == [(i, i + 1) for i in range(n_buckets - 1)]
+        # ... and it touched NOTHING else: every other series in this DB was
+        # created by the FIXED ingest path, already chained, skipped by the
+        # NOT EXISTS guard.
+        assert _global_ff_count() == n_global_before + (n_buckets - 1)
+
+        # The backfilled edges honour migration 019's contract.
+        edge_rows = conn.execute(
+            """
+            SELECT e.active, e.weight_ratio, e.scenario_id
+            FROM edges e
+            JOIN nodes n1 ON n1.node_id = e.from_node_id
+            WHERE e.edge_type = 'feeds_forward'
+              AND n1.projection_series_id = %s
+            """,
+            (series_id,),
+        ).fetchall()
+        for r in edge_rows:
+            assert r["active"] is True
+            assert r["weight_ratio"] == 1
+            assert UUID(str(r["scenario_id"])) == BASELINE_SCENARIO_ID
+
+        # ── Execution #3: a clean no-op — not one duplicated edge, anywhere.
+        conn.execute(sql_text)
+        assert _series_pairs() == [(i, i + 1) for i in range(n_buckets - 1)], (
+            "re-executing migration 080 duplicated or altered chain edges"
+        )
+        assert _global_ff_count() == n_global_before + (n_buckets - 1)
