@@ -91,8 +91,20 @@ class GraphTraversal:
             if current_id in affected:
                 continue
 
-            # Load the node to check its time_span
-            node = self._store.get_node(current_id, scenario_id)
+            # Load the node to check its time_span. The trigger node is
+            # resolved WITHOUT the active filter: it may have just been
+            # deactivated by the same write that raised this event (PO ->
+            # received, CO -> shipped, etc. — ingest lifecycle retraction
+            # fix, 2026-07-17). Chosen over dirtying the item/location PI
+            # window blindly (option b) because it stays inside the
+            # existing edge-driven cascade (the retracted node's
+            # 'replenishes'/'consumes' edges are untouched by deactivation)
+            # instead of duplicating that expansion logic. Every other node
+            # visited by this BFS keeps the active-only contract — an
+            # inactive node genuinely stops the cascade there.
+            node = self._store.get_node(
+                current_id, scenario_id, include_inactive=(current_id == trigger_node_id),
+            )
             if node is None:
                 continue
 

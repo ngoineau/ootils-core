@@ -263,6 +263,21 @@ def _ensure_projection_series(
     """
     Ensure a ProjectionSeries + PI bucket nodes exist for (item, location, scenario).
     Creates them if missing. Returns True if created, False if already existed.
+
+    Also chains the 90 buckets with 'feeds_forward' edges (bucket[i] -> bucket[i+1],
+    weight_ratio=1.0), mirroring migration 019's backfill. Without this chain,
+    GraphTraversal.expand_dirty_subgraph's downstream BFS (traversal.py) has no
+    edge to walk past the single PI bucket a supply/demand node is wired to, so
+    incremental propagation (POST /v1/events) only ever recomputes that one
+    bucket and never cascades the closing_stock change to the rest of the
+    horizon — silently stale projections outside a full recompute (found via
+    the 2026-07-17 ingest lifecycle retraction test, which is the first test
+    to drive the incremental path in isolation; every other caller in this
+    file's test suite masks the gap with a full recompute, which recomputes
+    every PI node directly and never needs the edges). This bug predates and
+    is independent of the retraction fix: it affects every ProjectionSeries
+    created through this ingest path (never through the demo seed, which
+    migration 019 already backfilled).
     """
     from datetime import date, timedelta
 
@@ -297,9 +312,14 @@ def _ensure_projection_series(
     ).fetchone()
     actual_series_id = UUID(str(row["series_id"])) if row else series_id
 
+    bucket_node_ids: list[UUID] = []
+    bucket_spans: list[tuple[date, date]] = []
     for i in range(90):
         day_start = today + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
+        node_id = uuid4()
+        bucket_node_ids.append(node_id)
+        bucket_spans.append((day_start, day_end))
         db.execute(
             """
             INSERT INTO nodes (
@@ -320,14 +340,39 @@ def _ensure_projection_series(
             ON CONFLICT DO NOTHING
             """,
             (
-                uuid4(), scenario_id, item_id, location_id,
+                node_id, scenario_id, item_id, location_id,
                 day_start, day_end, day_start,
                 actual_series_id, i,
             ),
         )
 
+    # Chain consecutive buckets: PI[i].closing_stock -> PI[i+1].opening_stock
+    # (same contract as migration 019's backfill INSERT).
+    for i in range(len(bucket_node_ids) - 1):
+        from_id = bucket_node_ids[i]
+        to_id = bucket_node_ids[i + 1]
+        # Mirrors migration 019's backfill exactly: effective_start =
+        # n1.time_span_start, effective_end = n2.time_span_end.
+        effective_start, _ = bucket_spans[i]
+        _, effective_end = bucket_spans[i + 1]
+        db.execute(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_node_id, to_node_id, scenario_id,
+                priority, weight_ratio, effective_start, effective_end,
+                active, created_at
+            ) VALUES (
+                %s, 'feeds_forward', %s, %s, %s,
+                0, 1.0, %s, %s,
+                TRUE, now()
+            )
+            ON CONFLICT DO NOTHING
+            """,
+            (uuid4(), from_id, to_id, scenario_id, effective_start, effective_end),
+        )
+
     logger.info(
-        "_ensure_projection_series: created series + 90 PI buckets for item=%s loc=%s",
+        "_ensure_projection_series: created series + 90 PI buckets + 89 feeds_forward edges for item=%s loc=%s",
         item_id, location_id,
     )
     return True
@@ -344,7 +389,24 @@ def _wire_node_to_pi(
 ) -> int:
     """
     Connect a supply/demand node to the matching PI bucket via an edge.
-    Returns number of edges created.
+
+    Idempotent per (node_id, edge_type, scenario_id): a supply/demand node
+    is wired to at most ONE PI bucket at a time (single item/location/
+    time_ref triple). Re-wiring on a re-ingest (status/date/qty update)
+    retargets the existing edge instead of INSERTing a parallel one —
+    `edges` carries no unique constraint (only the `edge_id` PK, which is
+    always a fresh uuid4() here), so `ON CONFLICT DO NOTHING` never fired
+    and every UPDATE silently accumulated a duplicate 'replenishes'/
+    'consumes' edge to the same PI bucket. `inflows_agg`/`outflows_agg`
+    (propagator_sql.py) SUM(s.quantity) once PER MATCHING EDGE — N stale
+    duplicates meant N x the real quantity for any item/location that was
+    re-ingested more than once at an unchanged date (e.g. a PO stepping
+    draft -> confirmed -> in_transit with the same expected_delivery_date).
+    Fixed 2026-07-16 (ingest lifecycle retraction fix). Also opportunistically
+    cleans up any duplicates left over from before this fix.
+
+    Returns the number of edges created or retargeted (0 if no PI bucket
+    was found for time_ref, or the existing edge already points at it).
     """
     if node_type in ("PurchaseOrderSupply", "WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply"):
         edge_type = "replenishes"
@@ -377,23 +439,56 @@ def _wire_node_to_pi(
         return 0
 
     pi_node_id = pi_row["node_id"]
-    edge_id = uuid4()
-    from_id, to_id = node_id, pi_node_id
 
-    db.execute(
+    existing_edges = db.execute(
         """
-        INSERT INTO edges (edge_id, edge_type, from_node_id, to_node_id, scenario_id, active, created_at)
-        VALUES (%s, %s, %s, %s, %s, TRUE, now())
-        ON CONFLICT DO NOTHING
+        SELECT edge_id, to_node_id FROM edges
+        WHERE from_node_id = %s AND edge_type = %s AND scenario_id = %s
+        ORDER BY created_at ASC
         """,
-        (edge_id, edge_type, from_id, to_id, scenario_id),
+        (node_id, edge_type, scenario_id),
+    ).fetchall()
+
+    keep_id: UUID | None = next(
+        (e["edge_id"] for e in existing_edges if e["to_node_id"] == pi_node_id),
+        None,
     )
+
+    if keep_id is not None:
+        wired = 0  # already correctly wired — nothing to create or retarget
+    elif existing_edges:
+        # Retarget the oldest existing edge instead of leaving it stale
+        # and inserting a parallel one.
+        keep_id = existing_edges[0]["edge_id"]
+        db.execute(
+            "UPDATE edges SET to_node_id = %s, active = TRUE WHERE edge_id = %s",
+            (pi_node_id, keep_id),
+        )
+        wired = 1
+    else:
+        keep_id = uuid4()
+        db.execute(
+            """
+            INSERT INTO edges (edge_id, edge_type, from_node_id, to_node_id, scenario_id, active, created_at)
+            VALUES (%s, %s, %s, %s, %s, TRUE, now())
+            """,
+            (keep_id, edge_type, node_id, pi_node_id, scenario_id),
+        )
+        wired = 1
+
+    stale_ids = [e["edge_id"] for e in existing_edges if e["edge_id"] != keep_id]
+    if stale_ids:
+        db.execute("DELETE FROM edges WHERE edge_id = ANY(%s)", (stale_ids,))
+        logger.info(
+            "_wire_node_to_pi: removed %d duplicate %s edge(s) from node=%s",
+            len(stale_ids), edge_type, node_id,
+        )
 
     logger.debug(
         "_wire_node_to_pi: wired node=%s (%s) → PI=%s via %s",
         node_id, node_type, pi_node_id, edge_type,
     )
-    return 1
+    return wired
 
 
 def _emit_ingestion_event(db: DictRowConnection, scenario_id: UUID, node_id: UUID) -> None:
@@ -1320,6 +1415,14 @@ def ingest_on_hand(
 
 VALID_PO_STATUSES = {"draft", "confirmed", "in_transit", "received", "cancelled"}
 
+# Impact table per docs/contracts/TSV-FILES-SPEC.md §2.7 — this is the
+# single source of truth for "does this status still count as active
+# supply in the projection". `draft` does not count (not yet committed),
+# `received` does not count (already folded into on_hand), `cancelled`
+# does not count. Only `confirmed`/`in_transit` are active expected
+# receipts. Keep in lockstep with the doc table if it changes.
+_PO_ACTIVE_STATUSES = {"confirmed", "in_transit"}
+
 
 class PurchaseOrderRow(BaseModel):
     external_id: str = Field(..., description="ERP PO number. Upsert key.")
@@ -1336,6 +1439,13 @@ class PurchaseOrderRow(BaseModel):
     def non_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("must not be empty")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in VALID_PO_STATUSES:
+            raise ValueError(f"status must be one of {VALID_PO_STATUSES}")
         return v
 
 
@@ -1416,7 +1526,7 @@ def ingest_purchase_orders(
     for po in body.purchase_orders:
         item_id = item_map[po.item_external_id]
         location_id = loc_map[po.location_external_id]
-        active = po.status != "cancelled"
+        active = po.status in _PO_ACTIVE_STATUSES
 
         # Ensure PI series exists for this (item, location)
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
@@ -1989,6 +2099,12 @@ def ingest_work_orders(
 
 VALID_CUSTOMER_ORDER_STATUSES = {"open", "confirmed", "shipped", "delivered", "cancelled"}
 
+# Impact table per docs/contracts/TSV-FILES-SPEC.md §2.8 — the ERP source
+# system never emits `delivered` in practice, only `shipped` (the shipment
+# already left, demand is gone from the projection's perspective). `open`
+# and `confirmed` are the only statuses still counted as future demand.
+_CO_ACTIVE_STATUSES = {"open", "confirmed"}
+
 
 class CustomerOrderRow(BaseModel):
     external_id: str = Field(..., description="ERP sales order number. Upsert key.")
@@ -2081,7 +2197,7 @@ def ingest_customer_orders(
     for co in body.customer_orders:
         item_id = item_map[co.item_external_id]
         location_id = loc_map[co.location_external_id]
-        active = co.status not in ("delivered", "cancelled")
+        active = co.status in _CO_ACTIVE_STATUSES
 
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
 
@@ -2142,6 +2258,15 @@ def ingest_customer_orders(
 # ─────────────────────────────────────────────────────────────
 
 VALID_TRANSFER_STATUSES = {"planned", "in_transit", "delivered", "cancelled"}
+
+# Impact table per docs/contracts/transfers/format-transfers-tsv.md §4 —
+# `planned`/`in_transit` still count as an expected receipt at the
+# destination PI; `delivered` no longer counts (already folded into the
+# destination's on_hand) and `cancelled` is ignored. Verified against the
+# PO/CO terminal-status bug family (docs/contracts/TSV-FILES-SPEC.md
+# §2.7/§2.8) — transfers were already correct, kept here for parity/audit
+# clarity rather than as a behaviour change.
+_TRANSFER_ACTIVE_STATUSES = {"planned", "in_transit"}
 
 
 class TransferRow(BaseModel):
@@ -2243,7 +2368,7 @@ def ingest_transfers(
     for t in body.transfers:
         item_id = item_map[t.item_external_id]
         to_location_id = loc_map[t.to_location_external_id]
-        active = t.status not in ("delivered", "cancelled")
+        active = t.status in _TRANSFER_ACTIVE_STATUSES
 
         # Wire to destination PI (to_location is the receiving side)
         _ensure_projection_series(db, item_id, to_location_id, BASELINE_SCENARIO_ID)
@@ -2637,16 +2762,27 @@ def ingest_planning_params(
             )
 
         # Build the new row from active values (carry-over) overridden by incoming fields.
-        # If no active row (CREATED), start from None values; if active exists (ROTATED),
-        # carry over the active values for unspecified fields.
+        # If active exists (ROTATED), carry over the active values for unspecified
+        # fields — SCD2 partial-push semantics (ADR-014 D3): an empty cell means
+        # "do not touch", never "clear the value". This branch is untouched by
+        # the fix below.
+        #
+        # If there is no active row (CREATED — first-ever push for this item ×
+        # location) and the client did not send a field, the key is simply
+        # OMITTED from new_row_values below instead of being set to None. A
+        # dict key present with value None still ends up in the INSERT's
+        # column list as an explicit `NULL`, which short-circuits the column's
+        # DB DEFAULT (migrations 007/021 — e.g. consumption_window_days -> 7,
+        # forecast_consumption_strategy -> 'max_only'). Omitting the column
+        # entirely lets Postgres apply that DEFAULT instead. Bug fixed
+        # 2026-07-16 — see docs/contracts/TSV-FILES-SPEC.md §2.5.
         new_row_values: dict = {}
         for k in _PLANNING_PARAMS_TRACKED_FIELDS:
             if k in incoming:
                 new_row_values[k] = incoming[k]
             elif active is not None:
                 new_row_values[k] = active.get(k)
-            else:
-                new_row_values[k] = None
+            # else: CREATED + field not sent -> key omitted, DB DEFAULT applies.
 
         # lot_size_rule cannot be NULL in DB (DEFAULT 'LOTFORLOT'); enforce
         if new_row_values.get("lot_size_rule") is None:

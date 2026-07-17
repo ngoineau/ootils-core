@@ -147,7 +147,7 @@ def parse(
     # TSV / CSV
     text, enc = _decode_text(data)
     delim = opts.delimiter or _sniff_delimiter(text, fmt)
-    rows, headers = _parse_delimited(text, delim, opts.max_rows)
+    rows, headers = _parse_delimited(text, delim, opts.max_rows, fmt=fmt)
     return ParseResult(
         rows=rows, headers=headers, format=fmt,
         encoding=enc, delimiter=delim, sha256=sha,
@@ -258,15 +258,27 @@ def _sniff_delimiter(text: str, fmt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _parse_delimited(text: str, delimiter: str, max_rows: int | None) -> tuple[list[dict[str, str]], list[str]]:
+def _parse_delimited(
+    text: str, delimiter: str, max_rows: int | None, fmt: str = "csv"
+) -> tuple[list[dict[str, str]], list[str]]:
     """Parse a delimited text blob into (rows, headers).
 
     The first non-empty line is the header. Trailing whitespace on each
     cell is stripped. Empty cells become "" (not None) — typing happens
     in the DQ pipeline, not here.
+
+    Quoting: CSV keeps standard `"`-quoting (module docstring, §CSV) since
+    a comma-delimited value legitimately needs it. TSV disables quoting
+    entirely (`csv.QUOTE_NONE`) — same rationale as `scripts/ingest_file.py`
+    and TSV-FILES-SPEC.md §1.1 ("aucun guillemet"): a literal `"` in a cell
+    (e.g. an inch-mark item description) must be preserved verbatim, never
+    interpreted as a CSV quote character.
     """
     buf = io.StringIO(text)
-    reader = csv.reader(buf, delimiter=delimiter, quotechar='"')
+    if fmt == "tsv":
+        reader = csv.reader(buf, delimiter=delimiter, quoting=csv.QUOTE_NONE)
+    else:
+        reader = csv.reader(buf, delimiter=delimiter, quotechar='"')
 
     headers: list[str] = []
     rows: list[dict[str, str]] = []

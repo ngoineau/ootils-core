@@ -258,8 +258,10 @@ def test_ensure_projection_series_creates_when_missing():
     db = FakeDB(handler=handler)
     created = _ensure_projection_series(db, uuid4(), uuid4(), BASELINE_SCENARIO_ID)
     assert created is True
-    # 2 selects + 1 insert series + 90 bucket inserts = 93 calls
-    assert len(db.calls) == 93
+    # 2 selects + 1 insert series + 90 bucket inserts + 89 feeds_forward
+    # edge inserts (chaining consecutive buckets, 2026-07-17 incremental
+    # propagation fix) = 182 calls.
+    assert len(db.calls) == 182
 
 
 def test_ensure_projection_series_falls_back_to_local_uuid_when_select_returns_none():

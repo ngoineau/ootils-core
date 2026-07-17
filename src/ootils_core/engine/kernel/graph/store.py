@@ -45,6 +45,7 @@ class GraphStore:
         node_id: UUID,
         scenario_id: UUID,
         for_update: bool = False,
+        include_inactive: bool = False,
     ) -> Optional[Node]:
         """Fetch a single node by ID and scenario. Returns None if not found.
 
@@ -53,12 +54,23 @@ class GraphStore:
                 current transaction commits. Use this during allocation to
                 prevent concurrent runners from reading stale closing_stock
                 and double-deducting supply (#154).
+            include_inactive: If True, drops the `active = TRUE` filter.
+                Reserved for the propagation trigger-resolution path
+                (ingest lifecycle retraction fix, 2026-07-17): a PO/CO/
+                transfer node can be deactivated by the SAME write that
+                raises the event (status -> received/shipped/delivered/
+                cancelled), and the propagator still needs to resolve that
+                node to seed the dirty-subgraph expansion — otherwise the
+                retraction is invisible to incremental propagation (only a
+                full recompute would notice it). Every other caller keeps
+                the active-only contract; do not flip this default.
         """
         lock_clause = " FOR UPDATE" if for_update else ""
+        active_clause = "" if include_inactive else " AND active = TRUE"
         row = self._conn.execute(
             f"""
             SELECT * FROM nodes
-            WHERE node_id = %s AND scenario_id = %s AND active = TRUE
+            WHERE node_id = %s AND scenario_id = %s{active_clause}
             {lock_clause}
             """,
             (node_id, scenario_id),
