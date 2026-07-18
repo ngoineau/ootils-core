@@ -51,6 +51,9 @@ class IngestBOMResponse(BaseModel):
     parent_item_id: Optional[str] = None
     components_imported: int
     llc_updated: int
+    # Obsolete items referenced by this BOM (parent or components), accepted
+    # but surfaced — structure is history, obsolescence governs planning.
+    warnings: list[dict] = []
 
 
 class BOMComponentOutput(BaseModel):
@@ -101,12 +104,35 @@ class ExplodeResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 def _resolve_item_id(db: DictRowConnection, external_id: str) -> UUID | None:
-    """Resolve external_id → item_id. Returns None if not found."""
+    """Resolve external_id → item_id. Returns None if not found.
+
+    Excludes obsolete items — the contract of the READ/explosion endpoints.
+    The INGEST path uses `_resolve_item_with_status` instead: a BOM whose
+    parent or component is obsolete is legitimate STRUCTURE (engineering
+    history, phase-out) and must load — obsolescence governs planning, not
+    structure. Rejecting the whole BOM left the parent with NO structure at
+    all, which is the worse silent wrong answer (first real load, 2026-07-18).
+    """
     row = db.execute(
         "SELECT item_id FROM items WHERE external_id = %s AND status != 'obsolete'",
         (external_id,),
     ).fetchone()
     return row["item_id"] if row else None
+
+
+def _resolve_item_with_status(
+    db: DictRowConnection, external_id: str
+) -> tuple[UUID, str] | None:
+    """Resolve external_id → (item_id, status), obsolete included.
+
+    Ingest-path resolver: genuine unknowns stay None (422 at the call site);
+    an obsolete item resolves and the caller surfaces it as a warning.
+    """
+    row = db.execute(
+        "SELECT item_id, status FROM items WHERE external_id = %s",
+        (external_id,),
+    ).fetchone()
+    return (row["item_id"], row["status"]) if row else None
 
 
 def _get_active_bom(db: DictRowConnection, parent_item_id: UUID) -> dict | None:
@@ -324,27 +350,43 @@ def ingest_bom(
 ) -> IngestBOMResponse:
     """Import a complete BOM for a parent item. Upsert with cycle detection."""
 
-    # 1. Resolve parent
-    parent_item_id = _resolve_item_id(db, body.parent_external_id)
-    if parent_item_id is None:
+    warnings: list[dict] = []
+
+    # 1. Resolve parent (obsolete accepted — structure is history; warned)
+    parent_resolved = _resolve_item_with_status(db, body.parent_external_id)
+    if parent_resolved is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{"field": "parent_external_id", "error": f"Item '{body.parent_external_id}' not found"}],
         )
+    parent_item_id, parent_status = parent_resolved
+    if parent_status == "obsolete":
+        warnings.append({
+            "field": "parent_external_id",
+            "external_id": body.parent_external_id,
+            "warning": "obsolete item — BOM structure loaded, planning governed by item status",
+        })
 
-    # 2. Resolve all components
+    # 2. Resolve all components (obsolete accepted + warned; unknown → 422)
     errors: list[dict] = []
     component_ids: list[UUID] = []
     for i, comp in enumerate(body.components):
-        cid = _resolve_item_id(db, comp.component_external_id)
-        if cid is None:
+        resolved = _resolve_item_with_status(db, comp.component_external_id)
+        if resolved is None:
             errors.append({
                 "row": i,
                 "component_external_id": comp.component_external_id,
                 "error": f"Item '{comp.component_external_id}' not found",
             })
         else:
+            cid, comp_status = resolved
             component_ids.append(cid)
+            if comp_status == "obsolete":
+                warnings.append({
+                    "row": i,
+                    "component_external_id": comp.component_external_id,
+                    "warning": "obsolete item — BOM line loaded, planning governed by item status",
+                })
 
     if errors:
         raise HTTPException(
@@ -365,6 +407,7 @@ def ingest_bom(
             status="dry_run",
             components_imported=len(body.components),
             llc_updated=0,
+            warnings=warnings,
         )
 
     # 5. Upsert bom_headers
@@ -439,6 +482,11 @@ def ingest_bom(
         "bom.ingest parent=%s version=%s components=%d llc_updated=%d",
         body.parent_external_id, body.bom_version, len(body.components), llc_count,
     )
+    if warnings:
+        logger.warning(
+            "bom.ingest parent=%s version=%s: %d obsolete item reference(s) loaded as structure",
+            body.parent_external_id, body.bom_version, len(warnings),
+        )
 
     return IngestBOMResponse(
         status="ok",
@@ -446,6 +494,7 @@ def ingest_bom(
         parent_item_id=str(parent_item_id),
         components_imported=len(body.components),
         llc_updated=llc_count,
+        warnings=warnings,
     )
 
 
