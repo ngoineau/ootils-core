@@ -27,10 +27,19 @@ Why inclusion is the right contract (documented tolerance):
   * A may legitimately contain items absent from B — items with no
     independent demand on the horizon (B only projects items with consumed
     demand), or per-location breaches masked by B's item-level pooling.
-  * A's demand per PI bucket is the SUM of the edge-wired order + forecast
-    nodes (gross), while B consumes forecast (``max(orders, forecast)`` +
-    demand time fence + proration). A's demand ≥ B's consumed demand, which
-    pushes A's projected stock at or below B's — another reason A ⊇ B.
+  * A now NETS customer orders against forecast just like B does
+    (2026-07-17 PR modélisation, ADR-021 convergence: PROPAGATE_SQL's
+    ``GREATEST(fc_out, co_out) + dep_out`` /
+    ``propagator.py:_recompute_pi_node``'s ``max(fc, co) + dep`` mirror
+    ``core.py:338``'s ``v = max(o, f)`` — A is aligned on B, core.py
+    untouched). The inclusion SURVIVES the netting because the grains
+    differ in A's favour: A nets at the FINE grain (per daily bucket, per
+    location) while B nets on the POOLED item-level weekly series, and
+    Σ max(f_i, o_i) ≥ max(Σ f_i, Σ o_i) — the fine-grain netted demand
+    over any window is always ≥ the pooled netted demand, which keeps A's
+    projected stock at or below B's. B additionally applies its demand
+    time fence (+ consumption window), NOT replicated in A — that only
+    further reduces B's demand, same direction: A stays structurally ≥ B.
 
 Possible sources of FALSE NEGATIVES if this inclusion ever breaks (i.e. an
 item short for B but absent from A) — each is a real bug, not tolerance:

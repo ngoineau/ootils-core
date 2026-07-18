@@ -38,6 +38,7 @@ from ootils_core.api.routers.ingest import (
     _dry_run_response,
     _emit_ingestion_event,
     _ensure_projection_series,
+    _forecast_time_span,
     _ok,
     _request_hash,
     _raise_422,
@@ -280,9 +281,48 @@ def test_ensure_projection_series_falls_back_to_local_uuid_when_select_returns_n
     assert created is True
 
 
+def test_forecast_time_span_derivation():
+    """[time_span_start, time_span_end) per time_grain (2026-07-17
+    proration): day → +1d, week → +7d, month → end of the calendar month
+    (December rolls the year); exact_date/timeless stay point demand
+    (None, None)."""
+    assert _forecast_time_span(date(2026, 8, 3), "day") == (
+        date(2026, 8, 3), date(2026, 8, 4),
+    )
+    assert _forecast_time_span(date(2026, 8, 3), "week") == (
+        date(2026, 8, 3), date(2026, 8, 10),
+    )
+    # Month: end-exclusive bound is the 1st of the NEXT month, even from a
+    # mid-month anchor.
+    assert _forecast_time_span(date(2026, 8, 15), "month") == (
+        date(2026, 8, 15), date(2026, 9, 1),
+    )
+    # December → January of next year.
+    assert _forecast_time_span(date(2026, 12, 10), "month") == (
+        date(2026, 12, 10), date(2027, 1, 1),
+    )
+    assert _forecast_time_span(date(2026, 8, 3), "exact_date") == (None, None)
+    assert _forecast_time_span(date(2026, 8, 3), "timeless") == (None, None)
+
+
+def _wire_pi_db(pi_rows, edge_rows=None):
+    """FakeDB router for the (2026-07-17) fetchall-based _wire_node_to_pi:
+    serves the PI-bucket SELECT (single- or multi-row) and the
+    existing-edges SELECT; every other statement gets a default cursor."""
+
+    def handler(sql, params):
+        if "node_type = 'ProjectedInventory'" in sql:
+            return FakeCursor(fetchall_value=list(pi_rows))
+        if "SELECT edge_id, to_node_id" in sql:
+            return FakeCursor(fetchall_value=list(edge_rows or []))
+        return FakeCursor()
+
+    return FakeDB(handler=handler)
+
+
 def test_wire_node_to_pi_replenishes_supply():
     pi_node_id = uuid4()
-    db = FakeDB(handler=lambda sql, params: FakeCursor(fetchone_value={"node_id": pi_node_id}))
+    db = _wire_pi_db([{"node_id": pi_node_id}])
     n = _wire_node_to_pi(
         db, uuid4(), "PurchaseOrderSupply",
         uuid4(), uuid4(), BASELINE_SCENARIO_ID, date.today(),
@@ -296,7 +336,7 @@ def test_wire_node_to_pi_replenishes_supply():
 
 def test_wire_node_to_pi_consumes_demand():
     pi_node_id = uuid4()
-    db = FakeDB(handler=lambda sql, params: FakeCursor(fetchone_value={"node_id": pi_node_id}))
+    db = _wire_pi_db([{"node_id": pi_node_id}])
     n = _wire_node_to_pi(
         db, uuid4(), "ForecastDemand",
         uuid4(), uuid4(), BASELINE_SCENARIO_ID, date.today(),
@@ -304,6 +344,56 @@ def test_wire_node_to_pi_consumes_demand():
     assert n == 1
     last_sql, last_params = db.calls[-1]
     assert "consumes" in last_params
+
+
+def test_wire_node_to_pi_span_wires_all_overlapping_buckets():
+    """A periodic forecast (time_span_start/end set) is wired to EVERY
+    overlapping daily PI bucket — the anti-lumping multi-wire
+    (2026-07-17): one 'consumes' edge INSERT per overlapped bucket."""
+    pi_ids = [uuid4() for _ in range(3)]
+    db = _wire_pi_db([{"node_id": p} for p in pi_ids])
+    n = _wire_node_to_pi(
+        db, uuid4(), "ForecastDemand",
+        uuid4(), uuid4(), BASELINE_SCENARIO_ID, date(2026, 8, 1),
+        time_span_start=date(2026, 8, 1), time_span_end=date(2026, 8, 4),
+    )
+    assert n == 3
+    inserts = [c for c in db.calls if "INSERT INTO edges" in c[0]]
+    assert len(inserts) == 3
+    # Every desired PI bucket got exactly one edge (to_node_id is the 4th
+    # INSERT parameter) and the edge type is 'consumes'.
+    assert {c[1][3] for c in inserts} == set(pi_ids)
+    assert all(c[1][1] == "consumes" for c in inserts)
+
+
+def test_wire_node_to_pi_span_retargets_stale_and_deletes_duplicates():
+    """Reconciliation against the FULL desired bucket set: an edge already
+    on-target is kept untouched, a stale edge (old target outside the set)
+    is RETARGETED onto a still-missing bucket (edge identity preserved),
+    and a duplicate to an already-kept target is DELETEd."""
+    keep_target, new_target = uuid4(), uuid4()
+    kept_edge, stale_edge, dup_edge = uuid4(), uuid4(), uuid4()
+    edge_rows = [
+        {"edge_id": kept_edge, "to_node_id": keep_target},
+        {"edge_id": stale_edge, "to_node_id": uuid4()},    # points outside
+        {"edge_id": dup_edge, "to_node_id": keep_target},  # duplicate
+    ]
+    db = _wire_pi_db(
+        [{"node_id": keep_target}, {"node_id": new_target}], edge_rows,
+    )
+    n = _wire_node_to_pi(
+        db, uuid4(), "ForecastDemand",
+        uuid4(), uuid4(), BASELINE_SCENARIO_ID, date(2026, 8, 1),
+        time_span_start=date(2026, 8, 1), time_span_end=date(2026, 8, 3),
+    )
+    assert n == 1  # only new_target needed wiring — served by the retarget
+    updates = [c for c in db.calls if c[0].startswith("UPDATE edges")]
+    assert len(updates) == 1
+    assert updates[0][1] == (new_target, stale_edge)
+    deletes = [c for c in db.calls if "DELETE FROM edges" in c[0]]
+    assert len(deletes) == 1
+    assert deletes[0][1][0] == [dup_edge]
+    assert not any("INSERT INTO edges" in c[0] for c in db.calls)
 
 
 def test_wire_node_to_pi_unsupported_node_type_returns_zero():
@@ -329,7 +419,7 @@ def test_wire_node_to_pi_other_supply_types():
     """Cover the other supply branches (WorkOrderSupply, PlannedSupply, TransferSupply, OnHandSupply)."""
     pi_node_id = uuid4()
     for nt in ("WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply", "CustomerOrderDemand"):
-        db = FakeDB(handler=lambda sql, params: FakeCursor(fetchone_value={"node_id": pi_node_id}))
+        db = _wire_pi_db([{"node_id": pi_node_id}])
         n = _wire_node_to_pi(
             db, uuid4(), nt, uuid4(), uuid4(), BASELINE_SCENARIO_ID, date.today(),
         )

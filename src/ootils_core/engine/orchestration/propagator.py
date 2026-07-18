@@ -515,38 +515,66 @@ class PropagationEngine:
 
         # ------------------------------------------------------------------
         # 3. Demand events: nodes connected via 'consumes' to this PI node
+        #
+        # Netting (2026-07-17, ADR-021 convergence): forecast and firm
+        # customer-order demand for the SAME bucket are NOT additive — a CO
+        # fulfils (part of) the forecast it was booked against, so summing
+        # both double-counts the same real-world demand. Dependent/transfer
+        # demand IS additive (derived/moved supply need, never a forecast a
+        # CO could be consuming). Netting happens HERE, in the caller,
+        # before `compute_pi_node`: a single pre-netted outflow event is
+        # handed to ProjectionKernel so the kernel (projection.py) stays a
+        # pure sum — mirrors PROPAGATE_SQL's `GREATEST(fc_out, co_out) +
+        # dep_out` (propagator_sql.py) bit-for-bit. `engine/mrp/core.py`'s
+        # `max(o, f)` already netted Truth B; this aligns Truth A with it
+        # (core.py itself is untouched).
         # ------------------------------------------------------------------
-        demand_events: list = []
+        fc_total = Decimal("0")
+        co_total = Decimal("0")
+        dep_total = Decimal("0")
         consume_edges = _get_edges_to(node_id, "consumes")
         for edge in consume_edges:
             src_node = _get_node(edge.from_node_id)
             if src_node is None:
                 continue
-            if src_node.node_type in ("ForecastDemand", "CustomerOrderDemand",
-                                       "DependentDemand", "TransferDemand"):
-                # For demands with time_span, distribute daily within bucket
-                # For now: use time_ref or time_span_start as the demand anchor date
-                demand_date = src_node.time_ref or src_node.time_span_start
-                if demand_date is not None and src_node.quantity is not None:
-                    # If the demand has a time_span, pro-rate daily quantity
-                    if (src_node.time_span_start is not None
-                            and src_node.time_span_end is not None):
-                        span_days = (src_node.time_span_end - src_node.time_span_start).days
-                        if span_days > 0:
-                            # Daily rate
-                            daily_qty = src_node.quantity / Decimal(str(span_days))
-                            # Count days within this bucket
-                            overlap_start = max(bucket_start, src_node.time_span_start)
-                            # Both bucket_end and time_span_end are exclusive —
-                            # overlap is [overlap_start, overlap_end) days.
-                            overlap_end = min(bucket_end, src_node.time_span_end)
-                            if overlap_end > overlap_start:
-                                overlap_days = (overlap_end - overlap_start).days
-                                demand_qty = daily_qty * Decimal(str(overlap_days))
-                                # Supply anchor date: bucket_start for pre-computed overlap
-                                demand_events.append((bucket_start, demand_qty))
-                            continue
-                    demand_events.append((demand_date, src_node.quantity))
+            if src_node.node_type not in ("ForecastDemand", "CustomerOrderDemand",
+                                           "DependentDemand", "TransferDemand"):
+                continue
+            # For demands with time_span, distribute daily within bucket
+            # For now: use time_ref or time_span_start as the demand anchor date
+            demand_date = src_node.time_ref or src_node.time_span_start
+            if demand_date is None or src_node.quantity is None:
+                continue
+
+            contribution = Decimal("0")
+            span_start = src_node.time_span_start
+            span_end = src_node.time_span_end
+            if (span_start is not None and span_end is not None
+                    and (span_days := (span_end - span_start).days) > 0):
+                # Daily rate, pro-rated by day-overlap with this bucket.
+                daily_qty = src_node.quantity / Decimal(str(span_days))
+                # Count days within this bucket. Both bucket_end and
+                # time_span_end are exclusive — overlap is
+                # [overlap_start, overlap_end) days.
+                overlap_start = max(bucket_start, span_start)
+                overlap_end = min(bucket_end, span_end)
+                if overlap_end > overlap_start:
+                    overlap_days = (overlap_end - overlap_start).days
+                    contribution = daily_qty * Decimal(str(overlap_days))
+            elif bucket_start <= demand_date < bucket_end:
+                contribution = src_node.quantity
+
+            if src_node.node_type == "ForecastDemand":
+                fc_total += contribution
+            elif src_node.node_type == "CustomerOrderDemand":
+                co_total += contribution
+            else:  # DependentDemand, TransferDemand — additive, never netted
+                dep_total += contribution
+
+        # Single pre-netted event, anchored at bucket_start (always inside
+        # [bucket_start, bucket_end) for a well-formed bucket) so
+        # compute_pi_node's point_in_bucket rule counts it in full.
+        demand_events: list = [(bucket_start, max(fc_total, co_total) + dep_total)]
 
         # ------------------------------------------------------------------
         # 4. Compute

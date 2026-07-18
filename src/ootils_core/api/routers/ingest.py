@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -386,27 +386,35 @@ def _wire_node_to_pi(
     location_id: UUID,
     scenario_id: UUID,
     time_ref: date,
+    time_span_start: Optional[date] = None,
+    time_span_end: Optional[date] = None,
 ) -> int:
     """
-    Connect a supply/demand node to the matching PI bucket via an edge.
+    Connect a supply/demand node to the matching PI bucket(s) via edge(s).
 
-    Idempotent per (node_id, edge_type, scenario_id): a supply/demand node
-    is wired to at most ONE PI bucket at a time (single item/location/
-    time_ref triple). Re-wiring on a re-ingest (status/date/qty update)
-    retargets the existing edge instead of INSERTing a parallel one —
-    `edges` carries no unique constraint (only the `edge_id` PK, which is
-    always a fresh uuid4() here), so `ON CONFLICT DO NOTHING` never fired
-    and every UPDATE silently accumulated a duplicate 'replenishes'/
-    'consumes' edge to the same PI bucket. `inflows_agg`/`outflows_agg`
-    (propagator_sql.py) SUM(s.quantity) once PER MATCHING EDGE — N stale
-    duplicates meant N x the real quantity for any item/location that was
-    re-ingested more than once at an unchanged date (e.g. a PO stepping
-    draft -> confirmed -> in_transit with the same expected_delivery_date).
-    Fixed 2026-07-16 (ingest lifecycle retraction fix). Also opportunistically
-    cleans up any duplicates left over from before this fix.
+    Point-in-time nodes (the default — `time_span_start`/`time_span_end`
+    both None, the only mode used by supplies and exact_date/timeless
+    demand) wire to AT MOST ONE PI bucket: the daily bucket containing
+    `time_ref`. A periodic forecast (`time_span_start`/`time_span_end` both
+    set — day/week/month time_grain) wires to EVERY daily PI bucket it
+    overlaps `[time_span_start, time_span_end)`, so the proration CASE
+    already computed in propagator_sql.py/propagator.py has more than one
+    bucket to distribute across (replacing the historical single-day
+    lumping of a periodic forecast).
+
+    Idempotent per (node_id, edge_type, scenario_id): the full desired PI
+    target set is (re)computed on every call. An edge already pointing at a
+    desired target is left untouched (no PK churn against
+    `inflows_agg`/`outflows_agg`, which SUM(quantity) once PER MATCHING
+    EDGE — see the historical duplicate-edge bug fixed 2026-07-16). Edges
+    pointing outside the desired set (stale target, or a duplicate to an
+    already-kept target) are either retargeted onto a still-missing target
+    (oldest first, preserving edge identity) or deleted. `edges` carries no
+    unique constraint (only the `edge_id` PK, always a fresh uuid4() here),
+    hence this retarget/delete scheme instead of `ON CONFLICT`.
 
     Returns the number of edges created or retargeted (0 if no PI bucket
-    was found for time_ref, or the existing edge already points at it).
+    overlaps, or every target was already correctly wired).
     """
     if node_type in ("PurchaseOrderSupply", "WorkOrderSupply", "PlannedSupply", "TransferSupply", "OnHandSupply"):
         edge_type = "replenishes"
@@ -415,30 +423,49 @@ def _wire_node_to_pi(
     else:
         return 0
 
-    pi_row = db.execute(
-        """
-        SELECT node_id FROM nodes
-        WHERE node_type = 'ProjectedInventory'
-          AND item_id = %s
-          AND location_id = %s
-          AND scenario_id = %s
-          AND active = TRUE
-          AND time_span_start <= %s
-          AND time_span_end > %s
-        ORDER BY time_span_start ASC
-        LIMIT 1
-        """,
-        (item_id, location_id, scenario_id, time_ref, time_ref),
-    ).fetchone()
+    if time_span_start is not None and time_span_end is not None:
+        pi_rows = db.execute(
+            """
+            SELECT node_id FROM nodes
+            WHERE node_type = 'ProjectedInventory'
+              AND item_id = %s
+              AND location_id = %s
+              AND scenario_id = %s
+              AND active = TRUE
+              AND time_span_start < %s
+              AND time_span_end > %s
+            ORDER BY time_span_start ASC
+            """,
+            (item_id, location_id, scenario_id, time_span_end, time_span_start),
+        ).fetchall()
+    else:
+        pi_rows = db.execute(
+            """
+            SELECT node_id FROM nodes
+            WHERE node_type = 'ProjectedInventory'
+              AND item_id = %s
+              AND location_id = %s
+              AND scenario_id = %s
+              AND active = TRUE
+              AND time_span_start <= %s
+              AND time_span_end > %s
+            ORDER BY time_span_start ASC
+            LIMIT 1
+            """,
+            (item_id, location_id, scenario_id, time_ref, time_ref),
+        ).fetchall()
 
-    if pi_row is None:
+    if not pi_rows:
         logger.debug(
-            "_wire_node_to_pi: no PI bucket found for item=%s loc=%s date=%s",
-            item_id, location_id, time_ref,
+            "_wire_node_to_pi: no PI bucket found for item=%s loc=%s date=%s span=(%s,%s)",
+            item_id, location_id, time_ref, time_span_start, time_span_end,
         )
         return 0
 
-    pi_node_id = pi_row["node_id"]
+    # Order preserved from the query (time_span_start ASC); node_id is a PK
+    # so no duplicates can appear across rows.
+    target_ids: list[UUID] = [row["node_id"] for row in pi_rows]
+    target_id_set = set(target_ids)
 
     existing_edges = db.execute(
         """
@@ -449,44 +476,55 @@ def _wire_node_to_pi(
         (node_id, edge_type, scenario_id),
     ).fetchall()
 
-    keep_id: UUID | None = next(
-        (e["edge_id"] for e in existing_edges if e["to_node_id"] == pi_node_id),
-        None,
-    )
+    kept_by_target: dict[UUID, UUID] = {}
+    reusable_edge_ids: list[UUID] = []  # oldest first — not (yet) pointing at a desired target
+    duplicate_edge_ids: list[UUID] = []  # extra edge(s) already pointing at a kept target
 
-    if keep_id is not None:
-        wired = 0  # already correctly wired — nothing to create or retarget
-    elif existing_edges:
-        # Retarget the oldest existing edge instead of leaving it stale
-        # and inserting a parallel one.
-        keep_id = existing_edges[0]["edge_id"]
-        db.execute(
-            "UPDATE edges SET to_node_id = %s, active = TRUE WHERE edge_id = %s",
-            (pi_node_id, keep_id),
-        )
-        wired = 1
-    else:
-        keep_id = uuid4()
-        db.execute(
-            """
-            INSERT INTO edges (edge_id, edge_type, from_node_id, to_node_id, scenario_id, active, created_at)
-            VALUES (%s, %s, %s, %s, %s, TRUE, now())
-            """,
-            (keep_id, edge_type, node_id, pi_node_id, scenario_id),
-        )
-        wired = 1
+    for e in existing_edges:
+        target = e["to_node_id"]
+        edge_id = e["edge_id"]
+        if target in target_id_set and target not in kept_by_target:
+            kept_by_target[target] = edge_id
+        elif target in target_id_set:
+            duplicate_edge_ids.append(edge_id)
+        else:
+            reusable_edge_ids.append(edge_id)
 
-    stale_ids = [e["edge_id"] for e in existing_edges if e["edge_id"] != keep_id]
+    wired = 0
+    reuse_idx = 0
+    for target in target_ids:
+        if target in kept_by_target:
+            continue  # already correctly wired — nothing to create or retarget
+        if reuse_idx < len(reusable_edge_ids):
+            # Retarget the oldest available stale edge instead of leaving it
+            # dangling and inserting a parallel one.
+            edge_id = reusable_edge_ids[reuse_idx]
+            reuse_idx += 1
+            db.execute(
+                "UPDATE edges SET to_node_id = %s, active = TRUE WHERE edge_id = %s",
+                (target, edge_id),
+            )
+        else:
+            db.execute(
+                """
+                INSERT INTO edges (edge_id, edge_type, from_node_id, to_node_id, scenario_id, active, created_at)
+                VALUES (%s, %s, %s, %s, %s, TRUE, now())
+                """,
+                (uuid4(), edge_type, node_id, target, scenario_id),
+            )
+        wired += 1
+
+    stale_ids = reusable_edge_ids[reuse_idx:] + duplicate_edge_ids
     if stale_ids:
         db.execute("DELETE FROM edges WHERE edge_id = ANY(%s)", (stale_ids,))
         logger.info(
-            "_wire_node_to_pi: removed %d duplicate %s edge(s) from node=%s",
+            "_wire_node_to_pi: removed %d duplicate/stale %s edge(s) from node=%s",
             len(stale_ids), edge_type, node_id,
         )
 
     logger.debug(
-        "_wire_node_to_pi: wired node=%s (%s) → PI=%s via %s",
-        node_id, node_type, pi_node_id, edge_type,
+        "_wire_node_to_pi: wired node=%s (%s) → %d PI bucket(s) via %s",
+        node_id, node_type, len(target_ids), edge_type,
     )
     return wired
 
@@ -1592,6 +1630,34 @@ VALID_TIME_GRAINS = {"exact_date", "day", "week", "month", "timeless"}
 VALID_FORECAST_SOURCES = {"statistical", "consensus", "manual", "ml"}
 
 
+def _forecast_time_span(bucket_date: date, time_grain: str) -> tuple[Optional[date], Optional[date]]:
+    """Derive [time_span_start, time_span_end) for a forecast bucket.
+
+    `time_span_start`/`time_span_end` mirror the PI bucket convention
+    (start inclusive, end exclusive) so a periodic forecast can be wired to
+    every PI bucket it actually covers (`_wire_node_to_pi`) instead of
+    being lumped onto its single anchor date. day/week/month are FIXED
+    spans off `bucket_date` (day: +1 day, week: +7 days, month: end of the
+    calendar month containing `bucket_date`) — a 🎯 pilot knob, deliberately
+    NOT the median-gap-to-next-row heuristic Truth B infers at MRP-load
+    time (`engine/mrp/loader.py:257`): an explicit `time_grain` is a
+    stronger signal than a gap inference, and is available here before the
+    full series even exists. `exact_date`/`timeless` forecasts stay point
+    demand — no span, single-bucket wire, unchanged from before.
+    """
+    if time_grain == "day":
+        return bucket_date, bucket_date + timedelta(days=1)
+    if time_grain == "week":
+        return bucket_date, bucket_date + timedelta(days=7)
+    if time_grain == "month":
+        if bucket_date.month == 12:
+            month_end = date(bucket_date.year + 1, 1, 1)
+        else:
+            month_end = date(bucket_date.year, bucket_date.month + 1, 1)
+        return bucket_date, month_end
+    return None, None
+
+
 class ForecastRow(BaseModel):
     item_external_id: str = Field(..., description="Forecasted item.")
     location_external_id: str = Field(..., description="Consumption site.")
@@ -1704,6 +1770,8 @@ def ingest_forecast_demand(
         # Ensure PI series exists for this (item, location)
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
 
+        time_span_start, time_span_end = _forecast_time_span(fc.bucket_date, fc.time_grain)
+
         existing = db.execute(
             """
             SELECT node_id FROM nodes
@@ -1722,13 +1790,17 @@ def ingest_forecast_demand(
             db.execute(
                 """
                 UPDATE nodes
-                SET quantity = %s, is_dirty = TRUE, updated_at = now()
+                SET quantity = %s, time_span_start = %s, time_span_end = %s,
+                    is_dirty = TRUE, updated_at = now()
                 WHERE node_id = %s
                 """,
-                (fc.quantity, fc_node_id),
+                (fc.quantity, time_span_start, time_span_end, fc_node_id),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, fc_node_id)
-            _wire_node_to_pi(db, fc_node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID, fc.bucket_date)
+            _wire_node_to_pi(
+                db, fc_node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID,
+                fc.bucket_date, time_span_start=time_span_start, time_span_end=time_span_end,
+            )
             results.append({
                 "item_external_id": fc.item_external_id,
                 "bucket_date": str(fc.bucket_date),
@@ -1742,14 +1814,18 @@ def ingest_forecast_demand(
                 """
                 INSERT INTO nodes
                     (node_id, node_type, scenario_id, item_id, location_id,
-                     quantity, time_grain, time_ref, is_dirty, active)
-                VALUES (%s, 'ForecastDemand', %s, %s, %s, %s, %s, %s, TRUE, TRUE)
+                     quantity, time_grain, time_ref, time_span_start, time_span_end,
+                     is_dirty, active)
+                VALUES (%s, 'ForecastDemand', %s, %s, %s, %s, %s, %s, %s, %s, TRUE, TRUE)
                 """,
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
-                 fc.quantity, fc.time_grain, fc.bucket_date),
+                 fc.quantity, fc.time_grain, fc.bucket_date, time_span_start, time_span_end),
             )
             _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
-            _wire_node_to_pi(db, node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID, fc.bucket_date)
+            _wire_node_to_pi(
+                db, node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID,
+                fc.bucket_date, time_span_start=time_span_start, time_span_end=time_span_end,
+            )
             results.append({
                 "item_external_id": fc.item_external_id,
                 "bucket_date": str(fc.bucket_date),

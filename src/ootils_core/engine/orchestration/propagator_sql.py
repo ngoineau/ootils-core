@@ -125,8 +125,19 @@ inflows_agg AS (
      AND s.time_ref <  dp.time_span_end
     GROUP BY dp.node_id
 ),
-outflows_agg AS (
-    SELECT dp.node_id, SUM(
+-- outflow_contribs computes the SAME per-row prorated quantity as before
+-- (verbatim CASE expression — parity stays bit-exact), kept at row grain so
+-- outflows_agg can split the aggregate by demand node_type: forecast and
+-- firm customer-order demand for the SAME bucket are NOT additive (a CO
+-- fulfils the forecast it was booked against — netted via GREATEST below),
+-- while dependent/transfer demand IS additive (derived/moved supply need,
+-- never a forecast a CO could be consuming). Mirrors propagator.py's Python
+-- netting (`_recompute_pi_node`); `engine/mrp/core.py`'s `max(o, f)` already
+-- netted Truth B (ADR-021 convergence, 2026-07-17) — core.py is untouched.
+outflow_contribs AS (
+    SELECT
+        dp.node_id,
+        d.node_type,
         CASE
             WHEN d.time_span_start IS NOT NULL
                  AND d.time_span_end IS NOT NULL
@@ -144,8 +155,7 @@ outflows_agg AS (
                  AND COALESCE(d.time_ref, d.time_span_start) <  dp.time_span_end THEN
                 d.quantity
             ELSE 0
-        END
-    ) AS outflows
+        END AS prorated_qty
     FROM dirty_pi dp
     JOIN edges c
       ON c.to_node_id = dp.node_id
@@ -156,7 +166,15 @@ outflows_agg AS (
       ON d.node_id = c.from_node_id
      AND d.node_type IN ('ForecastDemand','CustomerOrderDemand','DependentDemand','TransferDemand')
      AND d.active = TRUE
-    GROUP BY dp.node_id
+),
+outflows_agg AS (
+    SELECT
+        node_id,
+        SUM(prorated_qty) FILTER (WHERE node_type = 'ForecastDemand')      AS fc_out,
+        SUM(prorated_qty) FILTER (WHERE node_type = 'CustomerOrderDemand') AS co_out,
+        SUM(prorated_qty) FILTER (WHERE node_type IN ('DependentDemand','TransferDemand')) AS dep_out
+    FROM outflow_contribs
+    GROUP BY node_id
 ),
 per_bucket AS (
     SELECT
@@ -168,7 +186,10 @@ per_bucket AS (
         CASE WHEN dp.bucket_sequence = so.seed_seq THEN so.seed_opening
              ELSE 0::numeric END AS oh_seed,
         COALESCE(ia.inflows, 0)::numeric AS inflows,
-        COALESCE(oa.outflows, 0)::numeric AS outflows
+        -- GREATEST(fc, co) + dep: dependent/transfer demand always adds,
+        -- forecast vs CO are netted (never summed) for the same bucket.
+        (GREATEST(COALESCE(oa.fc_out, 0), COALESCE(oa.co_out, 0))
+            + COALESCE(oa.dep_out, 0))::numeric AS outflows
     FROM dirty_pi dp
     JOIN seed_openings so ON so.projection_series_id = dp.projection_series_id
     LEFT JOIN inflows_agg  ia ON ia.node_id = dp.node_id
