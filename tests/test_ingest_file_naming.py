@@ -31,6 +31,7 @@ DATABASE_URL.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -390,3 +391,156 @@ class TestFindArchived:
 
         missing = tmp_path / "inbox" / "items.tsv"
         assert _find_archived(missing) == newer
+
+
+# ─────────────────────────────────────────────────────────────
+# 5. handle_part_group — #413: a `.partNN` group is N POSTs, never one
+#    concatenated payload (the real 413 caught at the 2026-07 demo:
+#    3 forecast parts concatenated into ~13 MB blew past the 10 MB
+#    IngestPayloadSizeLimitMiddleware cap, even though each individual
+#    part was safely under TSV-FILES-SPEC.md's per-FILE 10 MB / ~50k-row
+#    cap).
+# ─────────────────────────────────────────────────────────────
+_FC_HEADER = "item_external_id\tlocation_external_id\tquantity\tbucket_date"
+
+
+class TestHandlePartGroup:
+    @pytest.fixture()
+    def archive_dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        processed = tmp_path / "processed"
+        rejected = tmp_path / "rejected"
+        monkeypatch.setattr(ingest_file, "PROCESSED", processed)
+        monkeypatch.setattr(ingest_file, "REJECTED", rejected)
+        return processed, rejected
+
+    @pytest.fixture()
+    def api_calls(self, monkeypatch: pytest.MonkeyPatch):
+        """Record every call_api invocation; respond 200 unless a specific
+        0-based call index was primed otherwise via .responses — lets a
+        test fail exactly ONE part while its siblings succeed."""
+        calls: list[tuple[str, dict, str]] = []
+        responses: dict[int, tuple[int, dict]] = {}
+
+        def fake_call_api(endpoint, payload, token):
+            idx = len(calls)
+            calls.append((endpoint, payload, token))
+            return responses.get(
+                idx, (200, {"summary": {"inserted": len(payload.get("forecasts", []))}})
+            )
+
+        fake_call_api.calls = calls  # type: ignore[attr-defined]
+        fake_call_api.responses = responses  # type: ignore[attr-defined]
+        monkeypatch.setattr(ingest_file, "call_api", fake_call_api)
+        return fake_call_api
+
+    def test_three_parts_are_three_separate_posts_never_concatenated(
+        self, tmp_path: Path, archive_dirs, api_calls
+    ) -> None:
+        p1 = _write_tsv(
+            tmp_path / "forecasts.part01.tsv", ["IT-1\tLOC-1\t5\t2026-07-20"], header=_FC_HEADER
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part02.tsv",
+            ["IT-2\tLOC-1\t7\t2026-07-20", "IT-3\tLOC-1\t9\t2026-07-20"],
+            header=_FC_HEADER,
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part03.tsv", ["IT-4\tLOC-1\t1\t2026-07-20"], header=_FC_HEADER
+        )
+
+        rc = ingest_file.handle_part_group(p1, dry_run=False, token="tok")
+
+        assert rc == 0
+        assert len(api_calls.calls) == 3
+        assert [c[0] for c in api_calls.calls] == ["/v1/ingest/forecast-demand"] * 3
+        # Each POST's payload carries ONLY its own part's rows — never the
+        # concatenated group (the #413 bug).
+        assert [len(c[1]["forecasts"]) for c in api_calls.calls] == [1, 2, 1]
+        assert [r["item_external_id"] for r in api_calls.calls[0][1]["forecasts"]] == ["IT-1"]
+        assert [r["item_external_id"] for r in api_calls.calls[1][1]["forecasts"]] == ["IT-2", "IT-3"]
+        assert [r["item_external_id"] for r in api_calls.calls[2][1]["forecasts"]] == ["IT-4"]
+
+        processed, rejected = archive_dirs
+        assert sum(1 for _ in processed.glob("*.tsv")) == 3
+        assert not rejected.exists() or not any(rejected.iterdir())
+
+    def test_failure_on_part_two_stops_part_three_and_rejects_group(
+        self, tmp_path: Path, archive_dirs, api_calls
+    ) -> None:
+        api_calls.responses[1] = (422, {"detail": "bad quantity"})  # the 2nd POST fails
+        p1 = _write_tsv(
+            tmp_path / "forecasts.part01.tsv", ["IT-1\tLOC-1\t5\t2026-07-20"], header=_FC_HEADER
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part02.tsv", ["IT-2\tLOC-1\t7\t2026-07-20"], header=_FC_HEADER
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part03.tsv", ["IT-3\tLOC-1\t9\t2026-07-20"], header=_FC_HEADER
+        )
+
+        rc = ingest_file.handle_part_group(p1, dry_run=False, token="tok")
+
+        assert rc == 1
+        # Fail-fast: part03 is never POSTed once part02 is rejected.
+        assert len(api_calls.calls) == 2
+
+        processed, rejected = archive_dirs
+        assert not processed.exists() or not any(processed.iterdir())
+        assert sum(1 for _ in rejected.glob("*.tsv")) == 3
+        report_path = next(rejected.glob("forecasts.part01*.report.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["outcome"] == "rejected"
+        assert report["parts_count"] == 3
+        assert report["parts_ok"] == 1
+        parts = report["part_results"]
+        # part01 got through (and stays acquired — ingestion is
+        # upsert-idempotent, so a re-run of the whole group is safe).
+        assert parts[0]["outcome"] == "ok" and parts[0]["source"] == "forecasts.part01.tsv"
+        assert parts[1]["outcome"] == "rejected" and parts[1]["http_status"] == 422
+        assert parts[2]["outcome"] == "not_attempted" and parts[2]["attempted"] is False
+
+    def test_header_mismatch_raises_before_any_post(
+        self, tmp_path: Path, archive_dirs, api_calls
+    ) -> None:
+        p1 = _write_tsv(
+            tmp_path / "forecasts.part01.tsv", ["IT-1\tLOC-1\t5\t2026-07-20"], header=_FC_HEADER
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part02.tsv",
+            ["IT-2\tLOC-1\t7\t2026-07-20"],
+            header="item_external_id\tlocation_external_id\tqty\tbucket_date",  # 'qty' != 'quantity'
+        )
+
+        rc = ingest_file.handle_part_group(p1, dry_run=False, token="tok")
+
+        assert rc == 4
+        assert api_calls.calls == []  # header identity is checked BEFORE any POST
+
+        processed, rejected = archive_dirs
+        assert not processed.exists() or not any(processed.iterdir())
+        report_path = next(rejected.glob("forecasts.part01*.report.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["outcome"] == "parse_error"
+        assert "forecasts.part02.tsv" in report["error"]
+
+    def test_dry_run_posts_but_never_archives(
+        self, tmp_path: Path, archive_dirs, api_calls, capsys
+    ) -> None:
+        p1 = _write_tsv(
+            tmp_path / "forecasts.part01.tsv", ["IT-1\tLOC-1\t5\t2026-07-20"], header=_FC_HEADER
+        )
+        _write_tsv(
+            tmp_path / "forecasts.part02.tsv", ["IT-2\tLOC-1\t7\t2026-07-20"], header=_FC_HEADER
+        )
+
+        rc = ingest_file.handle_part_group(p1, dry_run=True, token="tok")
+
+        assert rc == 0
+        assert len(api_calls.calls) == 2
+        assert all(c[1]["dry_run"] is True for c in api_calls.calls)
+        # No archiving under --dry-run: both parts stay exactly where they were.
+        assert p1.exists()
+        assert (tmp_path / "forecasts.part02.tsv").exists()
+        processed, rejected = archive_dirs
+        assert not processed.exists()
+        assert not rejected.exists()

@@ -53,6 +53,7 @@ DATABASE_URL.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -528,15 +529,23 @@ class TestLoadPhase:
     @pytest.fixture
     def api_calls(self, monkeypatch):
         """Record every call_api invocation; respond 200 unless the endpoint
-        was primed otherwise via .responses."""
+        was primed otherwise via .responses (by endpoint) or
+        .indexed_responses (by 0-based call index — e.g. to fail one
+        specific PART of a `.partNN` group while the others succeed;
+        additive on top of .responses, never used by pre-#413 tests)."""
         calls: list[tuple[str, dict, str]] = []
         responses: dict[str, tuple[int, dict]] = {}
+        indexed_responses: dict[int, tuple[int, dict]] = {}
 
         def fake_call_api(endpoint, payload, token):
+            idx = len(calls)
             calls.append((endpoint, payload, token))
+            if idx in indexed_responses:
+                return indexed_responses[idx]
             return responses.get(endpoint, (200, {"summary": {"inserted": len(next(iter(payload.values())))}}))
 
         fake_call_api.responses = responses  # type: ignore[attr-defined]
+        fake_call_api.indexed_responses = indexed_responses  # type: ignore[attr-defined]
         monkeypatch.setattr(daily_orchestrator, "call_api", fake_call_api)
         fake_call_api.calls = calls  # type: ignore[attr-defined]
         return fake_call_api
@@ -731,6 +740,82 @@ class TestLoadPhase:
         assert "contract deactivated" in outcomes[0].detail
         assert api_calls.calls == []
         assert any(p.suffix == ".tsv" for p in (tmp_path / "rejected").iterdir())
+
+    # ── #413: a part-group feed is N POSTs, never one concatenated POST ──
+    def test_part_group_feed_is_posted_as_n_separate_payloads(self, tmp_path, api_calls):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        _write_tsv(
+            inbox / f"on-hand.part01_{DATE_STR}.tsv", [_row("IT-1", "5")],
+        )
+        _write_tsv(
+            inbox / f"on-hand.part02_{DATE_STR}.tsv",
+            [_row("IT-2", "7"), _row("IT-3", "9")],
+        )
+        scan = scan_inbox(inbox, RUN_DATE)
+        evaluation = self._degraded_evaluation(
+            scan, [_feed_eval("on-hand", "on_hand", scan)]
+        )
+
+        outcomes = load_eligible_feeds(evaluation, token="tok", inbox_dir=inbox)
+
+        # ONE POST per part — never a single concatenated payload for the group.
+        assert len(api_calls.calls) == 2
+        assert [c[0] for c in api_calls.calls] == ["/v1/ingest/on-hand"] * 2
+        assert len(api_calls.calls[0][1]["on_hand"]) == 1
+        assert len(api_calls.calls[1][1]["on_hand"]) == 2
+        assert [r["item_external_id"] for r in api_calls.calls[0][1]["on_hand"]] == ["IT-1"]
+        assert [r["item_external_id"] for r in api_calls.calls[1][1]["on_hand"]] == ["IT-2", "IT-3"]
+
+        assert outcomes[0].status is FeedLoadStatus.LOADED
+        assert outcomes[0].http_status == 200
+        # Group archived together, inbox drained (archive_group writes one
+        # report.json per source file — the full report lives next to
+        # part01, a pointer stub next to every other part).
+        assert list(inbox.iterdir()) == []
+        processed = sorted(p.name for p in (tmp_path / "processed").iterdir())
+        assert sum(1 for n in processed if n.endswith(".tsv")) == 2
+        assert sum(1 for n in processed if n.endswith(".report.json")) == 2
+
+    def test_part_group_fails_fast_on_second_part_and_rejects_whole_group(self, tmp_path, api_calls):
+        # The 2nd POST (0-based idx 1) is rejected — the 3rd part must never
+        # be attempted, and the group's shared report must name exactly
+        # which part(s) made it through (parts already POSTed stay acquired
+        # server-side — ingestion is upsert-idempotent — a re-run is safe).
+        api_calls.indexed_responses[1] = (422, {"detail": "bad row"})
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        _write_tsv(inbox / f"on-hand.part01_{DATE_STR}.tsv", [_row("IT-1")])
+        _write_tsv(inbox / f"on-hand.part02_{DATE_STR}.tsv", [_row("IT-2")])
+        _write_tsv(inbox / f"on-hand.part03_{DATE_STR}.tsv", [_row("IT-3")])
+        scan = scan_inbox(inbox, RUN_DATE)
+        evaluation = self._degraded_evaluation(
+            scan, [_feed_eval("on-hand", "on_hand", scan)]
+        )
+
+        outcomes = load_eligible_feeds(evaluation, token="tok", inbox_dir=inbox)
+
+        # fail-fast: only 2 of the 3 parts were ever POSTed.
+        assert len(api_calls.calls) == 2
+        assert outcomes[0].status is FeedLoadStatus.REJECTED
+        assert outcomes[0].http_status == 422
+
+        # Whole group archived to rejected/ together, report next to part01
+        # (ascending order) names each part's own fate honestly.
+        assert list(inbox.iterdir()) == []
+        rejected = list((tmp_path / "rejected").iterdir())
+        report_path = next(
+            p for p in rejected
+            if p.name.startswith("on-hand.part01") and p.name.endswith(".report.json")
+        )
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["outcome"] == "rejected"
+        assert report["parts_count"] == 3
+        assert report["parts_ok"] == 1
+        parts = report["part_results"]
+        assert parts[0]["accepted"] is True
+        assert parts[1]["accepted"] is False and parts[1]["http_status"] == 422
+        assert parts[2]["attempted"] is False
 
 
 # ─────────────────────────────────────────────────────────────
