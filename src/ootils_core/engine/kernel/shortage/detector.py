@@ -63,6 +63,7 @@ class ShortageDetector:
         calc_run_id: UUID,
         scenario_id: UUID,
         db,
+        is_stocking: bool = True,
     ) -> Optional[ShortageRecord]:
         """
         Inspect a PI node and return a ShortageRecord if closing_stock < 0.
@@ -75,6 +76,7 @@ class ShortageDetector:
             calc_run_id=calc_run_id,
             scenario_id=scenario_id,
             db=db,
+            is_stocking=is_stocking,
         )
 
     def detect_with_params(
@@ -85,6 +87,7 @@ class ShortageDetector:
         db,
         safety_stock_qty: Optional[Decimal] = None,
         unit_cost: Optional[Decimal] = None,
+        is_stocking: bool = True,
     ) -> Optional[ShortageRecord]:
         """
         Enhanced detection: detects both stockouts (closing_stock < 0) and
@@ -96,7 +99,25 @@ class ShortageDetector:
         - None: no shortage
 
         severity_score = shortage_qty × days_in_bucket × unit_cost (or proxy)
+
+        ``is_stocking`` (migration 081, PR-B — virtual demand-channel
+        exclusion): mirrors the SQL engine's `pi_with_ss` CTE in
+        `propagator_sql.SHORTAGES_SQL`. Locations flagged `is_stocking=FALSE`
+        (virtual routing/allocation channels carrying demand but no supply of
+        any kind) never materialize a `shortages` row — this is DETECTION
+        gating only. The PROJECTION (`pi_node.closing_stock` etc.) is computed
+        upstream regardless of this flag (explainability, ADR-004); a caller
+        that skips detection here still has the negative closing stock
+        visible on the PI node itself. Default True preserves existing
+        behaviour for every location that hasn't opted out.
         """
+        if not is_stocking:
+            logger.debug(
+                "Shortage detection skipped: location not stocking (node=%s)",
+                pi_node.node_id,
+            )
+            return None
+
         closing = pi_node.closing_stock
         if closing is None:
             return None

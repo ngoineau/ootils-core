@@ -270,6 +270,20 @@ SHORTAGES_SQL = """
 -- would, just via "no matching row" instead of "NULL never equals NOT NULL".
 -- Ownership of `shortages` stays exclusively ShortageDetector's (ADR-021);
 -- this only corrects the VALUE the query reads, never who writes the row.
+--
+-- is_stocking (migration 081, PR-B — virtual demand-channel exclusion): the
+-- `locations l` LEFT JOIN below + the COALESCE guard in the WHERE clause
+-- gate DETECTION only — a location explicitly flagged `is_stocking=FALSE`
+-- (a virtual routing/allocation channel carrying demand but no supply of
+-- any kind) never produces a `shortages` row. The PROJECTION (PROPAGATE_SQL
+-- above) is computed for every location regardless of this flag
+-- (explainability, ADR-004) — only this INSERT is gated. LEFT JOIN (not
+-- INNER) + COALESCE(l.is_stocking, TRUE) so a PI whose location_id is NULL
+-- (nodes.location_id has no NOT NULL constraint) or missing from
+-- `locations` degrades to the migration's own DEFAULT TRUE instead of being
+-- silently dropped from detection by an unrelated join miss. Mirrored in
+-- the Python engine by ShortageDetector.detect_with_params(is_stocking=...)
+-- (engine/kernel/shortage/detector.py) — keep both in sync.
 WITH pi_with_ss AS (
     SELECT
         pi.scenario_id,
@@ -285,6 +299,8 @@ WITH pi_with_ss AS (
     JOIN dirty_nodes dn
       ON dn.node_id = pi.node_id
      AND dn.scenario_id = pi.scenario_id
+    LEFT JOIN locations l
+      ON l.location_id = pi.location_id
     LEFT JOIN items i
       ON i.item_id = pi.item_id
     LEFT JOIN LATERAL (
@@ -317,6 +333,7 @@ WITH pi_with_ss AS (
       AND pi.scenario_id = %(scenario_id)s
       AND pi.active = TRUE
       AND pi.closing_stock IS NOT NULL
+      AND COALESCE(l.is_stocking, TRUE) = TRUE
 ),
 shortage_rows AS (
     SELECT

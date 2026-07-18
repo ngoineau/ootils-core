@@ -308,12 +308,33 @@ class PropagationEngine:
         # Unpriced items fall back to the detector's proxy of 1 so severity
         # never silently collapses to zero.
         unit_cost_cache: dict[UUID, Decimal] = {}
+        # Location stocking eligibility (migration 081, PR-B — virtual
+        # demand-channel exclusion). Mirrors the SQL engine's `pi_with_ss`
+        # LEFT JOIN in propagator_sql.SHORTAGES_SQL: gates shortage
+        # DETECTION only (the projection above is computed for every
+        # location regardless). A location absent from this cache defaults
+        # to stocking-eligible at the call site — same DEFAULT TRUE the
+        # migration ships with — so this preload never changes behaviour
+        # for a location that hasn't been explicitly opted out.
+        location_stocking_cache: dict[UUID, bool] = {}
         if self._shortage_detector is not None:
             pi_pairs = {
                 (n.item_id, n.location_id)
                 for n in nodes_cache.values()
                 if n is not None and n.node_type == "ProjectedInventory" and n.item_id is not None
             }
+            location_ids = list({
+                n.location_id
+                for n in nodes_cache.values()
+                if n is not None and n.node_type == "ProjectedInventory" and n.location_id is not None
+            })
+            if location_ids:
+                loc_rows = db.execute(
+                    "SELECT location_id, is_stocking FROM locations WHERE location_id = ANY(%s)",
+                    (location_ids,),
+                ).fetchall()
+                for r in loc_rows:
+                    location_stocking_cache[UUID(str(r["location_id"]))] = bool(r["is_stocking"])
             if pi_pairs:
                 item_ids = list({pair[0] for pair in pi_pairs})
                 # safety_stock_qty (chantier #347 PR3, ADR-025): resolved
@@ -397,6 +418,7 @@ class PropagationEngine:
                     edges_by_target=edges_by_target,
                     safety_stock_cache=safety_stock_cache,
                     unit_cost_cache=unit_cost_cache,
+                    location_stocking_cache=location_stocking_cache,
                     pending_updates=pending_updates,
                 )
                 if changed:
@@ -429,6 +451,7 @@ class PropagationEngine:
         edges_by_target: Optional[dict[UUID, dict[str, list]]] = None,
         safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
         unit_cost_cache: Optional[dict[UUID, Decimal]] = None,
+        location_stocking_cache: Optional[dict[UUID, bool]] = None,
         pending_updates: Optional[list[tuple]] = None,
     ) -> bool:
         """
@@ -687,6 +710,17 @@ class PropagationEngine:
                     if unit_cost_cache is not None and node.item_id is not None
                     else None
                 )
+                # is_stocking (migration 081, PR-B): gates DETECTION only —
+                # the PI projection above is already computed and persisted
+                # regardless. Cache miss / no location_id / standalone calls
+                # (no cache) all default to True, matching the migration's
+                # DEFAULT TRUE and the SQL engine's LEFT JOIN COALESCE.
+                if location_stocking_cache is not None and node.location_id is not None:
+                    is_stocking = location_stocking_cache.get(node.location_id, True)
+                elif node.location_id is not None:
+                    is_stocking = self._get_is_stocking(node, db)
+                else:
+                    is_stocking = True
                 shortage = self._shortage_detector.detect_with_params(
                     pi_node=node,
                     calc_run_id=calc_run_id,
@@ -694,6 +728,7 @@ class PropagationEngine:
                     db=db,
                     safety_stock_qty=safety_stock,
                     unit_cost=unit_cost,
+                    is_stocking=is_stocking,
                 )
                 if shortage is not None:
                     self._shortage_detector.persist(shortage, db)
@@ -752,3 +787,26 @@ class PropagationEngine:
                 exc,
             )
         return None
+
+    def _get_is_stocking(self, node: Node, db: DictRowConnection) -> bool:
+        """Fetch `locations.is_stocking` for this node's location (migration
+        081, PR-B). Standalone-call fallback path (used when
+        location_stocking_cache is None, e.g. tests / callers outside the
+        batched _propagate loop). Defaults to True — a missing row or any
+        lookup failure never suppresses detection, matching the migration's
+        DEFAULT TRUE and the SQL engine's LEFT JOIN COALESCE."""
+        try:
+            row = db.execute(
+                "SELECT is_stocking FROM locations WHERE location_id = %s",
+                (node.location_id,),
+            ).fetchone()
+            if row is not None and row["is_stocking"] is not None:
+                return bool(row["is_stocking"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_get_is_stocking: failed for node %s location=%s: %s",
+                node.node_id,
+                node.location_id,
+                exc,
+            )
+        return True
