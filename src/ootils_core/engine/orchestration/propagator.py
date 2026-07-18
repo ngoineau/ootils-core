@@ -547,19 +547,17 @@ class PropagationEngine:
                 continue
 
             contribution = Decimal("0")
-            span_days = 0
-            if (src_node.time_span_start is not None
-                    and src_node.time_span_end is not None):
-                span_days = (src_node.time_span_end - src_node.time_span_start).days
-
-            if span_days > 0:
+            span_start = src_node.time_span_start
+            span_end = src_node.time_span_end
+            if (span_start is not None and span_end is not None
+                    and (span_days := (span_end - span_start).days) > 0):
                 # Daily rate, pro-rated by day-overlap with this bucket.
                 daily_qty = src_node.quantity / Decimal(str(span_days))
-                # Count days within this bucket
-                overlap_start = max(bucket_start, src_node.time_span_start)
-                # Both bucket_end and time_span_end are exclusive —
-                # overlap is [overlap_start, overlap_end) days.
-                overlap_end = min(bucket_end, src_node.time_span_end)
+                # Count days within this bucket. Both bucket_end and
+                # time_span_end are exclusive — overlap is
+                # [overlap_start, overlap_end) days.
+                overlap_start = max(bucket_start, span_start)
+                overlap_end = min(bucket_end, span_end)
                 if overlap_end > overlap_start:
                     overlap_days = (overlap_end - overlap_start).days
                     contribution = daily_qty * Decimal(str(overlap_days))
