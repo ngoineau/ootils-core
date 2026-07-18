@@ -313,6 +313,12 @@ DISPATCH: dict[str, dict[str, str]] = {
     "customer_orders.tsv":      {"endpoint": "/v1/ingest/customer-orders",  "body_key": "customer_orders"},
     "forecasts.tsv":            {"endpoint": "/v1/ingest/forecast-demand",  "body_key": "forecasts"},
     "transfers.tsv":            {"endpoint": "/v1/ingest/transfers",        "body_key": "transfers"},
+    # Referential/on-demand (ADR-042 doctrine — never in the blocking daily
+    # run's governed set, no feed_contracts row by design): the daily
+    # orchestrator falls back to the raw feed_key as canonical dispatch name
+    # for exactly this class of entity (see engine/ingest/daily_orchestrator.py
+    # module docstring, "THE feed_key / entity_type MISMATCH").
+    "distribution_links.tsv":   {"endpoint": "/v1/ingest/distribution-links", "body_key": "distribution_links"},
     # BOM bundle: entry point is bom_header.tsv, which auto-loads bom_components.tsv
     # alongside and emits N POSTs (one per BOM). Special-cased in
     # scripts/ingest_file.py's main() / handle_bom_bundle — NOT in
@@ -666,6 +672,53 @@ def build_transfers_payload(rows: list[dict[str, str]], dry_run: bool) -> dict[s
     return {"transfers": transfers, "dry_run": dry_run}
 
 
+def build_distribution_links_payload(rows: list[dict[str, str]], dry_run: bool) -> dict[str, Any]:
+    """Build the JSON body for POST /v1/ingest/distribution-links.
+
+    Column order per the contract (docs/contracts/distribution_links/
+    format-distribution-links-tsv.md §3): upstream_external_id,
+    downstream_external_id, item_external_id, transit_lead_time_days,
+    minimum_shipment_qty, transfer_multiple, priority.
+
+    Required: upstream_external_id, downstream_external_id,
+              transit_lead_time_days (mandatory IN THIS FILE, unlike the DB
+              column which carries a technical default — §3 refuses the
+              silent inheritance).
+    Optional: item_external_id (blank/absent = generic lane, all items),
+              minimum_shipment_qty (server default 1, 0 is a legitimate
+              'no floor'), transfer_multiple (server default 1),
+              priority (server default 100).
+    `active` is out of this file's contract (§8) — never sent here; the
+    server default (True) applies.
+    """
+    links: list[dict[str, Any]] = []
+    for row in rows:
+        line = row.get("__line__", "?")
+        if not row.get("transit_lead_time_days"):
+            raise ValueError(f"line {line}: transit_lead_time_days is required and cannot be empty")
+        link: dict[str, Any] = {
+            "upstream_external_id": row.get("upstream_external_id", ""),
+            "downstream_external_id": row.get("downstream_external_id", ""),
+            "transit_lead_time_days": _to_float(
+                row["transit_lead_time_days"], field="transit_lead_time_days", line=line
+            ),
+        }
+        if row.get("item_external_id"):
+            link["item_external_id"] = row["item_external_id"]
+        if row.get("minimum_shipment_qty"):
+            link["minimum_shipment_qty"] = _to_float(
+                row["minimum_shipment_qty"], field="minimum_shipment_qty", line=line
+            )
+        if row.get("transfer_multiple"):
+            link["transfer_multiple"] = _to_float(
+                row["transfer_multiple"], field="transfer_multiple", line=line
+            )
+        if row.get("priority"):
+            link["priority"] = _to_int(row["priority"], field="priority", line=line)
+        links.append(link)
+    return {"distribution_links": links, "dry_run": dry_run}
+
+
 PAYLOAD_BUILDERS = {
     "items.tsv":                build_items_payload,
     "locations.tsv":            build_locations_payload,
@@ -677,6 +730,7 @@ PAYLOAD_BUILDERS = {
     "customer_orders.tsv":      build_customer_orders_payload,
     "forecasts.tsv":            build_forecasts_payload,
     "transfers.tsv":            build_transfers_payload,
+    "distribution_links.tsv":   build_distribution_links_payload,
 }
 
 

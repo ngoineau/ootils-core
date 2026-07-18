@@ -164,13 +164,27 @@ logger = logging.getLogger(__name__)
 # deliberate, documented duplicate of a short constant, not a second
 # canonical WRITER (nothing here re-implements bulk_ingest.py's loaders).
 # A canonical filename absent from this tuple sorts LAST (see
-# `_load_order_key`), never refused outright.
+# `_load_order_key`), never refused outright — but
+# `test_every_registered_builder_has_an_explicit_load_order_slot`
+# (tests/test_daily_orchestrator.py) still requires every
+# `interfaces.ingest_exec.PAYLOAD_BUILDERS` key to have an EXPLICIT slot
+# here, so a new entity is never silently pushed to "last" by omission.
+#
+# `distribution_links.tsv` (DESC-1 PR-D) is a DELIBERATE, DOCUMENTED
+# divergence from scripts/bulk_ingest.py's ORDERED_FILES — that script has
+# no `load_distribution_links` loader yet (a separate, DB-direct-write
+# implementation, out of this chantier's scope), so mirroring it exactly
+# is not possible today. Positioned right after the other referential/
+# topology entries (items/locations/suppliers/supplier_items/
+# item_planning_params) since its own FKs are items (optional) + locations
+# only.
 LOAD_ORDER: tuple[str, ...] = (
     "items.tsv",
     "locations.tsv",
     "suppliers.tsv",
     "supplier_items.tsv",
     "item_planning_params.tsv",
+    "distribution_links.tsv",
     "on_hand.tsv",
     "purchase_orders.tsv",
     "customer_orders.tsv",
