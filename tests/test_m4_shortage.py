@@ -275,3 +275,68 @@ class TestDetectBelowSafetyStock:
         )
         # qty=10, days=7, cost=3 → 210
         assert result.severity_score == Decimal("210")
+
+
+# ---------------------------------------------------------------------------
+# 5. is_stocking DETECTION gate (migration 081, PR-B) — pure half
+# ---------------------------------------------------------------------------
+
+class TestDetectIsStockingGate:
+    """`is_stocking=False` gates DETECTION only: even the deepest stockout (or
+    a below-safety-stock dip) returns None before the db is ever touched.
+    Default True keeps every pre-081 call signature byte-identical in
+    behaviour. The DB-backed halves (SHORTAGES_SQL's `locations` LEFT JOIN and
+    the propagator's location_stocking_cache preload) live in
+    tests/integration/test_is_stocking_integration.py."""
+
+    def setup_method(self):
+        self.detector = ShortageDetector()
+        self.calc_run_id = uuid4()
+        self.scenario_id = uuid4()
+
+    def test_non_stocking_suppresses_stockout(self):
+        node = make_pi_node(
+            closing_stock=Decimal("-9400"),
+            time_span_start=date(2026, 7, 17),
+            time_span_end=date(2026, 7, 18),
+        )
+        result = self.detector.detect_with_params(
+            pi_node=node,
+            calc_run_id=self.calc_run_id,
+            scenario_id=self.scenario_id,
+            db=None,
+            is_stocking=False,
+        )
+        assert result is None
+
+    def test_non_stocking_suppresses_below_safety_stock_too(self):
+        node = make_pi_node(closing_stock=Decimal("5"))
+        result = self.detector.detect_with_params(
+            pi_node=node,
+            calc_run_id=self.calc_run_id,
+            scenario_id=self.scenario_id,
+            db=None,
+            safety_stock_qty=Decimal("10"),
+            is_stocking=False,
+        )
+        assert result is None
+
+    def test_default_true_preserves_detection(self):
+        # No is_stocking argument at all — the pre-081 call signature.
+        node = make_pi_node(closing_stock=Decimal("-3"))
+        result = self.detector.detect_with_params(
+            pi_node=node,
+            calc_run_id=self.calc_run_id,
+            scenario_id=self.scenario_id,
+            db=None,
+        )
+        assert result is not None
+        assert result.severity_class == "stockout"
+
+    def test_detect_passthrough_respects_gate(self):
+        # detect() forwards is_stocking to detect_with_params.
+        node = make_pi_node(closing_stock=Decimal("-3"))
+        result = self.detector.detect(
+            node, self.calc_run_id, self.scenario_id, db=None, is_stocking=False
+        )
+        assert result is None
