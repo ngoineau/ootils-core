@@ -612,6 +612,18 @@ class TestDryRunPreview:
         drop = _on_hand_file(
             inbox, R4, [(seed["item1"], "1"), (seed["item2"], "2")], _utc(R4, *GREEN_ON_HAND)
         )
+        # Seed the OTHER blocking feed green too (same shape as Scenario 1) —
+        # without it, open-purchase-orders is missing past its deadline at
+        # 08:00 → arrival FAILED on a blocking feed → ESCALATED, and the
+        # DEGRADED pin below would be asserting the wrong scenario.
+        _write_tsv(
+            inbox / f"open-purchase-orders.part01_{R4:%Y%m%d}.tsv",
+            _PO_HEADER, [_po_row(_ext("PO-PREVIEW-1"), seed["item1"])], _utc(R4, *GREEN_PO),
+        )
+        _write_tsv(
+            inbox / f"open-purchase-orders.part02_{R4:%Y%m%d}.tsv",
+            _PO_HEADER, [_po_row(_ext("PO-PREVIEW-2"), seed["item2"])], _utc(R4, *GREEN_PO),
+        )
 
         total_before = _count_all_events(conn2)
         evaluation = plan_daily_run(conn2, inbox, R4, now=_utc(R4, 8))
