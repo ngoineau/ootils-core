@@ -133,6 +133,7 @@ Every switch below defaults to keep dev/CI/seed working unchanged; a governed/pr
 | `OOTILS_DIRECT_INGEST_ENABLED` | ON | `POST /v1/ingest/*` for non-legacy callers — 503/request, `is_legacy` exempt | ADR-042 PR-1 |
 | `OOTILS_DAILY_RUN_ENABLED` | OFF | `scripts/run_daily_ingest.py --apply` (write path) | ADR-042 |
 | `OOTILS_DAILY_RUN_REPORT_ENABLED` | ON | `GET /v1/daily-runs` (read path) | ADR-042 |
+| `OOTILS_OUTBOUND_EXPORT_ENABLED` | OFF | `scripts/run_daily_ingest.py`'s EXPORT phase — write of `po_drafts`/`reschedule_messages`/`transfers` TSVs + `exported_at` stamp | ADR-042 PR-5a |
 | `OOTILS_PURGE_ENABLED` | OFF | `scripts/purge_maintenance.py --apply` | ADR-039 |
 | `OOTILS_UI_ENABLED` | OFF | `GET /ui` + `/ui/static` — route unmounted at `create_app()` (404), not per-request 503 | ADR-036 |
 | `OOTILS_SCENARIO_COMPARE_ENABLED` | ON | `GET /v1/scenarios/compare` | ADR-034 |
