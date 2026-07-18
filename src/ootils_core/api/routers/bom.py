@@ -103,6 +103,13 @@ class ExplodeResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
+def _log_safe(value: str) -> str:
+    """Neutralize control chars (CR/LF included) in client-supplied values
+    before logging — a forged external_id must not inject log lines
+    (CodeQL py/log-injection)."""
+    return "".join(c if c.isprintable() else "?" for c in str(value))[:200]
+
+
 def _resolve_item_id(db: DictRowConnection, external_id: str) -> UUID | None:
     """Resolve external_id → item_id. Returns None if not found.
 
@@ -480,12 +487,14 @@ def ingest_bom(
 
     logger.info(
         "bom.ingest parent=%s version=%s components=%d llc_updated=%d",
-        body.parent_external_id, body.bom_version, len(body.components), llc_count,
+        _log_safe(body.parent_external_id), _log_safe(body.bom_version),
+        len(body.components), llc_count,
     )
     if warnings:
         logger.warning(
             "bom.ingest parent=%s version=%s: %d obsolete item reference(s) loaded as structure",
-            body.parent_external_id, body.bom_version, len(warnings),
+            _log_safe(body.parent_external_id), _log_safe(body.bom_version),
+            len(warnings),
         )
 
     return IngestBOMResponse(
