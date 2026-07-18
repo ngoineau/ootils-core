@@ -21,7 +21,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from ootils_core.engine.orchestration.propagator_sql import SHORTAGES_SQL
+from ootils_core.engine.orchestration.propagator_sql import SHORTAGES_SQL, shortage_params
 
 from .conftest import requires_db
 
@@ -179,7 +179,7 @@ def test_severity_valued_with_cost_precedence(conn):
 
     conn.execute(
         SHORTAGES_SQL,
-        {"calc_run_id": calc_run_id, "scenario_id": scenario_id},
+        shortage_params(scenario_id, calc_run_id),
     )
 
     assert _severity_for(conn, pi_a) == Decimal("50")  # 10 × 1 × 5 (supplier)
@@ -208,7 +208,7 @@ def test_equal_quantities_rank_by_value(conn):
 
     conn.execute(
         SHORTAGES_SQL,
-        {"calc_run_id": calc_run_id, "scenario_id": scenario_id},
+        shortage_params(scenario_id, calc_run_id),
     )
 
     rows = conn.execute(
