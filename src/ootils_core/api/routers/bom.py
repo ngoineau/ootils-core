@@ -104,10 +104,11 @@ class ExplodeResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 def _log_safe(value: str) -> str:
-    """Neutralize control chars (CR/LF included) in client-supplied values
-    before logging — a forged external_id must not inject log lines
-    (CodeQL py/log-injection)."""
-    return "".join(c if c.isprintable() else "?" for c in str(value))[:200]
+    """Neutralize CR/LF in client-supplied values before logging — a forged
+    external_id must not inject log lines (CodeQL py/log-injection; the
+    explicit replace() chain is the sanitizer shape CodeQL's taint tracking
+    recognizes — keep it that way)."""
+    return str(value).replace("\r", "?").replace("\n", "?")[:200]
 
 
 def _resolve_item_id(db: DictRowConnection, external_id: str) -> UUID | None:

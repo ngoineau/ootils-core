@@ -173,6 +173,7 @@ class TestImpactScorerBomTraversal:
             _get_finished_goods_via_bom,
         )
 
+        fgs: list = []
         try:
             fgs = _get_finished_goods_via_bom(db_conn, [seed["comp_a"]])
         except psycopg.errors.UndefinedTable as e:  # pragma: no cover — regression guard
