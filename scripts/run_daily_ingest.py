@@ -18,6 +18,22 @@ loaded, nothing moves in the inbox. ``--apply`` is additionally gated by the
 DB connection is even opened) — the same double-guard shape as
 ``scripts/purge_maintenance.py``'s ``OOTILS_PURGE_ENABLED``.
 
+DAILY REPORT (ADR-042 PR-4c, "daily update via la Dropbox"): every
+invocation that reaches the DB — dry-run preview or applied run alike —
+renders the deterministic Markdown compte-rendu
+(``engine.reporting.render_daily_report``) for the team reading the
+Dropbox, e.g. ERP. In ``--apply`` mode the report is written under
+``--outbox`` (default ``/home/debian/outbox``) as
+``daily_report_<AAAAMMJJ>.md`` — the actual Dropbox deposit is a SEPARATE,
+deliberately dumb step (``scripts/deposit_outbox.sh``, an ``rclone copy``
+cron job over that same directory, mirroring the existing backup pattern —
+this script never talks to Dropbox itself). In dry-run mode the report goes
+to STDOUT ONLY — nothing is ever written to ``--outbox`` without ``--apply``
+(so a preview run never leaves a stray file an operator might mistake for a
+real daily deposit). The report is generated even for an ESCALATED run
+(nothing loaded) — that is precisely the situation the ERP team most needs
+explained.
+
 NO AUTOMATIC RECOMPUTE (deliberate, V1 scope). Loading the green feeds is
 this script's entire job. Propagation / shortage detection is a SEPARATE,
 deliberate call an operator (or a future PR) makes afterwards, e.g.:
@@ -40,7 +56,8 @@ scope (see above) so a ``calc:run``-scoped token is never needed here.
 Usage:
     DATABASE_URL=postgresql://... OOTILS_API_TOKEN=... \\
     OOTILS_DAILY_RUN_ENABLED=1 python scripts/run_daily_ingest.py \\
-        [--inbox /home/debian/inbox] [--date 2026-07-18] [--apply] [--allow-dev]
+        [--inbox /home/debian/inbox] [--outbox /home/debian/outbox] \\
+        [--date 2026-07-18] [--apply] [--allow-dev]
 
 Exit codes: 0 the orchestrator ran to completion (including an ESCALATED
 run that loaded nothing by design — check the printed decision / logs, the
@@ -63,6 +80,7 @@ from psycopg.rows import dict_row
 
 import mrp_core as core
 
+from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.ingest.apply import RunDecisionStatus
 from ootils_core.engine.ingest.daily_orchestrator import (
     DailyRunEvaluation,
@@ -71,11 +89,14 @@ from ootils_core.engine.ingest.daily_orchestrator import (
     load_eligible_feeds,
     plan_daily_run,
 )
+from ootils_core.engine.reporting import build_shortages_summary, render_daily_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("run_daily_ingest")
 
 _DEFAULT_INBOX = "/home/debian/inbox"
+_DEFAULT_OUTBOX = "/home/debian/outbox"
+_SHORTAGES_TOP_N = 10
 
 
 def _daily_run_enabled() -> bool:
@@ -139,6 +160,45 @@ def _report_load_outcomes(outcomes: tuple[FeedLoadOutcome, ...]) -> None:
         )
 
 
+def _emit_daily_report(
+    evaluation: DailyRunEvaluation,
+    outcomes: tuple[FeedLoadOutcome, ...],
+    conn: DictRowConnection,
+    *,
+    apply: bool,
+    outbox_dir: Path,
+) -> None:
+    """Render the deterministic daily report and either print it (dry-run —
+    STDOUT ONLY, nothing written) or write it to ``--outbox`` (``--apply``).
+
+    ``print()`` here is deliberate (not ``logger``): the report body must
+    reach STDOUT byte-for-byte, with no logging prefix/timestamp interleaved
+    — the CLI's own progress messages already go through ``logger``
+    everywhere else in this file. ``build_shortages_summary`` is SELECT-only
+    and safe to call in both modes (returns ``[]``, never raises, when the
+    baseline has no completed calc_run yet).
+    """
+    shortages_summary = build_shortages_summary(conn, limit=_SHORTAGES_TOP_N)
+    report = render_daily_report(
+        evaluation,
+        outcomes,
+        shortages_summary=shortages_summary,
+        generated_at=datetime.now(timezone.utc),
+    )
+
+    if not apply:
+        print(report)  # noqa: T201 — deliberate: the report body, not a log line
+        return
+
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    out_path = outbox_dir / f"daily_report_{evaluation.run_date:%Y%m%d}.md"
+    out_path.write_text(report, encoding="utf-8")
+    logger.info(
+        "daily_report.written path=%s run_date=%s bytes=%d",
+        out_path, evaluation.run_date, len(report.encode("utf-8")),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Daily governed-run orchestrator (ADR-042 PR-4b) — scans "
@@ -147,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
     p.add_argument("--inbox", default=_DEFAULT_INBOX, help=f"inbox directory (default: {_DEFAULT_INBOX})")
+    p.add_argument(
+        "--outbox", default=_DEFAULT_OUTBOX,
+        help=f"daily-report outbox directory, --apply only (default: {_DEFAULT_OUTBOX})",
+    )
     p.add_argument("--date", default=None, help="run_date as YYYY-MM-DD (default: today UTC)")
     p.add_argument("--apply", action="store_true", help="actually persist + load (default: dry-run / preview only)")
     p.add_argument("--allow-dev", action="store_true")
@@ -166,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     inbox_dir = Path(args.inbox)
+    outbox_dir = Path(args.outbox)
 
     if args.apply and not _daily_run_enabled():
         logger.error(
@@ -193,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.apply:
                 evaluation = plan_daily_run(conn, inbox_dir, run_date)
                 _report_evaluation(evaluation)
+                _emit_daily_report(evaluation, (), conn, apply=False, outbox_dir=outbox_dir)
                 logger.info("DRY-RUN — nothing persisted, nothing loaded.")
                 return 0
 
@@ -203,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             assert token is not None  # guarded above
             outcomes = load_eligible_feeds(evaluation, token=token, inbox_dir=inbox_dir)
             _report_load_outcomes(outcomes)
+            _emit_daily_report(evaluation, outcomes, conn, apply=True, outbox_dir=outbox_dir)
     except FileNotFoundError as exc:
         logger.error("REFUSED: %s", exc)
         return 2

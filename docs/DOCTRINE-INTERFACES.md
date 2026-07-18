@@ -70,7 +70,7 @@ Trois choses importantes : ces fichiers ne sont **jamais bloquants** (leur absen
 | **Propositions de commande** (`po_drafts`) | Recommandations déjà validées : commander maintenant, commander en urgence, accélérer une commande existante | Quotidien |
 | **Messages de re-datation** (`reschedule_messages`) | Avancer, retarder, ou annuler une commande existante | Quotidien |
 | **Mises à jour de paramètres** (`param_updates`) | Ajustements de délais, stocks de sécurité, etc. | Hebdomadaire (chantier futur, pas encore commencé) |
-| **Compte-rendu quotidien** (`daily_report_<date>.txt`) | Ce qui a tourné, ce qui a bloqué, ce qui a été proposé | Quotidien |
+| **Compte-rendu quotidien** (`daily_report_<date>.md`) | Ce qui a tourné, ce qui a bloqué, ce qui a été proposé | Quotidien |
 
 Toutes les recommandations sortantes ont déjà été **validées** avant d'être déposées — ce ne sont jamais des brouillons bruts. La validation (« gouvernance ») est décrite au §3.
 
@@ -129,6 +129,12 @@ Chaque jour, un compte-rendu (fichier texte déposé dans le dossier de sortie, 
 - Le taux de rapprochement ambigu de la veille (voir §4bis).
 
 **Question encore ouverte (🎯)** : quel doit être le canal préféré pour consulter ce compte-rendu — le fichier texte seul, une page web de consultation, ou les deux ? L'envoi par email est prévu pour une version ultérieure, pas cette première version.
+
+### Mise à jour — 18 juillet 2026
+
+Le compte-rendu quotidien et son dépôt dans la Dropbox sont maintenant opérationnels dans Ootils : chaque jour, un fichier `daily_report_<date>.md` peut être déposé dans le même dossier Dropbox que les autres échanges de l'équipe (`ootils-outbox`), et une page de consultation permet de retrouver l'historique des vérifications et la décision du jour. Cela répond concrètement à la demande du 17 juillet : « le compte-rendu quotidien passe par la Dropbox, au plus vite ». C'est donc une réponse à la question ouverte ci-dessus pour le canal principal (la Dropbox) — la page de consultation reste un canal secondaire.
+
+Deux points restent à finaliser côté déploiement, sans impact sur ce qui est décrit ci-dessus : (1) la planification automatique du dépôt quotidien — aujourd'hui, le dépôt se déclenche à l'initiative d'un opérateur, pas encore sur une horloge automatique récurrente ; (2) le contrôle qualité des données (§3, étape 6) n'est pas encore branché sur cette chaîne — en attendant, chaque run affiche honnêtement un statut « contrôles qualité non encore branchés » plutôt qu'une approbation automatique complète. Ce n'est pas un incident : les vérifications déjà en place (délai d'arrivée, volume) continuent de s'appliquer normalement, et un flux bloquant en anomalie continue de bloquer le run et d'alerter un humain comme décrit au §3.1.
 
 ---
 
