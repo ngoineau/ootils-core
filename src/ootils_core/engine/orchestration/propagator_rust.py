@@ -15,6 +15,17 @@ Shortage *detection* (safety-stock vs. closing_stock, persisted to the
 `propagator_sql` after the Rust pass finishes, then clears `dirty_nodes`.
 Same contract, same shortage rows.
 
+`safety_scope` (ADR-021 amendment, DESC-1 PR-C, engine/kernel/shortage/
+policy.py): this engine has NO code of its own for the policy — it inherits
+it entirely by running the SAME `SHORTAGES_SQL` string (with the SAME
+`shortage_params()`-built params dict, `%(safety_scope_national)s` included)
+as `SqlPropagationEngine`, both in the small-set SQL fallback
+(`_propagate_via_sql`) and after the Rust compute pass
+(`_propagate_via_rust`). Nothing Rust-side ever sees or needs to know about
+the policy — it only computes opening/inflows/outflows/closing; the
+national/per_site gate lives exclusively in the SQL detection pass that
+always follows.
+
 Boundary:
 - Python keeps the calc_run lifecycle, advisory lock, scenario state
   machine, agent tools, FastAPI routes — everything that changes often.
@@ -47,6 +58,7 @@ from ootils_core.engine.orchestration.propagator_sql import (
     CLEAR_DIRTY_SQL,
     PROPAGATE_SQL,
     SHORTAGES_SQL,
+    shortage_params,
 )
 
 if TYPE_CHECKING:
@@ -124,10 +136,7 @@ class RustPropagationEngine(PropagationEngine):
 
     def _propagate_via_sql(self, calc_run: "CalcRun", db: DictRowConnection) -> None:
         """SQL-engine fallback for small dirty sets. Same SQL strings."""
-        params = {
-            "scenario_id": calc_run.scenario_id,
-            "calc_run_id": calc_run.calc_run_id,
-        }
+        params = shortage_params(calc_run.scenario_id, calc_run.calc_run_id)
         cur = db.execute(PROPAGATE_SQL, params)
         calc_run.nodes_recalculated += cur.rowcount or 0
         if self._shortage_detector is not None:
@@ -232,10 +241,7 @@ class RustPropagationEngine(PropagationEngine):
         # L full prop vs ~0.3s on Python's warm connection.
         # Order matters: SHORTAGES joins on dirty_nodes, so it must run
         # BEFORE CLEAR_DIRTY_SQL.
-        params = {
-            "scenario_id": calc_run.scenario_id,
-            "calc_run_id": calc_run.calc_run_id,
-        }
+        params = shortage_params(calc_run.scenario_id, calc_run.calc_run_id)
         if self._shortage_detector is not None:
             db.execute(SHORTAGES_SQL, params)
         db.execute(CLEAR_DIRTY_SQL, params)

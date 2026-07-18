@@ -16,6 +16,7 @@ from uuid import UUID
 
 from ootils_core.engine.kernel._clock import Clock, SystemClock
 from ootils_core.engine.kernel._ids import deterministic_uuid
+from ootils_core.engine.kernel.shortage.policy import SafetyScope, VALID_SAFETY_SCOPES
 from ootils_core.models import Node, ShortageRecord
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ class ShortageDetector:
         safety_stock_qty: Optional[Decimal] = None,
         unit_cost: Optional[Decimal] = None,
         is_stocking: bool = True,
+        safety_scope: SafetyScope = "per_site",
     ) -> Optional[ShortageRecord]:
         """
         Enhanced detection: detects both stockouts (closing_stock < 0) and
@@ -110,7 +112,30 @@ class ShortageDetector:
         that skips detection here still has the negative closing stock
         visible on the PI node itself. Default True preserves existing
         behaviour for every location that hasn't opted out.
+
+        ``safety_scope`` (ADR-021 amendment, DESC-1 PR-C, pilot arbitration
+        2026-07-18 — `engine.kernel.shortage.policy`): strict mirror of the
+        SQL engine's `pi_with_ss` CTE in `propagator_sql.SHORTAGES_SQL`. In
+        'national' scope, the caller-supplied ``safety_stock_qty`` is
+        ignored entirely (treated as absent, NOT coerced to 0 — a literal 0
+        would still trip the below_safety_stock branch for the
+        ``[-EPS, 0)`` rounding-noise sliver that ``SHORTAGE_EPSILON`` exists
+        to absorb, leaking a near-zero shortage row even in national scope):
+        only a physical stockout (``closing_stock < -EPS``) can fire. Default
+        'per_site' preserves the pre-DESC-1 behaviour byte-for-byte for any
+        caller unaware of this axis (existing tests, any future standalone
+        caller) — the ONE production call site
+        (``PropagationEngine._recompute_pi_node``, orchestration/propagator.py)
+        always resolves the real policy once per calc_run
+        (``policy.safety_scope()``) and passes it explicitly, exactly how
+        ``is_stocking`` is threaded through the same call site.
         """
+        if safety_scope not in VALID_SAFETY_SCOPES:
+            raise ValueError(
+                f"Invalid safety_scope={safety_scope!r}; expected one of "
+                f"{VALID_SAFETY_SCOPES}"
+            )
+
         if not is_stocking:
             logger.debug(
                 "Shortage detection skipped: location not stocking (node=%s)",
@@ -124,6 +149,12 @@ class ShortageDetector:
 
         effective_unit_cost = unit_cost if unit_cost is not None else _UNIT_COST_PROXY
 
+        # National scope ignores the per-site threshold entirely (see the
+        # docstring above) — never coerced to 0, only ever nulled out.
+        effective_safety_stock_qty = (
+            None if safety_scope == "national" else safety_stock_qty
+        )
+
         # Determine severity_class and shortage_qty. The -EPS / +EPS boundary
         # keeps the sign test deterministic across the Python and SQL engines
         # (see SHORTAGE_EPSILON above): a closing within ±EPS of zero is treated
@@ -132,11 +163,11 @@ class ShortageDetector:
             severity_class = "stockout"
             shortage_qty = abs(closing)
         elif (
-            safety_stock_qty is not None
-            and -SHORTAGE_EPSILON <= closing < safety_stock_qty
+            effective_safety_stock_qty is not None
+            and -SHORTAGE_EPSILON <= closing < effective_safety_stock_qty
         ):
             severity_class = "below_safety_stock"
-            shortage_qty = safety_stock_qty - closing
+            shortage_qty = effective_safety_stock_qty - closing
         else:
             return None
 

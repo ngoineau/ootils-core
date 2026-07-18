@@ -35,6 +35,8 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
+
 from ootils_core.engine.kernel.graph.dirty import DirtyFlagManager
 from ootils_core.engine.kernel.graph.store import GraphStore
 from ootils_core.engine.kernel.graph.traversal import GraphTraversal
@@ -56,6 +58,21 @@ BASELINE = UUID("00000000-0000-0000-0000-000000000001")
 # Base safety stock seeded on item_planning_params; the fork override lifts it.
 SS_BASE = Decimal("10")
 SS_OVERRIDE = Decimal("999")
+
+
+@pytest.fixture(autouse=True)
+def _per_site_safety_scope(monkeypatch):
+    """Pinned 2026-07-18 (ADR-021 safety_scope amendment, DESC-1 PR-C):
+    OOTILS_SAFETY_SCOPE now defaults to 'national', under which per-site
+    `below_safety_stock` never fires — only a physical stockout does. This
+    ENTIRE module's signal (module docstring: an isolated bucket-0 PI,
+    closing_stock=0, `below_safety_stock` qty == the resolved
+    safety_stock_qty) exists specifically to prove the ADR-025 overlay is
+    READ at propagation time by both engines + the 5th reader — it is
+    orthogonal to the national/per_site policy axis and needs the per-site
+    threshold to still gate detection. Pinned explicitly rather than
+    silently going vacuous under the new default."""
+    monkeypatch.setenv("OOTILS_SAFETY_SCOPE", "per_site")
 
 
 # ---------------------------------------------------------------------------

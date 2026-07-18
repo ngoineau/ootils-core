@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ootils_core.db.types import DictRowConnection
+from ootils_core.engine.kernel.shortage.policy import is_national_scope
 from ootils_core.engine.orchestration.propagator import PropagationEngine
 from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
@@ -284,6 +285,26 @@ SHORTAGES_SQL = """
 -- silently dropped from detection by an unrelated join miss. Mirrored in
 -- the Python engine by ShortageDetector.detect_with_params(is_stocking=...)
 -- (engine/kernel/shortage/detector.py) — keep both in sync.
+--
+-- safety_scope (ADR-021 amendment, DESC-1 PR-C, pilot arbitration
+-- 2026-07-18, engine/kernel/shortage/policy.py): in 'national' scope, the
+-- per-site safety_stock_qty resolved below is a planning/execution
+-- artefact, not a detection threshold (the national safety cushion lives
+-- in Truth B, engine/mrp/loader.py, unchanged) — %(safety_scope_national)s
+-- NULLs it out here so the below_safety_stock branch in shortage_rows
+-- (guarded by `safety_stock_qty IS NOT NULL`) can never fire, leaving only
+-- the closing_stock < -EPS physical-stockout branch active. NULL, not a
+-- literal 0: a literal 0 would still satisfy
+-- `closing_stock >= -EPS AND closing_stock < safety_stock_qty` for the
+-- [-EPS, 0) sliver — precisely the rounding-noise band EPS exists to
+-- absorb (SHORTAGE_EPSILON, detector.py) — which would leak a near-zero
+-- below_safety_stock row even in national scope. %(safety_scope_national)s
+-- is resolved once per calc_run by policy.is_national_scope() (see
+-- shortage_params() below); mirrored in the Python engine by
+-- ShortageDetector.detect_with_params(safety_scope=...) — keep both in
+-- sync. The Rust in-process engine (propagator_rust.py) inherits this
+-- unchanged: both its small-set fallback and its post-Rust-compute pass
+-- run this SAME SHORTAGES_SQL string on Python's session.
 WITH pi_with_ss AS (
     SELECT
         pi.scenario_id,
@@ -293,7 +314,8 @@ WITH pi_with_ss AS (
         pi.closing_stock,
         COALESCE(pi.time_span_start, pi.time_ref) AS shortage_date,
         GREATEST((pi.time_span_end - pi.time_span_start), 1) AS days_in_bucket,
-        ipp_ss.ipp_ss AS safety_stock_qty,
+        CASE WHEN %(safety_scope_national)s THEN NULL::numeric
+             ELSE ipp_ss.ipp_ss END AS safety_stock_qty,
         COALESCE(sup.unit_cost, i.standard_cost, 1)::numeric AS unit_cost
     FROM nodes pi
     JOIN dirty_nodes dn
@@ -398,6 +420,26 @@ WHERE calc_run_id = %(calc_run_id)s AND scenario_id = %(scenario_id)s
 """
 
 
+def shortage_params(scenario_id: UUID, calc_run_id: UUID) -> dict[str, object]:
+    """
+    Build the params dict shared by PROPAGATE_SQL / SHORTAGES_SQL / CLEAR_DIRTY_SQL.
+
+    Resolves `is_national_scope()` ONCE here — the single point where a
+    misconfigured `OOTILS_SAFETY_SCOPE` fails loudly (`ValueError`), right
+    at the start of a calc run rather than deep inside a query. PROPAGATE_SQL
+    and CLEAR_DIRTY_SQL don't reference `safety_scope_national` — psycopg
+    silently ignores unused keys in a named-parameter mapping — so this one
+    dict is safe to reuse, unchanged, across all three statements. Shared
+    by `SqlPropagationEngine._propagate` and both shortage-detection call
+    sites in `propagator_rust.py` (`_propagate_via_sql` / `_propagate_via_rust`).
+    """
+    return {
+        "scenario_id": scenario_id,
+        "calc_run_id": calc_run_id,
+        "safety_scope_national": is_national_scope(),
+    }
+
+
 class SqlPropagationEngine(PropagationEngine):
     """
     Propagation engine that delegates the hot path to PostgreSQL.
@@ -416,10 +458,7 @@ class SqlPropagationEngine(PropagationEngine):
         if not dirty_nodes:
             return
 
-        params = {
-            "scenario_id": calc_run.scenario_id,
-            "calc_run_id": calc_run.calc_run_id,
-        }
+        params = shortage_params(calc_run.scenario_id, calc_run.calc_run_id)
 
         # 1. Compute opening/inflows/outflows/closing/has_shortage on dirty PIs.
         cur = db.execute(PROPAGATE_SQL, params)

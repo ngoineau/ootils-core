@@ -78,6 +78,20 @@ TOL = Decimal("1e-12")
 RUST_LOGGER = "ootils_core.engine.orchestration.propagator_rust"
 
 
+@pytest.fixture(autouse=True)
+def _per_site_safety_scope(monkeypatch):
+    """Pinned 2026-07-18 (ADR-021 safety_scope amendment, DESC-1 PR-C):
+    OOTILS_SAFETY_SCOPE now defaults to 'national', under which per-site
+    `below_safety_stock` never fires. This module's whole point is proving
+    SQL/Rust parity on BOTH severity classes (item A: `below_safety_stock`
+    via SS_BASE; item B: `stockout`) AND on an ADR-025 overlay override of
+    `safety_stock_qty` — none of that exercises the safety_scope axis, it's
+    orthogonal parity coverage. Pinned explicitly to 'per_site' so it keeps
+    exercising both classes instead of silently collapsing to one under the
+    new default."""
+    monkeypatch.setenv("OOTILS_SAFETY_SCOPE", "per_site")
+
+
 # ---------------------------------------------------------------------------
 # Deterministic seed — 2 items x BUCKETS daily buckets, both shortage classes
 # ---------------------------------------------------------------------------
