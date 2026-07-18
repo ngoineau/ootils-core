@@ -1,6 +1,20 @@
 """
 export_approved_pos.py — turn APPROVED recommendations into purchase-order drafts.
 
+DEPRECATED (ADR-042 decision 4, PR-5, 2026-07-18) — REFERENCE ONLY, DO NOT
+REUSE. This script is NOT idempotent: it re-reads every ``status = 'APPROVED'``
+recommendation on EVERY invocation with no ``exported_at``-style marker, so
+running it twice re-exports the same PO drafts a second time — exactly the
+failure mode ADR-042 decision 4 was written to close. The idempotent
+replacement is ``ootils_core.engine.reporting.outbound_export``
+(``load_pending_export_rows`` / ``render_outbound_export`` / ``execute_export``
+— ``WHERE status IN ('APPROVED','APPLIED') AND exported_at IS NULL``, stamped
+after every write, one ``export_executed`` event per run), wired into
+``scripts/run_daily_ingest.py``'s EXPORT phase behind
+``OOTILS_OUTBOUND_EXPORT_ENABLED``. This file is kept only as a historical
+reference for the PO-draft consolidation-by-supplier idea (multiple item
+lines per PO, order-by-date math) — do not point any new caller at it.
+
 The L4 boundary (strategy doc §13): this tool GENERATES the PO drafts a planner
 sends to purchasing / pushes to the ERP. It never pushes to the ERP itself.
 
@@ -51,6 +65,13 @@ def main(argv=None) -> int:
     p.add_argument("--today", default=None, help="reference date YYYY-MM-DD (default: server CURRENT_DATE)")
     p.add_argument("--allow-dev", action="store_true")
     args = p.parse_args(argv)
+    logger.warning(
+        "DEPRECATED: export_approved_pos.py is NOT idempotent (no exported_at "
+        "marker) — re-running it re-exports the same POs. Use "
+        "ootils_core.engine.reporting.outbound_export (wired into "
+        "scripts/run_daily_ingest.py's EXPORT phase) instead. See ADR-042 "
+        "decision 4."
+    )
     if not args.dsn:
         logger.error("DATABASE_URL not set")
         return 2

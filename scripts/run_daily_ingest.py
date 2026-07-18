@@ -45,6 +45,23 @@ module docstring — but nothing here re-runs propagation across the whole
 graph). A future PR may wire this explicitly; today it is a conscious
 omission, not an oversight.
 
+OUTBOUND EXPORT (ADR-042 decision 4, PR-5): a THIRD phase, run AFTER the
+daily report, calls ``engine.reporting.outbound_export.execute_export`` —
+idempotent (``WHERE status IN ('APPROVED','APPLIED') AND exported_at IS
+NULL``), one TSV per outbound family (``po_drafts``/``reschedule_messages``/
+``transfers``) written under ``--outbox``, stamped, and announced by ONE
+``export_executed`` stream event per run. This phase runs on EVERY
+invocation (dry-run or ``--apply``) but only ever WRITES when BOTH
+``--apply`` AND the export-specific kill switch
+``OOTILS_OUTBOUND_EXPORT_ENABLED`` are set (default OFF) — a SEPARATE,
+narrower double-guard than ``OOTILS_DAILY_RUN_ENABLED`` (mirrors
+``OOTILS_DAILY_RUN_REPORT_ENABLED`` vs ``OOTILS_DAILY_RUN_ENABLED``,
+``api/routers/daily_runs.py``), so a plain ``--apply`` run that only means
+"load today's feeds" never starts pushing files to the real ERP outbox
+until export is explicitly turned on separately. In dry-run mode (global,
+no ``--apply``) the export phase is ALWAYS a preview, printed to STDOUT —
+zero file write, zero DB write, same discipline as the daily report.
+
 AUTH: reads ``OOTILS_API_TOKEN`` from the environment, exactly like
 ``scripts/ingest_file.py`` — the SAME in-process bearer token, passed
 through to every ``/v1/ingest/<entity>`` call the load phase makes (scope
@@ -55,7 +72,8 @@ scope (see above) so a ``calc:run``-scoped token is never needed here.
 
 Usage:
     DATABASE_URL=postgresql://... OOTILS_API_TOKEN=... \\
-    OOTILS_DAILY_RUN_ENABLED=1 python scripts/run_daily_ingest.py \\
+    OOTILS_DAILY_RUN_ENABLED=1 OOTILS_OUTBOUND_EXPORT_ENABLED=1 \\
+    python scripts/run_daily_ingest.py \\
         [--inbox /home/debian/inbox] [--outbox /home/debian/outbox] \\
         [--date 2026-07-18] [--apply] [--allow-dev]
 
@@ -90,6 +108,7 @@ from ootils_core.engine.ingest.daily_orchestrator import (
     plan_daily_run,
 )
 from ootils_core.engine.reporting import build_shortages_summary, render_daily_report
+from ootils_core.engine.reporting.outbound_export import execute_export
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("run_daily_ingest")
@@ -103,6 +122,17 @@ def _daily_run_enabled() -> bool:
     """Kill switch, default OFF — same truthy-set + double-guard shape as
     ``purge_maintenance.py``'s ``OOTILS_PURGE_ENABLED``."""
     return os.environ.get("OOTILS_DAILY_RUN_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _outbound_export_enabled() -> bool:
+    """Kill switch, default OFF — same truthy-set shape as
+    ``_daily_run_enabled``. A SEPARATE, narrower guard than
+    ``OOTILS_DAILY_RUN_ENABLED`` (see module docstring's "OUTBOUND EXPORT"
+    section): gates only whether the export phase actually WRITES, not
+    whether the daily run itself applies."""
+    return os.environ.get("OOTILS_OUTBOUND_EXPORT_ENABLED", "0").strip().lower() in {
         "1", "true", "yes", "on",
     }
 
@@ -199,6 +229,46 @@ def _emit_daily_report(
     )
 
 
+def _run_outbound_export(
+    conn: DictRowConnection,
+    *,
+    apply: bool,
+    outbox_dir: Path,
+) -> None:
+    """ADR-042 decision 4 (PR-5) — the EXPORT phase, run AFTER the daily
+    report. See the module docstring's "OUTBOUND EXPORT" section for the
+    double-guard rationale: this phase only ever WRITES when both ``apply``
+    (the CLI's ``--apply``) and ``OOTILS_OUTBOUND_EXPORT_ENABLED`` are set;
+    otherwise it renders the SAME preview a real run would produce and prints
+    it to STDOUT (``print()`` deliberate here too — the TSV body must reach
+    STDOUT byte-for-byte, mirroring ``_emit_daily_report``).
+    """
+    export_apply = apply and _outbound_export_enabled()
+    if apply and not export_apply:
+        logger.warning(
+            "outbound_export.preview_only reason=OOTILS_OUTBOUND_EXPORT_ENABLED_not_set"
+        )
+
+    result = execute_export(
+        conn, outbox_dir, now=datetime.now(timezone.utc), dry_run=not export_apply
+    )
+
+    if not export_apply:
+        if not result.render.files:
+            logger.info("outbound_export.preview run_date=%s nothing_pending", result.run_date)
+            return
+        for f in result.render.files:
+            print(f"--- {f.filename} ---")  # noqa: T201 — deliberate: preview body, not a log line
+            print(f.content)  # noqa: T201
+        return
+
+    logger.info(
+        "outbound_export.applied run_date=%s files=%s recommendations=%d event_id=%s",
+        result.run_date, result.files_written, len(result.recommendation_ids_exported),
+        result.event_id,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Daily governed-run orchestrator (ADR-042 PR-4b) — scans "
@@ -259,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
                 evaluation = plan_daily_run(conn, inbox_dir, run_date)
                 _report_evaluation(evaluation)
                 _emit_daily_report(evaluation, (), conn, apply=False, outbox_dir=outbox_dir)
+                _run_outbound_export(conn, apply=False, outbox_dir=outbox_dir)
                 logger.info("DRY-RUN — nothing persisted, nothing loaded.")
                 return 0
 
@@ -270,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             outcomes = load_eligible_feeds(evaluation, token=token, inbox_dir=inbox_dir)
             _report_load_outcomes(outcomes)
             _emit_daily_report(evaluation, outcomes, conn, apply=True, outbox_dir=outbox_dir)
+            _run_outbound_export(conn, apply=True, outbox_dir=outbox_dir)
     except FileNotFoundError as exc:
         logger.error("REFUSED: %s", exc)
         return 2

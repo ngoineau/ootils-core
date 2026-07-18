@@ -85,6 +85,33 @@ sync with the migration 071 header block):
                         reste nationale"), NULL when every item split cleanly
                         (never an empty string — None-honest, same idiom as
                         daily_run_completed's old_text)
+  export_executed:
+      field_changed   = 'export_executed' (discriminant, constant — like
+                        demand_descended there is only one kind of export
+                        run in V1, migration 085, ADR-042 decision 4)
+      new_date        = the export's run_date (engine/reporting/
+                        outbound_export.py's execute_export, run_date =
+                        now.date() — same idiom as daily_run_completed)
+      new_quantity    = count of recommendations stamped exported_at by the
+                        run (RUN granularity — never per recommendation row)
+      new_text        = comma-joined list of file names written to the
+                        outbox this run (e.g. 'po_drafts_20260718.tsv,
+                        reschedule_messages_20260718.tsv') — NOT a run id:
+                        unlike calc_run_finished/shortage_detected/
+                        outcome_evaluated/demand_descended there is no
+                        export_runs companion table to reference (same "no
+                        companion audit table" posture as
+                        daily_run_completed, migration 079), so new_text
+                        carries the artifact a fleet subscriber can act on
+                        directly instead of an id with nowhere to join
+      old_text        = not used in V1 (no skipped/ineligible-recommendation
+                        concept yet for export — every exported_at-eligible
+                        row is written every run). NOT emitted at all for a
+                        genuinely empty run (zero pending rows) — same
+                        "nothing to announce" posture as
+                        emit_recommendation_created_for_run below, so the
+                        events table does not accumulate a zero-content row
+                        on the (common) days nothing was approved
 
 ``scenario_id`` (NOT NULL, migration 002) scopes the event to the fork/baseline.
 snapshot_captured / outcome_evaluated are baseline-only by nature (ADR-030) but
@@ -96,10 +123,12 @@ events, one per affected scenario (still RUN granularity — one per scenario's
 own delete, never per shortage row). demand_descended is forkable (ADR-043
 §1): a fork's own descent run emits its own event scoped to that fork's
 scenario_id, never replayed onto baseline by promote() (L0, simulation-only,
-same doctrine as the ADR-025 overlay).
+same doctrine as the ADR-025 overlay). export_executed is baseline-only in
+V1 (the outbound export reads APPROVED recommendations off baseline — ADR-042
+decision 4, PR-5), like snapshot_captured/outcome_evaluated.
 
 Keep FLEET_EVENT_TYPES in sync with the events.event_type CHECK constraint
-(migrations 071 + 076 + 079 + 084) and with VALID_EVENT_TYPES in
+(migrations 071 + 076 + 079 + 084 + 085) and with VALID_EVENT_TYPES in
 api/routers/events.py.
 """
 from __future__ import annotations
@@ -113,10 +142,11 @@ import psycopg
 
 # The fleet-emission types added by migration 071 (#401 AN-1) + migration 076
 # (PURGE-1) + migration 079 (ADR-042 PR-3) + migration 084 (ADR-043, DESC-1
-# PR-B). Validated locally so a typo fails loudly in Python (ValueError)
-# rather than as an opaque psycopg CHECK violation at INSERT time. This set
-# is the subset emit_stream_event is meant to write; the DB CHECK (migrations
-# 071/076/079/084) is the full authoritative list.
+# PR-B) + migration 085 (ADR-042 decision 4, PR-5). Validated locally so a
+# typo fails loudly in Python (ValueError) rather than as an opaque psycopg
+# CHECK violation at INSERT time. This set is the subset emit_stream_event is
+# meant to write; the DB CHECK (migrations 071/076/079/084/085) is the full
+# authoritative list.
 FLEET_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "recommendation_created",
@@ -127,6 +157,7 @@ FLEET_EVENT_TYPES: frozenset[str] = frozenset(
         "purge_executed",
         "daily_run_completed",
         "demand_descended",
+        "export_executed",
     }
 )
 
