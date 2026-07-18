@@ -41,6 +41,7 @@ from ootils_core.engine.orchestration import propagator_rust
 from ootils_core.engine.orchestration.propagator_sql import (
     CLEAR_DIRTY_SQL,
     SHORTAGES_SQL,
+    shortage_params,
 )
 from ootils_core.models import CalcRun
 
@@ -210,7 +211,11 @@ def test_success_path_runs_shortages_then_clear_dirty_on_python_session(monkeypa
     assert SHORTAGES_SQL in executed
     assert CLEAR_DIRTY_SQL in executed
     assert executed.index(SHORTAGES_SQL) < executed.index(CLEAR_DIRTY_SQL)
-    params = {"scenario_id": calc_run.scenario_id, "calc_run_id": calc_run.calc_run_id}
+    # shortage_params() (ADR-021 safety_scope amendment, DESC-1 PR-C, added
+    # 2026-07-18) is the single builder both call sites now share — includes
+    # `safety_scope_national`, resolved from OOTILS_SAFETY_SCOPE (unset here,
+    # so it defaults to the pilot's 'national').
+    params = shortage_params(calc_run.scenario_id, calc_run.calc_run_id)
     db.execute.assert_any_call(SHORTAGES_SQL, params)
     db.execute.assert_any_call(CLEAR_DIRTY_SQL, params)
 

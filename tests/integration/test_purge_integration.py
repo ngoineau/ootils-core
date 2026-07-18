@@ -119,6 +119,21 @@ SS_BASE = Decimal("10")
 os.environ.setdefault("OOTILS_API_TOKEN", LEGACY_TOKEN)
 
 
+@pytest.fixture(autouse=True)
+def _per_site_safety_scope(monkeypatch):
+    """Pinned 2026-07-18 (ADR-021 safety_scope amendment, DESC-1 PR-C):
+    OOTILS_SAFETY_SCOPE now defaults to 'national' (pilot arbitration,
+    ADR-043), under which per-site `below_safety_stock` never fires — only
+    a physical stockout does. This whole module's fixture (`SS_BASE` above,
+    `_seed_pi_bucket`) deliberately seeds a closing_stock=0 bucket to
+    produce a deterministic `below_safety_stock` row as PURGE-1's test
+    payload (the row purged/retained, not the thing under test) — orthogonal
+    to the safety_scope axis. Pinned explicitly to 'per_site' so this file
+    keeps exercising that payload shape rather than silently losing its
+    fixture data under the new default."""
+    monkeypatch.setenv("OOTILS_SAFETY_SCOPE", "per_site")
+
+
 # ---------------------------------------------------------------------------
 # Seed helpers — graph side (mirrors test_param_overlay_propagation_integration)
 # ---------------------------------------------------------------------------

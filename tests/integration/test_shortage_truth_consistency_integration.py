@@ -225,10 +225,23 @@ def test_seed_produces_shortages_in_both_truths(watcher_truth, kernel_truth):
     truth on the seeded dataset means the harness is broken, never 'no
     shortage'. The seed is built to be short on both items:
 
-    - PUMP-01: on-hand 30 < safety 50, week-0 consumed demand 105 → below
-      safety at bucket 0.
+    - PUMP-01: on-hand 30 < safety 50, week-0 consumed demand 105 → balance
+      30 - 105 = -75, below safety AND below zero at bucket 0.
     - VALVE-02: on-hand 45, safety 30, week-0 consumed demand 56 → balance
-      -11 < 30 at bucket 0.
+      45 - 56 = -11 < 30 at bucket 0.
+
+    Not pinned to OOTILS_SAFETY_SCOPE (2026-07-18, ADR-021 safety_scope
+    amendment, DESC-1 PR-C — see engine/kernel/shortage/policy.py): both
+    seeded balances above are NEGATIVE, i.e. genuine physical stockouts
+    (`closing_stock < -EPS`), not merely below-safety with a positive
+    balance. Truth A's 'national'-scope gate only nulls the per-site
+    below_safety_stock branch — the stockout branch is untouched in either
+    scope — so this guard's contract (items(B) ⊆ items(A)) holds unchanged
+    under the new 'national' default. Evaluated, not assumed: if a future
+    seed change makes either item's bucket-0 balance non-negative (a real
+    below-safety-only case), this guard WOULD need an explicit
+    `OOTILS_SAFETY_SCOPE=per_site` pin — re-check this note before touching
+    the seed math above.
     """
     first, data = watcher_truth
     assert first, (

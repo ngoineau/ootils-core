@@ -120,6 +120,20 @@ BASELINE = UUID("00000000-0000-0000-0000-000000000001")
 LEGACY_TOKEN = "integration-test-token"
 
 
+@pytest.fixture(autouse=True)
+def _per_site_safety_scope(monkeypatch):
+    """Pinned 2026-07-18 (ADR-021 safety_scope amendment, DESC-1 PR-C):
+    OOTILS_SAFETY_SCOPE now defaults to 'national', under which per-site
+    `below_safety_stock` never fires. `_cap_shortage_detected` (case 1, the
+    GUARD-RAIL) and `test_calc_run_with_n_shortages_emits_one_shortage_detected_new_quantity_n`
+    (case 2, run granularity) both seed `safety_stock>0` on a closing_stock=0
+    bucket specifically to make a deterministic `below_safety_stock` row —
+    the fixture that PROVES `shortage_detected` fires, orthogonal to the
+    national/per_site policy axis. Pinned explicitly rather than silently
+    losing the very shortage this file's guard-rail is built to observe."""
+    monkeypatch.setenv("OOTILS_SAFETY_SCOPE", "per_site")
+
+
 # ===========================================================================
 # The /v1/stream keyset contract + typed-column readback helpers
 # ===========================================================================

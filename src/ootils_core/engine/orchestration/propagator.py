@@ -23,6 +23,8 @@ from ootils_core.engine.orchestration.calc_run import CalcRunManager
 from ootils_core.engine.kernel.calc.projection import ProjectionKernel
 from ootils_core.engine.kernel.explanation.builder import ExplanationBuilder
 from ootils_core.engine.kernel.shortage.detector import ShortageDetector
+from ootils_core.engine.kernel.shortage.policy import SafetyScope
+from ootils_core.engine.kernel.shortage.policy import safety_scope as resolve_safety_scope
 from ootils_core.engine.scenario.param_overlay import resolved_field_lateral_sql
 
 logger = logging.getLogger(__name__)
@@ -317,7 +319,16 @@ class PropagationEngine:
         # migration ships with — so this preload never changes behaviour
         # for a location that hasn't been explicitly opted out.
         location_stocking_cache: dict[UUID, bool] = {}
+        # safety_scope (ADR-021 amendment, DESC-1 PR-C, pilot arbitration
+        # 2026-07-18): resolved ONCE for this whole propagation call —
+        # fails loudly (ValueError) on a misconfigured OOTILS_SAFETY_SCOPE
+        # right here, before any PI is recomputed, rather than per-node
+        # deep inside detect_with_params. Threaded into _recompute_pi_node
+        # exactly like the caches below. 'per_site' is an inert placeholder
+        # when there is no detector to consume it (no detection, no gate).
+        calc_safety_scope: SafetyScope = "per_site"
         if self._shortage_detector is not None:
+            calc_safety_scope = resolve_safety_scope()
             pi_pairs = {
                 (n.item_id, n.location_id)
                 for n in nodes_cache.values()
@@ -419,6 +430,7 @@ class PropagationEngine:
                     safety_stock_cache=safety_stock_cache,
                     unit_cost_cache=unit_cost_cache,
                     location_stocking_cache=location_stocking_cache,
+                    calc_safety_scope=calc_safety_scope,
                     pending_updates=pending_updates,
                 )
                 if changed:
@@ -452,6 +464,7 @@ class PropagationEngine:
         safety_stock_cache: Optional[dict[tuple[UUID, Optional[UUID]], Decimal]] = None,
         unit_cost_cache: Optional[dict[UUID, Decimal]] = None,
         location_stocking_cache: Optional[dict[UUID, bool]] = None,
+        calc_safety_scope: SafetyScope = "per_site",
         pending_updates: Optional[list[tuple]] = None,
     ) -> bool:
         """
@@ -469,6 +482,13 @@ class PropagationEngine:
         the batch-loaded dicts; reads then hit memory instead of the DB. When
         called standalone (e.g. tests), the parameters default to None and we
         fall back to per-call store lookups — fully backwards compatible.
+
+        `calc_safety_scope` (ADR-021 amendment, DESC-1 PR-C): threaded
+        straight through to `ShortageDetector.detect_with_params(safety_scope=...)`
+        — see that method's docstring for the 'national'/'per_site' contract.
+        Defaults to 'per_site' (the pre-DESC-1 behaviour) for standalone
+        callers that don't resolve the policy themselves; `_propagate`
+        always passes the real, once-per-calc-run resolved value.
         """
         # ------------------------------------------------------------------
         # Helpers: resolve node and incoming edges via cache when available.
@@ -729,6 +749,7 @@ class PropagationEngine:
                     safety_stock_qty=safety_stock,
                     unit_cost=unit_cost,
                     is_stocking=is_stocking,
+                    safety_scope=calc_safety_scope,
                 )
                 if shortage is not None:
                     self._shortage_detector.persist(shortage, db)

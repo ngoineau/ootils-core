@@ -67,7 +67,7 @@ Colonnes : `(scenario_id, item_id, centre/location_id, pct, method, manual_overr
 
 ### 3. Sécurité nationale (`safety_scope`) — décision actée ici, PAS ENCORE appliquée
 
-Politique `safety_scope`, défaut `national`, lue par le détecteur de pénurie : la détection **par centre** ne déclenchera plus que sur le **stockout physique** (closing stock négatif) — le coussin de sécurité vit dans la vérité poolée nationale (déjà en place, §Convergence). Le ~1,05 M $ de « sous-sécurité » mesuré par site lors du premier chargement est un artefact à re-baser en ruptures réelles une fois la demande descendue.
+Politique `safety_scope`, défaut `national`, lue par le détecteur de pénurie : la détection **par centre** ne déclenchera plus que sur le **stockout physique** (closing stock négatif) — le coussin de sécurité vit dans la vérité poolée nationale (déjà en place, §Convergence). Les 1 051 182 jours-article de « sous-sécurité » mesurés par site lors du premier chargement (sévérité cumulée ~2,73 Md$ jour-article — RAPPORT-PREMIER-CHARGEMENT-2026-07-18) sont un artefact à re-baser en ruptures réelles une fois la demande descendue.
 
 **Ceci est une décision pilote actée le 2026-07-18, pas un fait déjà implémenté.** L'amendement formel d'ADR-021 (le `safety_scope` gate, en miroir de l'amendement `is_stocking` déjà livré le 2026-07-17) et son code (`ShortageDetector`, `SHORTAGES_SQL`) sont portés par **PR-C**, après PR-B. Tant que PR-C n'est pas mergée, la détection par centre continue de déclencher sur `below_safety_stock` local, comme aujourd'hui — cette section documente l'intention actée, pas l'état runtime.
 

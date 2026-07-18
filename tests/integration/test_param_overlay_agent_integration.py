@@ -78,6 +78,22 @@ BASELINE_UUID = UUID(BASELINE)
 SS_OVERRIDE = "999"
 
 
+@pytest.fixture(autouse=True)
+def _per_site_safety_scope(monkeypatch):
+    """Pinned 2026-07-18 (ADR-021 safety_scope amendment, DESC-1 PR-C):
+    OOTILS_SAFETY_SCOPE now defaults to 'national', under which per-site
+    `below_safety_stock` never fires. This ENTIRE module's signal (module
+    docstring: closing_stock=0 + base safety_stock_qty=0 -> no baseline
+    shortage; the fork's overlay override alone creates a
+    `below_safety_stock` row) exists specifically to prove the ADR-025
+    agent path (`simulate_param_overrides`) and REST endpoint read the
+    override — orthogonal to the national/per_site policy axis, and needs
+    the per-site threshold to still gate detection. Pinned explicitly
+    rather than silently going vacuous (delta_computed but no new
+    shortages) under the new default."""
+    monkeypatch.setenv("OOTILS_SAFETY_SCOPE", "per_site")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — TestClient bound to the real test DB (mirrors
 # test_recommendations_api_integration.py) + a dedicated dict_row connection.
