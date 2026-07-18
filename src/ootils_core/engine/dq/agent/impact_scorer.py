@@ -133,22 +133,23 @@ def _get_finished_goods_via_bom(
     queue: list[UUID] = list(component_ids)
     finished_goods: set[str] = set()
 
-    # BOM is stored as edges: from=component → to=parent or from=parent → to=component
-    # The 'bom_component' edge type connects parent to child: parent -[bom_component]-> child
-    # So to go UP, we need edges where to_node_id = item_node_id
-    # GraphStore stores items as nodes via node_type='Item'
-    # We'll use the bom table directly if available
+    # BOM is stored as bom_headers (one row per parent item + version) joined
+    # to bom_lines (one row per component); only active headers/lines count
+    # (migrations 008, 013). To go UP from a component to its finished-good
+    # parent(s), join component_item_id -> bom_id -> parent_item_id.
     while queue:
         batch_component_ids = queue[:50]
         queue = queue[50:]
 
-        # Try bom table first (from migration 008)
         bom_rows = db.execute(
             """
-            SELECT DISTINCT b.parent_item_id, i.external_id
-            FROM bom_components b
-            JOIN items i ON i.item_id = b.parent_item_id
-            WHERE b.component_item_id = ANY(%s)
+            SELECT DISTINCT bh.parent_item_id, i.external_id
+            FROM bom_headers bh
+            JOIN bom_lines bl ON bl.bom_id = bh.bom_id
+            JOIN items i ON i.item_id = bh.parent_item_id
+            WHERE bh.status = 'active'
+              AND bl.active = TRUE
+              AND bl.component_item_id = ANY(%s)
             """,
             (list(batch_component_ids),),
         ).fetchall()

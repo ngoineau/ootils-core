@@ -226,7 +226,7 @@ class TestGetFinishedGoodsViaBom:
             sql_lower = sql.strip().lower()
             if "from items where external_id" in sql_lower:
                 return _make_cursor([{"item_id": str(comp_id), "external_id": "COMP-1"}])
-            if "from bom_components" in sql_lower:
+            if "from bom_headers" in sql_lower:
                 if call_count["n"] == 2:
                     # First BOM query: component -> parent
                     return _make_cursor([{
@@ -259,7 +259,7 @@ class TestGetFinishedGoodsViaBom:
             sql_lower = sql.strip().lower()
             if "from items where external_id" in sql_lower:
                 return _make_cursor(items_rows)
-            if "from bom_components" in sql_lower:
+            if "from bom_headers" in sql_lower:
                 return _make_cursor([])
             return _make_cursor([])
 
@@ -322,7 +322,7 @@ class TestScoreIssues:
                 ])
             if "from items where external_id" in sql_lower:
                 return _make_cursor([])  # no BOM items
-            if "from bom_components" in sql_lower:
+            if "from bom_headers" in sql_lower:
                 return _make_cursor([])
             return _make_cursor([])
 
@@ -366,7 +366,7 @@ class TestScoreIssues:
                 return _make_cursor([
                     {"item_id": str(comp_id), "external_id": "COMP-1"}
                 ])
-            if "from bom_components" in sql_lower:
+            if "from bom_headers" in sql_lower:
                 if call_count["n"] <= 5:
                     return _make_cursor([{
                         "parent_item_id": str(parent_id),

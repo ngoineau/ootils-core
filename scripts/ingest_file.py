@@ -10,6 +10,14 @@ Usage:
     python scripts/ingest_file.py data/inbox/items.tsv
     python scripts/ingest_file.py data/inbox/items.tsv --dry-run
 
+Accepted filenames (see `parse_ingest_filename` for the exact grammar):
+    <entity>.tsv                     canonical (e.g. 'items.tsv')
+    <entity>_<AAAAMMJJ>.tsv          daily drop, date ignored for dispatch
+                                      (e.g. 'on_hand_20260718.tsv')
+    <entity>.partNN.tsv              part file, siblings in the same
+    <entity>.partNN_<AAAAMMJJ>.tsv   directory are grouped into ONE load
+                                      (e.g. 'forecasts.part01.tsv')
+
 Environment:
     DATABASE_URL       (required) PostgreSQL DSN
     OOTILS_API_TOKEN   (required) bearer token for in-process API auth
@@ -36,8 +44,10 @@ import csv
 import json
 import logging
 import os
+import re
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,6 +85,78 @@ DISPATCH: dict[str, dict[str, str]] = {
     # alongside and emits N POSTs (one per BOM). Special-cased in main().
     "bom_header.tsv":           {"endpoint": "/v1/ingest/bom",              "body_key": "_bom_bundle"},
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# Filename grammar (PR-4a) — pure, no filesystem access
+# ─────────────────────────────────────────────────────────────
+# Beyond the canonical '<entity>.tsv' name (the DISPATCH keys above), two
+# real-world drop conventions are accepted:
+#   - daily drop:  '<entity>_<AAAAMMJJ>.tsv'          e.g. on_hand_20260718.tsv
+#   - part file:   '<entity>.partNN.tsv'              e.g. forecasts.part01.tsv
+#                  '<entity>.partNN_<AAAAMMJJ>.tsv'   e.g. forecasts.part01_20260718.tsv
+# The date suffix is ignored for dispatch (informational only — the entity
+# alone decides the endpoint). Part files sharing the same (entity, date)
+# in the same directory are grouped into ONE logical load — see
+# `find_sibling_parts`/`parse_tsv_parts` below and `handle_part_group` in
+# the main() dispatch section.
+_DATE_SUFFIX_RE = re.compile(r"^(?P<stem>.+)_(?P<date>\d{8})$")
+_PART_SUFFIX_RE = re.compile(r"^(?P<stem>.+)\.part(?P<part>\d{2,})$")
+
+
+@dataclass(frozen=True)
+class ParsedFilename:
+    """Result of `parse_ingest_filename`.
+
+    `entity` is the bare feed-key stem — no '.tsv' extension, no date or
+    part marker (e.g. 'on_hand', 'bom_header', 'forecasts'). This parser has
+    zero knowledge of which entities are actually supported; callers must
+    still check `f"{entity}.tsv"` against DISPATCH.
+    """
+
+    entity: str
+    date: str | None
+    part: int | None
+
+
+def parse_ingest_filename(filename: str) -> ParsedFilename:
+    """Pure parser: basename -> (entity, date, part). No filesystem access.
+
+    Accepted grammars (basename only, no directory component):
+        '<entity>.tsv'                    canonical (e.g. 'items.tsv')
+        '<entity>_<AAAAMMJJ>.tsv'         daily drop (e.g. 'on_hand_20260718.tsv')
+        '<entity>.partNN.tsv'             part file (e.g. 'forecasts.part01.tsv')
+        '<entity>.partNN_<AAAAMMJJ>.tsv'  dated part file
+
+    The date, when present, is returned as its raw 8-digit string (not
+    parsed/validated as a real calendar date — same structural-only
+    tolerance as `_to_date_str` elsewhere in this file) and is otherwise
+    unused: it exists for traceability/grouping, never for dispatch.
+
+    Raises ValueError if `filename` doesn't end in '.tsv', has an empty
+    entity segment once date/part markers are stripped, or a malformed
+    '.part' marker (no digits).
+    """
+    if not filename.endswith(".tsv"):
+        raise ValueError(f"filename must end with '.tsv': '{filename}'")
+    stem = filename[: -len(".tsv")]
+
+    date: str | None = None
+    date_match = _DATE_SUFFIX_RE.match(stem)
+    if date_match:
+        stem = date_match.group("stem")
+        date = date_match.group("date")
+
+    part: int | None = None
+    part_match = _PART_SUFFIX_RE.match(stem)
+    if part_match:
+        stem = part_match.group("stem")
+        part = int(part_match.group("part"))
+
+    if not stem:
+        raise ValueError(f"filename has no entity segment: '{filename}'")
+
+    return ParsedFilename(entity=stem, date=date, part=part)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,6 +238,97 @@ def parse_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         data_rows.append(row)
 
     return headers, data_rows
+
+
+# ─────────────────────────────────────────────────────────────
+# Part-file grouping (PR-4a)
+# ─────────────────────────────────────────────────────────────
+def find_sibling_parts(path: Path) -> list[Path]:
+    """Return every sibling '.partNN' file for the same (entity, date) as
+    `path`, scanned in `path`'s own directory ONLY (never data/processed/
+    or data/rejected/ — grouping is scoped to files currently sitting
+    together in the inbox), sorted by part number ascending. `path` itself
+    is included.
+
+    Raises ValueError if:
+      - `path`'s own filename doesn't parse as a part file (part is None);
+      - two files in the directory collide on the same part number for
+        this (entity, date) group (ambiguous — cannot pick one);
+      - `path` itself is not among the files found in its own directory
+        (typo, or the file was already archived by a prior run — the
+        caller should treat this as a hard error, not silently ingest
+        whatever siblings remain).
+
+    Propagates FileNotFoundError if `path.parent` doesn't exist.
+    """
+    parsed = parse_ingest_filename(path.name)
+    if parsed.part is None:
+        raise ValueError(f"'{path.name}' is not a '.partNN' file")
+
+    by_part: dict[int, Path] = {}
+    for candidate in sorted(path.parent.iterdir()):
+        if not candidate.is_file():
+            continue
+        try:
+            c_parsed = parse_ingest_filename(candidate.name)
+        except ValueError:
+            continue
+        if c_parsed.part is None:
+            continue
+        if c_parsed.entity != parsed.entity or c_parsed.date != parsed.date:
+            continue
+        if c_parsed.part in by_part:
+            raise ValueError(
+                f"duplicate part {c_parsed.part:02d} for entity '{parsed.entity}' "
+                f"(date={parsed.date}): '{by_part[c_parsed.part].name}' "
+                f"and '{candidate.name}'"
+            )
+        by_part[c_parsed.part] = candidate
+
+    siblings = [by_part[k] for k in sorted(by_part)]
+    if not any(p.name == path.name for p in siblings):
+        raise ValueError(
+            f"'{path.name}' was not found in '{path.parent}' "
+            f"(found {len(siblings)} other part(s) for entity '{parsed.entity}'"
+            + (f", date {parsed.date}" if parsed.date else "")
+            + ") — check the path, or whether this part was already archived"
+        )
+    return siblings
+
+
+def parse_tsv_parts(paths: list[Path]) -> tuple[list[str], list[dict[str, str]]]:
+    """Parse and concatenate N sibling part files into one logical
+    (headers, rows), in the given order (expected: ascending by part
+    number, see `find_sibling_parts`).
+
+    Every part is parsed independently via `parse_tsv`; all parts must
+    share byte-identical headers (same column names, same order) — a
+    mismatch raises ValueError naming the offending file. Each row's
+    `__line__` tag is re-prefixed with its source file's name so error
+    messages built from it stay traceable across parts, e.g.
+    "forecasts.part02.tsv:L14".
+    """
+    if not paths:
+        raise ValueError("no part files to parse")
+
+    headers: list[str] | None = None
+    all_rows: list[dict[str, str]] = []
+    for p in paths:
+        p_headers, p_rows = parse_tsv(p)
+        if headers is None:
+            headers = p_headers
+        elif p_headers != headers:
+            raise ValueError(
+                f"part file '{p.name}' header {p_headers} does not match "
+                f"first part's header {headers}"
+            )
+        for row in p_rows:
+            row = dict(row)
+            row["__line__"] = f"{p.name}:L{row.get('__line__', '?')}"
+            all_rows.append(row)
+
+    assert headers is not None  # `paths` non-empty => at least one iteration ran
+    return headers, all_rows
 
 
 # ─────────────────────────────────────────────────────────────
@@ -338,7 +511,7 @@ def build_item_planning_params_payload(rows: list[dict[str, str]], dry_run: bool
     return {"params": params, "dry_run": dry_run}
 
 
-_DATE_RE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _to_date_str(raw: str, *, field: str, line: str) -> str:
@@ -556,6 +729,58 @@ def archive(source: Path, dest_dir: Path, report: dict[str, Any]) -> tuple[Path,
     return target, report_path
 
 
+def archive_group(sources: list[Path], dest_dir: Path, report: dict[str, Any]) -> list[Path]:
+    """Archive N sibling files (a part group) together, one timestamped move
+    each (same naming as `archive()`), sharing ONE `--report.json` next to
+    the FIRST file (caller's ordering — expected ascending part number) and
+    a minimal pointer report next to every other file. Mirrors the existing
+    bom-bundle archiving pattern (`handle_bom_bundle`)."""
+    if not sources:
+        raise ValueError("no source files to archive")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    primary_name = sources[0].name
+    targets: list[Path] = []
+
+    for i, source in enumerate(sources):
+        stem = source.stem
+        suffix = source.suffix
+        target = dest_dir / f"{stem}_{ts}{suffix}"
+        shutil.move(str(source), str(target))
+        targets.append(target)
+
+        report_path = dest_dir / f"{stem}_{ts}.report.json"
+        body = report if i == 0 else {"bundled_with": primary_name, "see_main_report": True}
+        report_path.write_text(
+            json.dumps(body, indent=2, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    return targets
+
+
+def _find_archived(missing_path: Path) -> Path | None:
+    """If `missing_path` no longer exists at its original location, check
+    whether a file matching `archive()`'s naming (`{stem}_{timestamp}{suffix}`)
+    already exists in PROCESSED or REJECTED — i.e. this exact input was
+    already consumed by a prior run. Returns the most recently modified
+    match, or None if nothing matches (a genuine "not found").
+
+    Only meaningful when `missing_path.exists()` is False; callers must
+    check that first.
+    """
+    stem = missing_path.stem
+    suffix = missing_path.suffix
+    candidates: list[Path] = []
+    for d in (PROCESSED, REJECTED):
+        if d.exists():
+            candidates.extend(d.glob(f"{stem}_*{suffix}"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 # ─────────────────────────────────────────────────────────────
 # BOM bundle handler — 2 files (header + components) → N API calls (1 per BOM)
 # ─────────────────────────────────────────────────────────────
@@ -643,17 +868,23 @@ def _build_bom_payloads(
     return payloads
 
 
-def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
+def handle_bom_bundle(header_path: Path, dry_run: bool, token: str, *, date: str | None = None) -> int:
     """Bundle BOM ingestion: reads header + components from the same dir, emits N API calls.
+
+    `date`, when set (dated-drop convention, e.g. 'bom_header_20260718.tsv'),
+    picks the matching dated companion 'bom_components_<date>.tsv' instead
+    of the canonical 'bom_components.tsv' — same date suffix on both sides
+    of the bundle, ignored for dispatch otherwise. The '.partNN' convention
+    is NOT supported for the BOM bundle (rejected by the caller in main()).
 
     Returns process exit code (0 if all BOMs OK, non-zero on any failure).
     """
-    components_path = header_path.parent / "bom_components.tsv"
+    companion_name = f"bom_components_{date}.tsv" if date else "bom_components.tsv"
+    components_path = header_path.parent / companion_name
     if not components_path.exists():
         logger.error(
-            "bom_components.tsv not found next to bom_header.tsv. "
-            "Both files must be present in the same directory: %s",
-            header_path.parent,
+            "%s not found next to %s. Both files must be present in the same directory: %s",
+            companion_name, header_path.name, header_path.parent,
         )
         return 7
 
@@ -667,7 +898,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
     except (FileNotFoundError, ValueError) as e:
         logger.error("parse error: %s", e)
         report = {
-            "files": ["bom_header.tsv", "bom_components.tsv"],
+            "files": [header_path.name, companion_name],
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "outcome": "parse_error",
@@ -676,7 +907,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
         if not dry_run:
             archive(header_path, REJECTED, report)
             if components_path.exists():
-                archive(components_path, REJECTED, {"bundled_with": "bom_header.tsv", "see_report": "above"})
+                archive(components_path, REJECTED, {"bundled_with": header_path.name, "see_report": "above"})
         else:
             print(json.dumps(report, indent=2, ensure_ascii=False))
         return 4
@@ -687,7 +918,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
     except ValueError as e:
         logger.error("bundle validation error: %s", e)
         report = {
-            "files": ["bom_header.tsv", "bom_components.tsv"],
+            "files": [header_path.name, companion_name],
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "outcome": "bundle_validation_error",
@@ -698,7 +929,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
         if not dry_run:
             archive(header_path, REJECTED, report)
             if components_path.exists():
-                archive(components_path, REJECTED, {"bundled_with": "bom_header.tsv"})
+                archive(components_path, REJECTED, {"bundled_with": header_path.name})
         else:
             print(json.dumps(report, indent=2, ensure_ascii=False))
         return 4
@@ -747,7 +978,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
     # ── 4. Archive both files together ─────────────────────────
     outcome = "ok" if all_ok else "partial" if any(r["outcome"] == "ok" for r in bom_results) else "rejected"
     report = {
-        "files": ["bom_header.tsv", "bom_components.tsv"],
+        "files": [header_path.name, companion_name],
         "endpoint": endpoint,
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -767,7 +998,7 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
     dest = PROCESSED if all_ok else REJECTED
     archive(header_path, dest, report)
     if components_path.exists():
-        archive(components_path, dest, {"bundled_with": "bom_header.tsv", "see_main_report": True})
+        archive(components_path, dest, {"bundled_with": header_path.name, "see_main_report": True})
     logger.info(
         "%s — bundle archived to %s (%d BOMs, %d ok, %d failed)",
         outcome.upper(), dest, len(payloads),
@@ -782,6 +1013,117 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str) -> int:
             file=sys.stderr,
         )
     return 0 if all_ok else 1
+
+
+# ─────────────────────────────────────────────────────────────
+# Part-group handler — N sibling '.partNN' files -> ONE logical load
+# ─────────────────────────────────────────────────────────────
+def handle_part_group(first_part: Path, dry_run: bool, token: str) -> int:
+    """Group `first_part` with all its same-(entity, date) siblings found in
+    its own directory (see `find_sibling_parts`) and ingest them as ONE
+    logical load — one concatenated payload, one POST, archived together.
+
+    Returns process exit code (0 ok, non-zero on any failure), mirroring
+    the single-file flow in main().
+    """
+    parsed = parse_ingest_filename(first_part.name)
+    canonical = f"{parsed.entity}.tsv"
+    cfg = DISPATCH[canonical]
+    builder = PAYLOAD_BUILDERS[canonical]
+
+    try:
+        siblings = find_sibling_parts(first_part)
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("part grouping error for '%s': %s", first_part.name, e)
+        return 3
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    logger.info(
+        "ingesting %s (%d part(s): %s) → %s",
+        canonical, len(siblings), [p.name for p in siblings], cfg["endpoint"],
+    )
+
+    # ── 1. Parse + concatenate parts ───────────────────────
+    try:
+        headers, rows = parse_tsv_parts(siblings)
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("parse error: %s", e)
+        report: dict[str, Any] = {
+            "filename": first_part.name,
+            "source_files": [p.name for p in siblings],
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "outcome": "parse_error",
+            "error": str(e),
+        }
+        if not dry_run:
+            archive_group(siblings, REJECTED, report)
+        else:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 4
+
+    logger.info(
+        "parsed %d rows from %d part(s) (header: %s)",
+        len(rows), len(siblings), headers,
+    )
+
+    # ── 2. Build payload ───────────────────────────────────
+    payload = builder(rows, dry_run)
+
+    # ── 3. Call API ────────────────────────────────────────
+    try:
+        status_code, body = call_api(cfg["endpoint"], payload, token)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("API call crashed")
+        report = {
+            "filename": first_part.name,
+            "source_files": [p.name for p in siblings],
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "outcome": "api_crash",
+            "error": str(e),
+            "rows_parsed": len(rows),
+        }
+        if not dry_run:
+            archive_group(siblings, REJECTED, report)
+        else:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 5
+
+    # ── 4. Outcome + archive ──────────────────────────────
+    accepted = 200 <= status_code < 300
+    outcome = "ok" if accepted else "rejected"
+    summary = body.get("summary", {}) if isinstance(body, dict) else {}
+
+    report = {
+        "filename": first_part.name,
+        "source_files": [p.name for p in siblings],
+        "endpoint": cfg["endpoint"],
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "outcome": outcome,
+        "dry_run": dry_run,
+        "http_status": status_code,
+        "rows_parsed": len(rows),
+        "parts_count": len(siblings),
+        "api_summary": summary,
+        "api_response": body,
+    }
+
+    if dry_run:
+        logger.info("DRY-RUN — files not moved. Outcome: %s (HTTP %d)", outcome, status_code)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0 if accepted else 1
+
+    dest = PROCESSED if accepted else REJECTED
+    targets = archive_group(siblings, dest, report)
+    logger.info(
+        "%s — %d part(s) archived to %s",
+        outcome.upper(), len(targets), dest,
+    )
+    if not accepted:
+        print(json.dumps(body, indent=2, ensure_ascii=False), file=sys.stderr)
+    return 0 if accepted else 1
 
 
 # ─────────────────────────────────────────────────────────────
@@ -811,27 +1153,63 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DATABASE_URL not set — refusing to run")
         return 2
 
-    # Pre-flight: filename supported?
-    if filename == "bom_components.tsv":
+    # Pre-flight: filename grammar (canonical / daily drop / part file — PR-4a)
+    try:
+        parsed = parse_ingest_filename(filename)
+    except ValueError as e:
+        logger.error("unsupported filename '%s': %s", filename, e)
+        return 3
+
+    if parsed.entity == "bom_components":
         logger.error(
-            "bom_components.tsv cannot be ingested alone — it has no metadata. "
-            "Use 'bom_header.tsv' as the entry point; the script will auto-load "
-            "bom_components.tsv from the same directory."
+            "'%s' cannot be ingested alone — it has no metadata. Use the "
+            "matching 'bom_header[...].tsv' as the entry point; the script "
+            "will auto-load the companion bom_components file from the "
+            "same directory.",
+            filename,
         )
         return 6
-    if filename not in DISPATCH:
+
+    canonical = f"{parsed.entity}.tsv"
+    if canonical not in DISPATCH:
         logger.error(
-            "unsupported filename '%s'. Supported: %s",
-            filename, sorted(DISPATCH.keys()),
+            "unsupported filename '%s' (resolved entity '%s'). Supported entities: %s",
+            filename, parsed.entity, sorted(k[: -len('.tsv')] for k in DISPATCH),
         )
         return 3
 
-    # ── BOM bundle: special path (2 files → N API calls) ──
-    if filename == "bom_header.tsv":
-        return handle_bom_bundle(src, args.dry_run, token)
+    # Pre-flight: was this exact input already consumed by a prior run? A
+    # stale part re-run is the concrete case (PR-4a) but this generalizes to
+    # any grammar — a clear "already archived" beats a generic parse_error.
+    if not src.exists():
+        prior = _find_archived(src)
+        if prior is not None:
+            logger.error(
+                "'%s' no longer present at %s — already archived to '%s'. "
+                "Nothing to do (re-running an already-consumed file/part is "
+                "a no-op, not a retryable error).",
+                filename, src.parent, prior,
+            )
+            return 8
 
-    cfg = DISPATCH[filename]
-    builder = PAYLOAD_BUILDERS[filename]
+    # ── BOM bundle: special path (2 files → N API calls) ──
+    if parsed.entity == "bom_header":
+        if parsed.part is not None:
+            logger.error(
+                "'%s' — the BOM bundle does not support the '.partNN' "
+                "convention (bom_header/bom_components already pairs as a "
+                "2-file bundle; use one pair per date instead).",
+                filename,
+            )
+            return 3
+        return handle_bom_bundle(src, args.dry_run, token, date=parsed.date)
+
+    # ── Part file: group with siblings, ONE logical load ──
+    if parsed.part is not None:
+        return handle_part_group(src, args.dry_run, token)
+
+    cfg = DISPATCH[canonical]
+    builder = PAYLOAD_BUILDERS[canonical]
 
     started_at = datetime.now(timezone.utc).isoformat()
     logger.info("ingesting %s → %s", src, cfg["endpoint"])
