@@ -35,7 +35,7 @@ except ImportError:
 from ootils_core.api import metrics
 from ootils_core.api.auth import Principal, _expected_token, require_scope
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import audit, bom, calc, calendars, daily_runs, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, maintenance, me, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens, ui
+from ootils_core.api.routers import audit, bom, calc, calendars, daily_runs, demand, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, maintenance, me, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens, ui
 from ootils_core.api.routers.graph import nodes_router
 from ootils_core.mps import router as mps_router
 from ootils_core.atp import atp_router
@@ -444,6 +444,7 @@ def create_app() -> FastAPI:
     application.include_router(outcomes.router)
     application.include_router(maintenance.router)
     application.include_router(daily_runs.router)
+    application.include_router(demand.router)
     application.include_router(forecasting.router)
     application.include_router(pyramide.router)
     application.include_router(mps_router)
