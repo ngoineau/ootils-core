@@ -69,6 +69,7 @@ from ootils_core.interfaces.ingest_exec import (  # noqa: E402
     DISPATCH,
     PAYLOAD_BUILDERS,
     ParsedFilename,
+    PartPostOutcome,
     archive,
     archive_group,
     build_bom_payloads,
@@ -77,6 +78,8 @@ from ootils_core.interfaces.ingest_exec import (  # noqa: E402
     parse_ingest_filename,
     parse_tsv,
     parse_tsv_parts,
+    parse_tsv_parts_each,
+    post_parts,
 )
 
 logging.basicConfig(
@@ -93,6 +96,7 @@ __all__ = [
     "DISPATCH",
     "PAYLOAD_BUILDERS",
     "ParsedFilename",
+    "PartPostOutcome",
     "archive",
     "archive_group",
     "build_bom_payloads",
@@ -101,6 +105,8 @@ __all__ = [
     "parse_ingest_filename",
     "parse_tsv",
     "parse_tsv_parts",
+    "parse_tsv_parts_each",
+    "post_parts",
     "handle_bom_bundle",
     "handle_part_group",
     "main",
@@ -284,7 +290,18 @@ def handle_bom_bundle(header_path: Path, dry_run: bool, token: str, *, date: str
 def handle_part_group(first_part: Path, dry_run: bool, token: str) -> int:
     """Group `first_part` with all its same-(entity, date) siblings found in
     its own directory (see `find_sibling_parts`) and ingest them as ONE
-    logical load — one concatenated payload, one POST, archived together.
+    logical load — archived TOGETHER at the end, one shared report — but
+    POSTed as N SEPARATE payloads, one per part (#413: concatenating every
+    part into one payload defeats the whole point of splitting the drop
+    into parts in the first place — see `interfaces.ingest_exec` module
+    docstring, "PART-GROUP LOADS ARE N POSTS, NEVER ONE").
+
+    Header identity across every part is still validated BEFORE any part is
+    POSTed (`parse_tsv_parts_each`). POSTing then proceeds part by part,
+    fail-fast (`post_parts`): a failure on part K leaves parts 1..K-1
+    already acquired server-side (ingestion is upsert-idempotent) and marks
+    the whole group `rejected` with a report naming exactly which parts
+    made it through — re-running the group is safe.
 
     Returns process exit code (0 ok, non-zero on any failure), mirroring
     the single-file flow in main().
@@ -302,13 +319,14 @@ def handle_part_group(first_part: Path, dry_run: bool, token: str) -> int:
 
     started_at = datetime.now(timezone.utc).isoformat()
     logger.info(
-        "ingesting %s (%d part(s): %s) → %s",
+        "ingesting %s (%d part(s): %s) → %s, one POST per part",
         canonical, len(siblings), [p.name for p in siblings], cfg["endpoint"],
     )
 
-    # ── 1. Parse + concatenate parts ───────────────────────
+    # ── 1. Parse each part separately (header identity still enforced
+    #        across the whole group, before ANY part is POSTed) ───────
     try:
-        headers, rows = parse_tsv_parts(siblings)
+        headers, parts_rows = parse_tsv_parts_each(siblings)
     except (FileNotFoundError, ValueError) as e:
         logger.error("parse error: %s", e)
         report: dict[str, Any] = {
@@ -325,38 +343,38 @@ def handle_part_group(first_part: Path, dry_run: bool, token: str) -> int:
             print(json.dumps(report, indent=2, ensure_ascii=False))
         return 4
 
+    rows_total = sum(len(r) for r in parts_rows)
     logger.info(
         "parsed %d rows from %d part(s) (header: %s)",
-        len(rows), len(siblings), headers,
+        rows_total, len(siblings), headers,
     )
 
-    # ── 2. Build payload ───────────────────────────────────
-    payload = builder(rows, dry_run)
+    # ── 2+3. Build + POST one payload PER part, fail-fast ─────────
+    outcomes: list[PartPostOutcome] = post_parts(
+        cfg["endpoint"], builder, list(zip(siblings, parts_rows)), token, dry_run,
+        call_api_fn=call_api,
+    )
 
-    # ── 3. Call API ────────────────────────────────────────
-    try:
-        status_code, body = call_api(cfg["endpoint"], payload, token)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("API call crashed")
-        report = {
-            "filename": first_part.name,
-            "source_files": [p.name for p in siblings],
-            "started_at": started_at,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "outcome": "api_crash",
-            "error": str(e),
-            "rows_parsed": len(rows),
-        }
-        if not dry_run:
-            archive_group(siblings, REJECTED, report)
-        else:
-            print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 5
-
-    # ── 4. Outcome + archive ──────────────────────────────
-    accepted = 200 <= status_code < 300
+    # ── 4. Outcome + archive (the group, together, at the end) ────
+    accepted = all(o.accepted for o in outcomes)
     outcome = "ok" if accepted else "rejected"
-    summary = body.get("summary", {}) if isinstance(body, dict) else {}
+    parts_ok = sum(1 for o in outcomes if o.accepted)
+    part_results = [
+        {
+            "source": o.source,
+            "rows_parsed": o.rows_count,
+            "attempted": o.attempted,
+            "outcome": (
+                "ok" if o.accepted
+                else "not_attempted" if not o.attempted
+                else o.error_kind or "rejected"
+            ),
+            "http_status": o.http_status,
+            "error": o.error,
+            "api_response": o.response,
+        }
+        for o in outcomes
+    ]
 
     report = {
         "filename": first_part.name,
@@ -366,26 +384,25 @@ def handle_part_group(first_part: Path, dry_run: bool, token: str) -> int:
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "outcome": outcome,
         "dry_run": dry_run,
-        "http_status": status_code,
-        "rows_parsed": len(rows),
+        "rows_parsed": rows_total,
         "parts_count": len(siblings),
-        "api_summary": summary,
-        "api_response": body,
+        "parts_ok": parts_ok,
+        "part_results": part_results,
     }
 
     if dry_run:
-        logger.info("DRY-RUN — files not moved. Outcome: %s (HTTP %d)", outcome, status_code)
+        logger.info("DRY-RUN — files not moved. Outcome: %s (%d/%d parts ok)", outcome, parts_ok, len(siblings))
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if accepted else 1
 
     dest = PROCESSED if accepted else REJECTED
     targets = archive_group(siblings, dest, report)
     logger.info(
-        "%s — %d part(s) archived to %s",
-        outcome.upper(), len(targets), dest,
+        "%s — %d part(s) archived to %s (%d/%d parts ok)",
+        outcome.upper(), len(targets), dest, parts_ok, len(siblings),
     )
     if not accepted:
-        print(json.dumps(body, indent=2, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps(part_results, indent=2, ensure_ascii=False), file=sys.stderr)
     return 0 if accepted else 1
 
 

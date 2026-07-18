@@ -7,7 +7,7 @@ Wires together, end to end, everything PR-2/PR-3 already built:
   1. **Scan** an inbox directory for TODAY's dated TSV drops
      (``<feed_key>_<AAAAMMJJ>.tsv``, plus grouped ``.partNN`` siblings —
      ``interfaces.ingest_exec.parse_ingest_filename``/``find_sibling_parts``/
-     ``parse_tsv_parts``, PR-4a's filename grammar).
+     ``parse_tsv_parts_each``, PR-4a's filename grammar).
   2. **Resolve** each scanned feed_key's active contract
      (``interfaces.contracts.list_active_contracts``/``get_active_contract``)
      — see "THE feed_key / entity_type MISMATCH" below.
@@ -25,7 +25,11 @@ Wires together, end to end, everything PR-2/PR-3 already built:
      whose OWN guard evaluation is green gets loaded, in FK-dependency
      order, by re-using — never duplicating — ``interfaces.ingest_exec``'s
      canonical parse/build/call/archive primitives (the same ones
-     ``scripts/ingest_file.py`` uses for a manual single-file drop).
+     ``scripts/ingest_file.py`` uses for a manual single-file drop). A
+     part-group feed is POSTed as N SEPARATE payloads via ``post_parts``
+     (``ScannedFeedFile.per_part()``), never one concatenated payload —
+     see ``interfaces.ingest_exec``'s module docstring, "PART-GROUP LOADS
+     ARE N POSTS, NEVER ONE" (#413).
 
 THE feed_key / entity_type MISMATCH (read before touching ``_canonical_
 dispatch_name``). A governed feed's inbox filename is named after its
@@ -146,13 +150,15 @@ from ootils_core.interfaces.ingest_exec import (
     DISPATCH,
     PAYLOAD_BUILDERS,
     ParsedFilename,
+    PartPostOutcome,
     archive,
     archive_group,
     call_api,
     find_sibling_parts,
     parse_ingest_filename,
     parse_tsv,
-    parse_tsv_parts,
+    parse_tsv_parts_each,
+    post_parts,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,17 +212,52 @@ class ScannedFeedFile:
     """One feed_key's file(s) found in the inbox for one ``run_date`` — a
     single file, or N ``.partNN`` siblings already grouped ascending by
     ``find_sibling_parts``, parsed once (headers + rows kept in memory so
-    the later load phase never re-reads the file from disk)."""
+    the later load phase never re-reads the file from disk).
+
+    ``rows`` is the CONCATENATED view across every part — the right shape
+    for an aggregate need (the guard row-count check via ``row_count``).
+    ``part_rows``, when populated by ``scan_inbox`` (one entry per
+    ``paths``, same order), is the PER-PART view the load phase's
+    ``per_part()`` needs — see the #413 fix, module docstring "PART-GROUP
+    LOADS ARE N POSTS, NEVER ONE": flattening N parts into ONE POST payload
+    defeats the whole reason a drop is split into parts. Defaults to
+    ``()`` for backward compatibility with a ``ScannedFeedFile`` built
+    directly (bypassing ``scan_inbox``, e.g. a test fixture for a
+    different concern) — ``per_part()`` falls back safely for that case.
+    """
 
     feed_key: str
     paths: tuple[Path, ...]
     file_arrived_at: datetime  # max mtime across paths, UTC-aware
     headers: tuple[str, ...]
     rows: tuple[dict[str, str], ...]
+    part_rows: tuple[tuple[dict[str, str], ...], ...] = ()
 
     @property
     def row_count(self) -> int:
         return len(self.rows)
+
+    def per_part(self) -> list[tuple[Path, tuple[dict[str, str], ...]]]:
+        """Rows grouped per source path, ``paths`` order — the #413 load
+        primitive (feeds ``post_parts`` so each part gets its own POST).
+        Falls back to a single ``(paths[0], rows)`` pair when
+        ``part_rows`` was never populated (a test-constructed
+        ``ScannedFeedFile`` bypassing ``scan_inbox``) and there is exactly
+        one path — the concatenated and per-part views coincide for a
+        single file. Raises ``ValueError`` for the genuinely ambiguous
+        case (multiple paths, no ``part_rows`` breakdown) rather than
+        guessing which rows belong to which file.
+        """
+        if self.part_rows:
+            return list(zip(self.paths, self.part_rows))
+        if len(self.paths) == 1:
+            return [(self.paths[0], self.rows)]
+        raise ValueError(
+            f"ScannedFeedFile for feed_key={self.feed_key!r} has {len(self.paths)} "
+            "paths but no part_rows breakdown — scan_inbox always populates "
+            "this; a caller must not construct a multi-path ScannedFeedFile "
+            "directly"
+        )
 
 
 @dataclass(frozen=True)
@@ -329,8 +370,11 @@ def scan_inbox(inbox_dir: Path, run_date: date) -> InboxScan:
         try:
             if len(group) == 1:
                 headers, rows = parse_tsv(group[0])
+                part_rows: tuple[tuple[dict[str, str], ...], ...] = (tuple(rows),)
             else:
-                headers, rows = parse_tsv_parts(group)
+                headers, parts_list = parse_tsv_parts_each(group)
+                part_rows = tuple(tuple(part) for part in parts_list)
+                rows = [row for part in parts_list for row in part]
         except (FileNotFoundError, ValueError) as exc:
             issues[feed_key] = ScanIssue(
                 feed_key=feed_key, paths=tuple(group), file_arrived_at=arrived_at, error=str(exc),
@@ -343,6 +387,7 @@ def scan_inbox(inbox_dir: Path, run_date: date) -> InboxScan:
             file_arrived_at=arrived_at,
             headers=tuple(headers),
             rows=tuple(rows),
+            part_rows=part_rows,
         )
 
     logger.info(
@@ -807,63 +852,90 @@ def load_eligible_feeds(
 
         cfg = DISPATCH[canonical]
         builder = PAYLOAD_BUILDERS[canonical]
-        try:
-            payload = builder(list(scanned.rows), False)
-        except ValueError as exc:
-            detail = f"payload build error: {exc}"
-            logger.error(
-                "daily_orchestrator.build_error feed_key=%s run_date=%s detail=%s",
-                feed_key, evaluation.run_date, detail,
-            )
-            report = {
-                "feed_key": feed_key, "canonical": canonical, "run_date": evaluation.run_date.isoformat(),
-                "outcome": "build_error", "error": detail,
-            }
-            _archive_one_or_group(scanned.paths, rejected_dir, report)
-            outcomes.append(
-                FeedLoadOutcome(feed_key=feed_key, canonical=canonical, status=FeedLoadStatus.SCAN_ERROR,
-                                 http_status=None, detail=detail)
-            )
-            continue
 
-        try:
-            status_code, body = call_api(cfg["endpoint"], payload, token)
-        except Exception:  # noqa: BLE001 — mirrors ingest_file.py's own api-crash carve-out
-            logger.exception(
-                "daily_orchestrator.api_crash feed_key=%s run_date=%s endpoint=%s",
-                feed_key, evaluation.run_date, cfg["endpoint"],
+        # One POST PER PART (#413) — see interfaces.ingest_exec module
+        # docstring "PART-GROUP LOADS ARE N POSTS, NEVER ONE". `per_part()`
+        # degenerates to a single (path, rows) pair for a plain dated drop,
+        # so this is also the single-file path — no behaviour change there.
+        part_outcomes: tuple[PartPostOutcome, ...] = tuple(
+            post_parts(
+                cfg["endpoint"], builder, scanned.per_part(), token, False,
+                call_api_fn=call_api,
             )
-            report = {
-                "feed_key": feed_key, "canonical": canonical, "endpoint": cfg["endpoint"],
-                "run_date": evaluation.run_date.isoformat(), "outcome": "api_crash",
-            }
-            _archive_one_or_group(scanned.paths, rejected_dir, report)
-            outcomes.append(
-                FeedLoadOutcome(feed_key=feed_key, canonical=canonical, status=FeedLoadStatus.API_CRASH,
-                                 http_status=None, detail="call_api raised — see logs")
-            )
-            continue
+        )
+        first_failure = next(
+            (o for o in part_outcomes if o.attempted and not o.accepted), None
+        )
+        accepted = first_failure is None
+        parts_ok = sum(1 for o in part_outcomes if o.accepted)
+        http_status: int | None
 
-        accepted = 200 <= status_code < 300
-        summary = body.get("summary", {}) if isinstance(body, dict) else {}
         report = {
             "feed_key": feed_key, "canonical": canonical, "endpoint": cfg["endpoint"],
-            "run_date": evaluation.run_date.isoformat(), "outcome": "ok" if accepted else "rejected",
-            "http_status": status_code, "rows_parsed": len(scanned.rows), "api_summary": summary,
-            "api_response": body,
+            "run_date": evaluation.run_date.isoformat(),
+            "outcome": "ok" if accepted else "rejected",
+            "rows_parsed": sum(o.rows_count for o in part_outcomes),
+            "parts_count": len(part_outcomes),
+            "parts_ok": parts_ok,
+            "part_results": [
+                {
+                    "source": o.source, "attempted": o.attempted, "accepted": o.accepted,
+                    "http_status": o.http_status, "rows_parsed": o.rows_count,
+                    "error": o.error, "api_response": o.response,
+                }
+                for o in part_outcomes
+            ],
         }
         dest = processed_dir if accepted else rejected_dir
         _archive_one_or_group(scanned.paths, dest, report)
 
-        status = FeedLoadStatus.LOADED if accepted else FeedLoadStatus.REJECTED
-        detail = f"HTTP {status_code}" if accepted else f"HTTP {status_code}, summary={summary}"
-        logger.info(
-            "daily_orchestrator.load feed_key=%s run_date=%s canonical=%s status=%s http_status=%d",
-            feed_key, evaluation.run_date, canonical, status.value, status_code,
-        )
+        if first_failure is None:
+            status = FeedLoadStatus.LOADED
+            http_status = part_outcomes[-1].http_status if part_outcomes else None
+            detail = f"HTTP {http_status}" if len(part_outcomes) == 1 else (
+                f"{len(part_outcomes)} part(s), all HTTP 2xx (last={http_status})"
+            )
+            logger.info(
+                "daily_orchestrator.load feed_key=%s run_date=%s canonical=%s status=%s "
+                "parts=%d parts_ok=%d",
+                feed_key, evaluation.run_date, canonical, status.value, len(part_outcomes), parts_ok,
+            )
+        elif first_failure.error_kind == "build_error":
+            status = FeedLoadStatus.SCAN_ERROR
+            http_status = None
+            detail = f"payload build error on part '{first_failure.source}': {first_failure.error}"
+            logger.error(
+                "daily_orchestrator.build_error feed_key=%s run_date=%s detail=%s",
+                feed_key, evaluation.run_date, detail,
+            )
+        elif first_failure.error_kind == "api_crash":
+            status = FeedLoadStatus.API_CRASH
+            http_status = None
+            detail = f"call_api raised on part '{first_failure.source}' — see logs"
+            logger.error(
+                "daily_orchestrator.api_crash feed_key=%s run_date=%s endpoint=%s part=%s",
+                feed_key, evaluation.run_date, cfg["endpoint"], first_failure.source,
+            )
+        else:
+            status = FeedLoadStatus.REJECTED
+            http_status = first_failure.http_status
+            fail_summary = (
+                first_failure.response.get("summary", {})
+                if isinstance(first_failure.response, dict) else {}
+            )
+            detail = (
+                f"part '{first_failure.source}' HTTP {first_failure.http_status}, "
+                f"summary={fail_summary}"
+            )
+            logger.info(
+                "daily_orchestrator.load feed_key=%s run_date=%s canonical=%s status=%s "
+                "parts=%d parts_ok=%d",
+                feed_key, evaluation.run_date, canonical, status.value, len(part_outcomes), parts_ok,
+            )
+
         outcomes.append(
             FeedLoadOutcome(feed_key=feed_key, canonical=canonical, status=status,
-                             http_status=status_code, detail=detail)
+                             http_status=http_status, detail=detail)
         )
 
     return tuple(outcomes)

@@ -36,6 +36,26 @@ orchestration (``handle_bom_bundle``) and part-group CLI orchestration
 (dry-run JSON printing to stdout, process exit codes) — only the DB/API
 primitives they call (``parse_tsv``, ``PAYLOAD_BUILDERS``, ``call_api``,
 ``archive``/``archive_group``, ``build_bom_payloads``) are canonical here.
+
+PART-GROUP LOADS ARE N POSTS, NEVER ONE (#413). A ``.partNN`` group exists
+BECAUSE a single file would be too big — ``TSV-FILES-SPEC.md`` §1.1 caps
+every FILE at ~50 000 lines / 10 MB precisely so it clears
+``IngestPayloadSizeLimitMiddleware``'s 10 MB request-body cap. Concatenating
+N parts into ONE in-memory payload (the pre-#413 shape of both
+``handle_part_group`` and ``daily_orchestrator.load_eligible_feeds``)
+defeats that guarantee arithmetically — N x 4.5 MB parts trivially exceed
+10 MB even though every individual part is safely under it (the exact
+failure caught at the 2026-07 demo: 3 forecast parts, ~13 MB concatenated,
+POST /v1/ingest/forecast-demand -> 413). The fix is structural, not a bigger
+cap: ``parse_tsv_parts_each``/``post_parts`` below keep every part's rows
+and its own POST separate all the way to ``call_api``, so each request body
+never grows past one part's own (contractually bounded) size. A "logical
+load" stays ONE unit for archiving/reporting purposes (still one
+``archive_group`` call, one shared report) — only the wire representation
+changed, both callers (``scripts/ingest_file.py:handle_part_group`` and
+``engine/ingest/daily_orchestrator.py:load_eligible_feeds``) build their own
+report/archiving around these two shared primitives, never a second
+implementation of the POST loop itself.
 """
 from __future__ import annotations
 
@@ -43,10 +63,11 @@ import csv
 import json
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # ─────────────────────────────────────────────────────────────
@@ -262,23 +283,30 @@ def find_sibling_parts(path: Path) -> list[Path]:
     return siblings
 
 
-def parse_tsv_parts(paths: list[Path]) -> tuple[list[str], list[dict[str, str]]]:
-    """Parse and concatenate N sibling part files into one logical
-    (headers, rows), in the given order (expected: ascending by part
-    number, see `find_sibling_parts`).
+def parse_tsv_parts_each(paths: list[Path]) -> tuple[list[str], list[list[dict[str, str]]]]:
+    """Parse N sibling part files INDEPENDENTLY — never concatenated — into
+    one shared `headers` (validated byte-identical across every part, same
+    rule as `parse_tsv_parts`) plus each part's own row list, in `paths`
+    order (expected: ascending by part number, see `find_sibling_parts`).
 
-    Every part is parsed independently via `parse_tsv`; all parts must
-    share byte-identical headers (same column names, same order) — a
-    mismatch raises ValueError naming the offending file. Each row's
-    `__line__` tag is re-prefixed with its source file's name so error
-    messages built from it stay traceable across parts, e.g.
-    "forecasts.part02.tsv:L14".
+    This is the #413 fix's parsing primitive (see module docstring,
+    "PART-GROUP LOADS ARE N POSTS, NEVER ONE"): a part-group LOAD must POST
+    each part as its own payload, so the parser must keep parts separate
+    all the way through rather than flattening them into one row list a
+    caller can no longer split. Each row's `__line__` tag is re-prefixed
+    with its source file's name so error messages stay traceable across
+    parts, e.g. "forecasts.part02.tsv:L14".
+
+    Raises ValueError if `paths` is empty, or if any part's header
+    (names AND order) differs from the first part's — naming the offending
+    file — BEFORE any payload is built for ANY part (header validation
+    covers the whole group upfront, never discovered mid-POST).
     """
     if not paths:
         raise ValueError("no part files to parse")
 
     headers: list[str] | None = None
-    all_rows: list[dict[str, str]] = []
+    parts: list[list[dict[str, str]]] = []
     for p in paths:
         p_headers, p_rows = parse_tsv(p)
         if headers is None:
@@ -288,12 +316,30 @@ def parse_tsv_parts(paths: list[Path]) -> tuple[list[str], list[dict[str, str]]]
                 f"part file '{p.name}' header {p_headers} does not match "
                 f"first part's header {headers}"
             )
+        tagged_rows: list[dict[str, str]] = []
         for row in p_rows:
             row = dict(row)
             row["__line__"] = f"{p.name}:L{row.get('__line__', '?')}"
-            all_rows.append(row)
+            tagged_rows.append(row)
+        parts.append(tagged_rows)
 
     assert headers is not None  # `paths` non-empty => at least one iteration ran
+    return headers, parts
+
+
+def parse_tsv_parts(paths: list[Path]) -> tuple[list[str], list[dict[str, str]]]:
+    """Parse and concatenate N sibling part files into one logical
+    (headers, rows) — an AGGREGATE view, for callers that only need the
+    combined row set (e.g. the daily orchestrator's guard row-count check).
+
+    Built on `parse_tsv_parts_each` (one parser walk, no second reader):
+    same header-identity validation, same `__line__` re-prefixing. NOT the
+    right primitive for building a POST payload out of a part group — see
+    `parse_tsv_parts_each`/`post_parts` and the module docstring
+    "PART-GROUP LOADS ARE N POSTS, NEVER ONE" (#413).
+    """
+    headers, parts = parse_tsv_parts_each(paths)
+    all_rows: list[dict[str, str]] = [row for part in parts for row in part]
     return headers, all_rows
 
 
@@ -753,6 +799,124 @@ def call_api(endpoint: str, payload: dict[str, Any], token: str) -> tuple[int, d
     except Exception:
         body = {"raw_body": resp.text}
     return resp.status_code, body
+
+
+# ─────────────────────────────────────────────────────────────
+# Part-group POSTing (#413) — N parts, N payloads, N calls
+# ─────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class PartPostOutcome:
+    """One part's outcome from `post_parts`. `attempted=False` means the
+    group already failed on an earlier part and this one was deliberately
+    never built/POSTed (fail-fast, see `post_parts`) — its
+    `http_status`/`response` stay `None`, never a fabricated value.
+    `error_kind` distinguishes WHERE a failure happened (`'build_error'` —
+    the payload builder raised before any network call; `'api_crash'` —
+    `call_api` itself raised; `None` — either accepted, or a genuine
+    non-2xx HTTP response, both of which carry `response`/`http_status`
+    instead) so a caller can classify the outcome without re-deriving it
+    from `error`'s free text.
+    """
+
+    source: str
+    attempted: bool
+    accepted: bool
+    http_status: int | None
+    rows_count: int
+    response: dict[str, Any] | None
+    error: str | None
+    error_kind: str | None  # "build_error" | "api_crash" | None
+
+
+def post_parts(
+    endpoint: str,
+    builder: Callable[[list[dict[str, str]], bool], dict[str, Any]],
+    parts: Sequence[tuple[Path, Sequence[dict[str, str]]]],
+    token: str,
+    dry_run: bool,
+    *,
+    call_api_fn: Callable[[str, dict[str, Any], str], tuple[int, dict]] = call_api,
+) -> list[PartPostOutcome]:
+    """POST N sibling parts as N SEPARATE payloads against the same
+    `endpoint` — the #413 fix (module docstring, "PART-GROUP LOADS ARE N
+    POSTS, NEVER ONE"). Each part is contractually <= ~50 000 rows / <= 10 MB
+    (`TSV-FILES-SPEC.md` §1.1's per-FILE cap), so POSTing them individually
+    always stays clear of `IngestPayloadSizeLimitMiddleware`'s 10 MB
+    request-body cap; concatenating N parts into ONE payload does not (the
+    exact failure caught at the 2026-07 demo).
+
+    Builds each part's payload via `builder(rows, dry_run)` immediately
+    before POSTing it (never ahead of time for the whole group), so a
+    payload-construction error on a LATER part can never be discovered only
+    after an EARLIER part already POSTed successfully.
+
+    Fail-fast: stops at the first non-accepted part (a payload-build
+    `ValueError`, a `call_api_fn` exception, or a non-2xx response) — every
+    part already POSTed successfully stays acquired (ingestion is
+    upsert-idempotent, `TSV-FILES-SPEC.md`), remaining parts are reported
+    `attempted=False`, and the caller can safely re-run the WHOLE group:
+    already-loaded parts just upsert to the same result.
+
+    `call_api_fn` defaults to this module's `call_api` and exists so each
+    CALLER can pass through its OWN module-local `call_api` name instead —
+    Python resolves a bare `call_api(...)` call inside e.g.
+    `daily_orchestrator.py` against THAT module's global, not
+    `ingest_exec`'s, so `monkeypatch.setattr(daily_orchestrator, "call_api",
+    ...)` only takes effect if the caller passes `call_api` (its own,
+    possibly-patched module attribute) through explicitly rather than
+    relying on this default.
+    """
+    results: list[PartPostOutcome] = []
+    failed = False
+    for source, rows in parts:
+        if failed:
+            results.append(
+                PartPostOutcome(
+                    source=source.name, attempted=False, accepted=False,
+                    http_status=None, rows_count=len(rows), response=None,
+                    error=None, error_kind=None,
+                )
+            )
+            continue
+
+        try:
+            payload = builder(list(rows), dry_run)
+        except ValueError as e:
+            results.append(
+                PartPostOutcome(
+                    source=source.name, attempted=True, accepted=False,
+                    http_status=None, rows_count=len(rows), response=None,
+                    error=str(e), error_kind="build_error",
+                )
+            )
+            failed = True
+            continue
+
+        try:
+            status_code, body = call_api_fn(endpoint, payload, token)
+        except Exception as e:  # noqa: BLE001 — mirrors the single-payload api-crash carve-out
+            results.append(
+                PartPostOutcome(
+                    source=source.name, attempted=True, accepted=False,
+                    http_status=None, rows_count=len(rows), response=None,
+                    error=str(e), error_kind="api_crash",
+                )
+            )
+            failed = True
+            continue
+
+        accepted = 200 <= status_code < 300
+        results.append(
+            PartPostOutcome(
+                source=source.name, attempted=True, accepted=accepted,
+                http_status=status_code, rows_count=len(rows), response=body,
+                error=None, error_kind=None,
+            )
+        )
+        if not accepted:
+            failed = True
+
+    return results
 
 
 # ─────────────────────────────────────────────────────────────
