@@ -68,6 +68,23 @@ sync with the migration 071 header block):
       new_text        = not used (no companion audit table — the decision is
                         derived on read from daily_runs, migration 078; this
                         event row IS the durable record of the decision)
+  demand_descended:
+      field_changed   = 'demand_descended' (discriminant, constant — unlike
+                        purge_executed there is only one kind of descent run
+                        in V1, migration 084, ADR-043)
+      new_text        = descent_run_id (calc_runs.calc_run_id as text) — the
+                        demand_descent_lines.descent_run_id FK target
+                        (migration 083), same "run ref in new_text" idiom as
+                        calc_run_finished/shortage_detected/outcome_evaluated
+      new_quantity    = count of demand_descent_lines rows persisted by the
+                        run (per-DC lines written, RUN granularity — never
+                        per line)
+      old_text        = comma-joined item_ids whose national source node(s)
+                        had zero eligible DC and stayed national (fail-loudly
+                        per ADR-043 §2, "zéro centre éligible -> la demande
+                        reste nationale"), NULL when every item split cleanly
+                        (never an empty string — None-honest, same idiom as
+                        daily_run_completed's old_text)
 
 ``scenario_id`` (NOT NULL, migration 002) scopes the event to the fork/baseline.
 snapshot_captured / outcome_evaluated are baseline-only by nature (ADR-030) but
@@ -76,10 +93,13 @@ touched by a purge run (engine/maintenance/purge.py) — for fork_purge that is
 the purged scenario itself; for shortage_retention it is each scenario whose
 resolved shortages were swept, so a single retention run can emit several
 events, one per affected scenario (still RUN granularity — one per scenario's
-own delete, never per shortage row).
+own delete, never per shortage row). demand_descended is forkable (ADR-043
+§1): a fork's own descent run emits its own event scoped to that fork's
+scenario_id, never replayed onto baseline by promote() (L0, simulation-only,
+same doctrine as the ADR-025 overlay).
 
 Keep FLEET_EVENT_TYPES in sync with the events.event_type CHECK constraint
-(migrations 071 + 076 + 079) and with VALID_EVENT_TYPES in
+(migrations 071 + 076 + 079 + 084) and with VALID_EVENT_TYPES in
 api/routers/events.py.
 """
 from __future__ import annotations
@@ -92,11 +112,11 @@ from uuid import UUID, uuid4
 import psycopg
 
 # The fleet-emission types added by migration 071 (#401 AN-1) + migration 076
-# (PURGE-1) + migration 079 (ADR-042 PR-3). Validated locally so a typo fails
-# loudly in Python (ValueError) rather than as an opaque psycopg CHECK
-# violation at INSERT time. This set is the subset emit_stream_event is meant
-# to write; the DB CHECK (migrations 071/076/079) is the full authoritative
-# list.
+# (PURGE-1) + migration 079 (ADR-042 PR-3) + migration 084 (ADR-043, DESC-1
+# PR-B). Validated locally so a typo fails loudly in Python (ValueError)
+# rather than as an opaque psycopg CHECK violation at INSERT time. This set
+# is the subset emit_stream_event is meant to write; the DB CHECK (migrations
+# 071/076/079/084) is the full authoritative list.
 FLEET_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "recommendation_created",
@@ -106,6 +126,7 @@ FLEET_EVENT_TYPES: frozenset[str] = frozenset(
         "outcome_evaluated",
         "purge_executed",
         "daily_run_completed",
+        "demand_descended",
     }
 )
 
