@@ -95,7 +95,7 @@ def _build_propagation_engine(db):
 
 
 # Must stay in sync with events.event_type CHECK constraint in migrations
-# 002 + 006 + 051 + 062 + 071 + 076 + 079.
+# 002 + 006 + 051 + 062 + 071 + 076 + 079 + 084.
 # Any new event type requires both a DB migration (ALTER TABLE ... ADD CONSTRAINT)
 # and an addition here.
 VALID_EVENT_TYPES = {
@@ -127,6 +127,8 @@ VALID_EVENT_TYPES = {
     "purge_executed",
     # From migration 079 CHECK constraint extension (ADR-042 PR-3, INT-1 PR3)
     "daily_run_completed",
+    # From migration 084 CHECK constraint extension (ADR-043, DESC-1 PR-B)
+    "demand_descended",
 }
 
 

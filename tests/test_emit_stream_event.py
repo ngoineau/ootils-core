@@ -231,7 +231,8 @@ def test_fleet_types_present_in_migration_check() -> None:
 
     Migration 071 (#401 AN-1) introduced the first 5 fleet types; migration
     076 (PURGE-1) added the 6th (purge_executed); migration 079 (ADR-042
-    PR-3 / ADR-037 INT-1 PR3) added the 7th (daily_run_completed). A type is
+    PR-3 / ADR-037 INT-1 PR3) added the 7th (daily_run_completed); migration
+    084 (ADR-043, DESC-1 PR-B) added the 8th (demand_descended). A type is
     expected to appear in EXACTLY ONE of these (the migration that
     introduced it), but this check only needs "present in at least one" —
     the CHECK constraint itself is always the FULL cumulative list (each
@@ -250,7 +251,8 @@ def test_fleet_types_present_in_migration_check() -> None:
             "071_events_fleet_types.sql",
             "076_maintenance_purge.sql",
             "079_daily_run_completed_event.sql",
+            "084_demand_descended_event.sql",
         )
     )
     missing = [t for t in FLEET_EVENT_TYPES if f"'{t}'" not in sql]
-    assert not missing, f"types absent from migrations 071/076/079 CHECK: {missing}"
+    assert not missing, f"types absent from migrations 071/076/079/084 CHECK: {missing}"
