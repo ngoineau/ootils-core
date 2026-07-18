@@ -1258,8 +1258,12 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
+        # Netting contract (2026-07-17, ADR-021 convergence): the caller
+        # hands the kernel ONE pre-netted event, anchored at bucket_start
+        # (not the demand's own date — the per-date detail is already
+        # collapsed into the per-bucket total).
         assert len(call_kwargs["demand_events"]) == 1
-        assert call_kwargs["demand_events"][0] == (date(2025, 1, 3), Decimal("30"))
+        assert call_kwargs["demand_events"][0] == (date(2025, 1, 1), Decimal("30"))
 
     def test_demand_span_event_with_overlap(self):
         scenario_id = uuid4()
@@ -1310,6 +1314,73 @@ class TestRecomputePiNode:
         assert len(call_kwargs["demand_events"]) == 1
         assert call_kwargs["demand_events"][0] == (date(2025, 1, 1), Decimal("70"))
 
+    def test_demand_netting_greatest_fc_co_plus_dep(self):
+        """Netting (2026-07-17, ADR-021 convergence): forecast and CO for
+        the same bucket are NOT additive — outflow event =
+        max(fc_total, co_total) + dep_total, mirroring PROPAGATE_SQL's
+        GREATEST(fc_out, co_out) + dep_out. Here: fc 80, co 100, dep 15
+        → one event (bucket_start, 115) — never 80+100+15=195."""
+        scenario_id = uuid4()
+        node_id = uuid4()
+        fc_id, co_id, dep_id = uuid4(), uuid4(), uuid4()
+
+        pi_node = _make_node(
+            node_id=node_id,
+            scenario_id=scenario_id,
+            node_type="ProjectedInventory",
+            time_span_start=date(2025, 1, 1),
+            time_span_end=date(2025, 1, 7),
+        )
+        demand_nodes = {
+            fc_id: _make_node(
+                node_id=fc_id, node_type="ForecastDemand",
+                time_ref=date(2025, 1, 2), quantity=Decimal("80"),
+                time_span_start=None, time_span_end=None,
+            ),
+            co_id: _make_node(
+                node_id=co_id, node_type="CustomerOrderDemand",
+                time_ref=date(2025, 1, 3), quantity=Decimal("100"),
+                time_span_start=None, time_span_end=None,
+            ),
+            dep_id: _make_node(
+                node_id=dep_id, node_type="DependentDemand",
+                time_ref=date(2025, 1, 4), quantity=Decimal("15"),
+                time_span_start=None, time_span_end=None,
+            ),
+        }
+        consume_edges = [
+            _make_edge(from_node_id=d_id, to_node_id=node_id)
+            for d_id in (fc_id, co_id, dep_id)
+        ]
+
+        store = MagicMock()
+        store.get_node.side_effect = (
+            lambda nid, sid: pi_node if nid == node_id else demand_nodes.get(nid)
+        )
+        store.get_edges_to.side_effect = lambda nid, sid, edge_type=None: {
+            "feeds_forward": [],
+            "replenishes": [],
+            "consumes": consume_edges,
+        }.get(edge_type, [])
+
+        kernel = MagicMock()
+        kernel.compute_pi_node.return_value = {
+            "opening_stock": Decimal("0"),
+            "inflows": Decimal("0"),
+            "outflows": Decimal("115"),
+            "closing_stock": Decimal("-115"),
+            "has_shortage": True,
+            "shortage_qty": Decimal("115"),
+        }
+
+        engine = self._make_engine_for_recompute(store=store, kernel=kernel)
+        engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
+
+        call_kwargs = kernel.compute_pi_node.call_args[1]
+        assert call_kwargs["demand_events"] == [
+            (date(2025, 1, 1), Decimal("115"))
+        ]
+
     def test_demand_span_no_overlap(self):
         scenario_id = uuid4()
         node_id = uuid4()
@@ -1355,8 +1426,9 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        # No overlap -> demand_events should be empty (overlap_end <= overlap_start -> skipped via continue)
-        assert call_kwargs["demand_events"] == []
+        # No overlap -> zero contribution; the single pre-netted event still
+        # carries the (zero) per-bucket total, anchored at bucket_start.
+        assert call_kwargs["demand_events"] == [(date(2025, 1, 1), Decimal("0"))]
 
     def test_demand_span_zero_days(self):
         """span_days == 0 means no pro-rating; falls through to point demand."""
@@ -1403,9 +1475,10 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        # span_days == 0 -> falls through to point demand
+        # span_days == 0 -> falls through to point demand (in-bucket via
+        # time_ref); the pre-netted event is anchored at bucket_start.
         assert len(call_kwargs["demand_events"]) == 1
-        assert call_kwargs["demand_events"][0] == (date(2025, 1, 3), Decimal("50"))
+        assert call_kwargs["demand_events"][0] == (date(2025, 1, 1), Decimal("50"))
 
     def test_demand_src_none_skipped(self):
         scenario_id = uuid4()
@@ -1442,7 +1515,8 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        assert call_kwargs["demand_events"] == []
+        # Unresolvable source skipped -> zero-total pre-netted event.
+        assert call_kwargs["demand_events"] == [(date(2025, 1, 1), Decimal("0"))]
 
     def test_demand_non_demand_type_skipped(self):
         scenario_id = uuid4()
@@ -1486,7 +1560,8 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        assert call_kwargs["demand_events"] == []
+        # Non-demand type skipped -> zero-total pre-netted event.
+        assert call_kwargs["demand_events"] == [(date(2025, 1, 1), Decimal("0"))]
 
     def test_demand_missing_date_and_qty_skipped(self):
         scenario_id = uuid4()
@@ -1532,7 +1607,8 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        assert call_kwargs["demand_events"] == []
+        # Missing date+qty skipped -> zero-total pre-netted event.
+        assert call_kwargs["demand_events"] == [(date(2025, 1, 1), Decimal("0"))]
 
     def test_result_unchanged_returns_false(self):
         scenario_id = uuid4()
@@ -1868,7 +1944,9 @@ class TestRecomputePiNode:
         assert call_node.shortage_qty == Decimal("100")
 
     def test_demand_uses_time_span_start_when_time_ref_none(self):
-        """demand_date = src_node.time_ref or src_node.time_span_start"""
+        """demand_date = src_node.time_ref or src_node.time_span_start —
+        still the in-bucket membership test; the emitted pre-netted event
+        is anchored at bucket_start (netting contract, 2026-07-17)."""
         scenario_id = uuid4()
         node_id = uuid4()
         demand_id = uuid4()
@@ -1912,7 +1990,7 @@ class TestRecomputePiNode:
         engine._recompute_pi_node(node_id, scenario_id, uuid4(), _mock_db())
 
         call_kwargs = kernel.compute_pi_node.call_args[1]
-        assert call_kwargs["demand_events"] == [(date(2025, 1, 2), Decimal("25"))]
+        assert call_kwargs["demand_events"] == [(date(2025, 1, 1), Decimal("25"))]
 
     def test_no_shortage_detector_configured(self):
         scenario_id = uuid4()

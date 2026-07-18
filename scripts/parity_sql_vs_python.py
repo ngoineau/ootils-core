@@ -56,6 +56,12 @@ def _seed_rich(
     and `time_ref` distributed uniformly across the horizon. Each PO is
     connected via 'replenishes' to the PI bucket whose time_span contains
     its time_ref (mirrors what the ingest pipeline produces).
+
+    On top of the random demand mix, every item also gets ONE deterministic
+    periodic forecast (7-day span, multi-bucket wired) overlapped by a CO
+    and a DependentDemand in the same bucket (section 5c below) so span
+    proration AND the GREATEST(fc, co) + dep netting are always exercised
+    by the parity run, whatever the RNG draws.
     """
     rng = random.Random(seed)
     started = time.perf_counter()
@@ -227,6 +233,53 @@ def _seed_rich(
                 dem_span_starts.append(None)
                 dem_span_ends.append(None)
                 dem_bucket_indices.append([offset])
+
+    # 5c. Deterministic proration + netting case (ADR-021 convergence,
+    # 2026-07-17): one PERIODIC multi-bucket forecast + one CO + one
+    # DependentDemand inside the same bucket, for EVERY item. The random mix
+    # above only creates spans 1/3 of the time and never guarantees a CO
+    # landing inside a forecast's bucket — without this case neither the
+    # span proration nor the GREATEST(fc_out, co_out) + dep_out netting
+    # split (PROPAGATE_SQL outflow_contribs / propagator.py
+    # _recompute_pi_node) is deterministically exercised by the parity run.
+    # Forecast 70 over a 7-day span → 10/day; the CO of 25 beats the
+    # forecast's 10 in its bucket (CO side of GREATEST) while the other 6
+    # span buckets keep the forecast's 10 (fc side) — both directions of
+    # the netting are hit — and the DependentDemand of 7 must ADD on top of
+    # the netted value (never be maxed), covering the third aggregate.
+    if buckets >= 10:
+        fc_span_start = horizon_start + timedelta(days=2)
+        fc_span_end = fc_span_start + timedelta(days=7)
+        co_bucket = 5
+        for i in range(items):
+            # Periodic forecast — mirrors the ingest contract
+            # (_forecast_time_span): BOTH the anchor time_ref AND the span.
+            dem_ids.append(uuid4())
+            dem_item_ids.append(item_ids[i])
+            dem_qtys.append(Decimal(70))
+            dem_types.append("ForecastDemand")
+            dem_time_refs.append(fc_span_start)
+            dem_span_starts.append(fc_span_start)
+            dem_span_ends.append(fc_span_end)
+            dem_bucket_indices.append(list(range(2, 9)))
+            # Firm CO inside the forecast's span (same bucket as day 5).
+            dem_ids.append(uuid4())
+            dem_item_ids.append(item_ids[i])
+            dem_qtys.append(Decimal(25))
+            dem_types.append("CustomerOrderDemand")
+            dem_time_refs.append(horizon_start + timedelta(days=co_bucket))
+            dem_span_starts.append(None)
+            dem_span_ends.append(None)
+            dem_bucket_indices.append([co_bucket])
+            # Dependent demand in the SAME bucket — additive, never netted.
+            dem_ids.append(uuid4())
+            dem_item_ids.append(item_ids[i])
+            dem_qtys.append(Decimal(7))
+            dem_types.append("DependentDemand")
+            dem_time_refs.append(horizon_start + timedelta(days=co_bucket))
+            dem_span_starts.append(None)
+            dem_span_ends.append(None)
+            dem_bucket_indices.append([co_bucket])
 
     if dem_ids:
         conn.execute(
