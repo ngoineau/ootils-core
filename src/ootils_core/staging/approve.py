@@ -1,4 +1,10 @@
 """
+⚠️  DEPRECATED (ADR-042, 2026-07-18) — reachable only from the unmounted
+`api/routers/staging.py` (see that module's banner). The staging pipeline
+never reached `status='validated'` in production and is superseded by the
+governed daily-run pipeline. Module + `staging.*` tables are kept, not
+dropped; do not wire this back behind a live endpoint.
+
 approve.py — execute the full-reload transform + load (ADR-013 D3 + D4).
 
 Implements `POST /v1/staging/batches/{id}/approve`. Given a batch in

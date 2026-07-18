@@ -16,12 +16,20 @@ All DB operations use psycopg3 sync connections (same as other routers).
 Behaviour contract (all 7 endpoints):
   - Validate ALL rows first (structural + FK). If ANY error → HTTP 422, nothing persisted.
   - dry_run: validation runs (including FK), but no DB writes; returns 200 with status="dry_run".
+
+Authorization (ADR-042 PR-1): every ``POST /v1/ingest/*`` endpoint below
+depends on ``require_direct_ingest`` (not a bare ``require_scope("ingest")``)
+— same scope check, plus the ``OOTILS_DIRECT_INGEST_ENABLED`` kill switch
+that fences direct ingest behind the governed daily-run pipeline for every
+non-legacy caller. See ``require_direct_ingest``'s docstring for the full
+rationale and the ``is_legacy`` exemption it relies on.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import os
 from datetime import date, timedelta
 from typing import Any, Optional
 from uuid import UUID, uuid4
@@ -38,6 +46,85 @@ from ootils_core.engine.graph_wiring import ensure_projection_series, wire_node_
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/ingest", tags=["ingest"])
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _log_safe(value: str) -> str:
+    """Neutralize CR/LF before logging a caller-influenced value — a forged
+    token name must not inject log lines (CodeQL py/log-injection; the
+    explicit replace() chain is the sanitizer shape CodeQL's taint tracking
+    recognizes — keep it that way). Same helper as bom.py's, duplicated
+    rather than imported: each router owns its own log-hygiene helper, no
+    cross-router coupling for a two-line sanitizer."""
+    return str(value).replace("\r", "?").replace("\n", "?")[:200]
+
+
+def _direct_ingest_enabled() -> bool:
+    """Kill switch, DEFAULT ON. Falsy ``OOTILS_DIRECT_INGEST_ENABLED`` fences
+    every direct ``POST /v1/ingest/*`` endpoint for non-legacy callers (see
+    ``require_direct_ingest``) — ADR-042 decision 2.2. Default ON so nothing
+    regresses out of the box (dev/CI/seed keep working unchanged); a governed
+    production deployment sets it to ``0`` once the daily-run pipeline
+    (Dropbox inbox, ``engine/ingest/daily_orchestrator.py``) is the intended
+    entry point."""
+    return os.environ.get("OOTILS_DIRECT_INGEST_ENABLED", "1").strip().lower() in _TRUTHY
+
+
+def require_direct_ingest(
+    principal: Principal = Depends(require_scope("ingest")),
+) -> Principal:
+    """FastAPI dependency for every direct ``POST /v1/ingest/*`` endpoint
+    (ADR-042 PR-1, decision 2.2).
+
+    Composes on top of ``require_scope("ingest")`` — authentication and the
+    ``ingest`` scope check always run first, so a missing/invalid token or a
+    principal without the scope still gets 401/403 exactly as before this
+    dependency existed.
+
+    ADR-042 fences *direct* ingest behind the governed daily-run pipeline
+    (Dropbox inbox -> ``engine/ingest/daily_orchestrator.py``): a real
+    ERP-facing caller is meant to land data through that pipeline, not by
+    POSTing straight at ``/v1/ingest/<entity>``. When
+    ``OOTILS_DIRECT_INGEST_ENABLED`` is falsy, direct ingest answers 503 for
+    every caller EXCEPT the legacy principal (``principal.is_legacy``).
+
+    Why the ``is_legacy`` exemption, specifically: it is the exact mechanism
+    that keeps every in-process, TestClient-based caller working unchanged
+    when the switch is flipped off in a governed deployment. Each of these
+    resolves an ``Authorization: Bearer <OOTILS_API_TOKEN>`` header against
+    the LEGACY single-token branch of auth.py's ``resolve_principal`` ->
+    ``legacy_principal()`` (``auth.py:221``, ``is_legacy=True``, not a
+    minted ``ootk_`` token with a real ``actor_kind``/scope row):
+      * the governed daily-run orchestrator itself
+        (``interfaces/ingest_exec.py:call_api``, called by
+        ``engine/ingest/daily_orchestrator.py`` — the pipeline this fence
+        exists to funnel callers TOWARDS must still be able to write);
+      * ``scripts/ingest_file.py`` (manual/dev TSV drop, same ``call_api``);
+      * seeding/demo TestClient callers (``scripts/demo_e2e.py``,
+        ``ootils_core/demo/phase1.py``) and the test suite's own
+        ``TestClient`` fixtures.
+    A minted per-agent/service token is NOT exempt — only the legacy
+    bootstrap credential is, which is the credential every one of the
+    callers above actually presents. Falsy switch + non-legacy principal ->
+    503 (never a silent 200), with a detail naming the intended path so a
+    caller hitting this in error can self-correct."""
+    if not _direct_ingest_enabled() and not principal.is_legacy:
+        logger.warning(
+            "ingest.direct_disabled name=%s token_id=%s actor_kind=%s",
+            _log_safe(principal.name),
+            principal.token_id,
+            principal.actor_kind,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "direct ingest disabled — use the governed daily-run "
+                "pipeline (Dropbox inbox)"
+            ),
+        )
+    return principal
+
 
 # ─────────────────────────────────────────────────────────────
 # Shared response models
@@ -346,7 +433,7 @@ def ingest_items(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert items by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -527,7 +614,7 @@ def ingest_locations(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert locations by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -817,7 +904,7 @@ def ingest_suppliers(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert suppliers by external_id. All-or-nothing: any validation error → HTTP 422."""
     errors: list[dict] = []
@@ -917,7 +1004,7 @@ def ingest_supplier_items(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert supplier_items by (supplier_id, item_id). All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1056,7 +1143,7 @@ def ingest_on_hand(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert OnHandSupply nodes in the baseline scenario. All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1235,7 +1322,7 @@ def ingest_purchase_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert PurchaseOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     # W-01: resolve FKs first, collect ALL errors before any write
@@ -1424,7 +1511,7 @@ def ingest_forecast_demand(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert ForecastDemand nodes. Keyed by (item, location, bucket_date, time_grain, scenario).
     All-or-nothing: any validation or FK error → HTTP 422.
@@ -1621,7 +1708,7 @@ def ingest_resources(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert resources by external_id. Also maintains a Resource node in the graph."""
     errors: list[dict] = []
@@ -1791,7 +1878,7 @@ def ingest_work_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert WorkOrderSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({wo.item_external_id for wo in body.work_orders})
@@ -1951,7 +2038,7 @@ def ingest_customer_orders(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert CustomerOrderDemand nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({co.item_external_id for co in body.customer_orders})
@@ -2118,7 +2205,7 @@ def ingest_transfers(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert TransferSupply nodes, tracked via external_references. All-or-nothing: any error → HTTP 422."""
     item_ext_ids = list({t.item_external_id for t in body.transfers})
@@ -2438,7 +2525,7 @@ def ingest_planning_params(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """SCD2-transparent upsert of item_planning_params (ADR-014 D3)."""
     from datetime import date
@@ -2726,7 +2813,7 @@ def ingest_routings(
     request: Request,
     response: Response,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Full-reload routings + operations per (item, sequence). ADR-014 D2 unit checks at ingest."""
     # 1. Resolve item + resource external_ids in batch
@@ -2955,7 +3042,7 @@ def _distribution_link_key(row: DistributionLinkRow) -> tuple[str, str, Optional
 def ingest_distribution_links(
     body: IngestDistributionLinksRequest,
     db: DictRowConnection = Depends(get_db),
-    _principal: Principal = Depends(require_scope("ingest")),
+    _principal: Principal = Depends(require_direct_ingest),
 ) -> IngestResponse:
     """Upsert distribution_links by (upstream, downstream, item) natural key. All-or-nothing: any error → HTTP 422."""
     loc_ext_ids = list({

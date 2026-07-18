@@ -1,4 +1,12 @@
 """
+⚠️  DEPRECATED (ADR-042, 2026-07-18) — reachable only from the unmounted
+`api/routers/staging.py` (see that module's banner). The 20% deletion-ratio
+guard below (`DELETION_RATIO_THRESHOLD`) was RELOGGED into the governed
+daily-run pipeline (`interfaces/guards.py`) — that copy is the live one; this
+module stays only because `tests/test_daily_run_guards.py` imports this
+constant directly to assert the two never drift apart. Module + `staging.*`
+tables are kept, not dropped; do not wire this back behind a live endpoint.
+
 diff.py — compute the impact of approving a validated batch (ADR-013 D4).
 
 Returns a `DiffResult` summarising what `POST /approve` would change in
