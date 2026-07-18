@@ -364,7 +364,7 @@ def ingest_bom(
         warnings.append({
             "field": "parent_external_id",
             "external_id": body.parent_external_id,
-            "warning": "obsolete item — BOM structure loaded, planning governed by item status",
+            "warning": "obsolete item — BOM structure loaded as history; planning is NOT auto-gated by item status yet (recommendations stay governed drafts — review them)",
         })
 
     # 2. Resolve all components (obsolete accepted + warned; unknown → 422)
@@ -385,7 +385,7 @@ def ingest_bom(
                 warnings.append({
                     "row": i,
                     "component_external_id": comp.component_external_id,
-                    "warning": "obsolete item — BOM line loaded, planning governed by item status",
+                    "warning": "obsolete item — BOM line loaded as history; planning is NOT auto-gated by item status yet (recommendations stay governed drafts — review them)",
                 })
 
     if errors:
