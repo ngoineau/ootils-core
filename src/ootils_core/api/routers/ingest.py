@@ -2868,3 +2868,223 @@ def ingest_routings(
     ingest_response = _ok(inserted, updated, len(body.routings), results, batch_id=batch_id, dq_status=dq_status)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
+
+
+# ─────────────────────────────────────────────────────────────
+# 13. POST /v1/ingest/distribution-links (DRP lanes, DESC-1 PR-D)
+# ─────────────────────────────────────────────────────────────
+#
+# Referential/on-demand entity (ADR-042 doctrine — "à la demande, jamais
+# dans le run bloquant quotidien"). The `distribution_links` table already
+# exists (migration 029 + 065, transfer_multiple); this is the FIRST
+# writer that is not a script/seed. See
+# docs/contracts/distribution_links/format-distribution-links-tsv.md for
+# the full contract this endpoint implements.
+#
+# Upsert key: (upstream_location_id, downstream_location_id, item_id),
+# item_id NULL = generic lane (all items) — a generic lane and an
+# item-specific lane on the SAME (upstream, downstream) pair coexist (spec
+# §4, consumed by engine/drp/core.py's specificity rule), they are never
+# duplicates of each other. distribution_links carries NO unique
+# constraint on that triplet (unlike supplier_items' UNIQUE(supplier_id,
+# item_id)), so the upsert is SELECT-then-INSERT/UPDATE, same shape as
+# ingest_supplier_items — with `item_id IS NOT DISTINCT FROM %s` for the
+# NULL-safe match a plain `=` cannot express.
+#
+# NO ingest_batches / DQ / idempotency-key plumbing here — deliberately,
+# mirroring bom.py's `ingest_bom` (the OTHER referential/topology
+# endpoint, not a master-data one): `ingest_batches.entity_type` is a
+# named CHECK constraint (migrations 023→035→036, kept in lockstep by
+# convention) that would need widening via a NEW migration to accept
+# 'distribution_links' — out of scope for this chantier (no migration).
+# Widening it is a documented follow-up if/when this endpoint needs the
+# audit-trail / DQ-pipeline treatment the master-data endpoints get.
+#
+# Columns intentionally NOT covered by this endpoint (spec §8 — stay
+# script/seed-managed until an ERP need appears): transit_cost_per_unit,
+# transit_cost_fixed, maximum_shipment_qty, shipment_frequency,
+# shipment_days. An UPDATE here never touches them, so a pre-existing
+# value set out-of-band survives a re-push untouched.
+
+class DistributionLinkRow(BaseModel):
+    upstream_external_id: str = Field(..., description="Upstream site (source of the lane). FK locations.")
+    downstream_external_id: str = Field(..., description="Downstream site (destination of the lane). FK locations, must differ from upstream.")
+    item_external_id: Optional[str] = Field(None, description="Scoping item. Empty/absent = generic lane (item_id NULL, valid for every item on this pair).")
+    transit_lead_time_days: float = Field(..., ge=0, description="Transit lead time in days. Mandatory in this file — the DB column carries a technical default of 7, but a network transit time is structural data; the file contract refuses to inherit it silently.")
+    minimum_shipment_qty: Optional[float] = Field(None, ge=0, description="Minimum quantity per shipment. Default 1 (DB default) when omitted; 0 is a legitimate 'no floor' value.")
+    transfer_multiple: Optional[float] = Field(None, gt=0, description="Logistics shipment multiple (case/pallet/truck), rounded DOWN by the DRP planner (ADR-028). Default 1 (no rounding) when omitted. Must be strictly > 0 — 0 or negative is rejected.")
+    priority: Optional[int] = Field(None, ge=1, description="Sourcing priority when several lanes serve the same downstream site (1 = most preferred). Default 100 when omitted.")
+    active: bool = Field(True, description="Whether this lane is usable by the DRP planner. Not part of the TSV file contract (spec §8) — JSON callers only.")
+
+    @field_validator("upstream_external_id", "downstream_external_id")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("item_external_id")
+    @classmethod
+    def blank_to_none(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            return None
+        return v
+
+
+class IngestDistributionLinksRequest(BaseModel):
+    distribution_links: list[DistributionLinkRow]
+    dry_run: bool = False
+
+
+def _distribution_link_key(row: DistributionLinkRow) -> tuple[str, str, Optional[str]]:
+    return (row.upstream_external_id, row.downstream_external_id, row.item_external_id)
+
+
+@router.post(
+    "/distribution-links",
+    response_model=IngestResponse,
+    summary="Import distribution links (DRP lanes)",
+    description=(
+        "Upsert inter-site replenishment lanes consumed by the DRP planner "
+        "(engine/drp). Upsert key: (upstream_external_id, downstream_external_id, "
+        "item_external_id) — item_external_id empty/absent = generic lane (all "
+        "items), coexists with a specific-item lane on the same pair (see "
+        "docs/contracts/distribution_links/format-distribution-links-tsv.md §4)."
+    ),
+)
+def ingest_distribution_links(
+    body: IngestDistributionLinksRequest,
+    db: DictRowConnection = Depends(get_db),
+    _principal: Principal = Depends(require_scope("ingest")),
+) -> IngestResponse:
+    """Upsert distribution_links by (upstream, downstream, item) natural key. All-or-nothing: any error → HTTP 422."""
+    loc_ext_ids = list({
+        ext_id
+        for row in body.distribution_links
+        for ext_id in (row.upstream_external_id, row.downstream_external_id)
+    })
+    item_ext_ids = list({
+        row.item_external_id for row in body.distribution_links if row.item_external_id
+    })
+
+    loc_map = _batch_existing(db, "locations", "external_id", "location_id", loc_ext_ids)
+    item_map = _batch_existing(db, "items", "external_id", "item_id", item_ext_ids)
+
+    errors: list[dict] = []
+    seen_keys: dict[tuple[str, str, Optional[str]], int] = {}
+    for i, row in enumerate(body.distribution_links):
+        row_errs: list[str] = []
+        if row.upstream_external_id not in loc_map:
+            row_errs.append(f"upstream_external_id '{row.upstream_external_id}' not found in DB")
+        if row.downstream_external_id not in loc_map:
+            row_errs.append(f"downstream_external_id '{row.downstream_external_id}' not found in DB")
+        if row.upstream_external_id == row.downstream_external_id:
+            row_errs.append(
+                f"upstream_external_id and downstream_external_id must differ "
+                f"(both = '{row.upstream_external_id}')"
+            )
+        if row.item_external_id is not None and row.item_external_id not in item_map:
+            row_errs.append(f"item_external_id '{row.item_external_id}' not found in DB")
+
+        key = _distribution_link_key(row)
+        if key in seen_keys:
+            row_errs.append(
+                "duplicate (upstream_external_id, downstream_external_id, "
+                f"item_external_id) triplet within this payload, also at row {seen_keys[key]}"
+            )
+        else:
+            seen_keys[key] = i
+
+        if row_errs:
+            errors.append({
+                "upstream_external_id": row.upstream_external_id,
+                "downstream_external_id": row.downstream_external_id,
+                "item_external_id": row.item_external_id,
+                "row": i,
+                "errors": row_errs,
+            })
+
+    if errors:
+        _raise_422(errors)
+
+    if body.dry_run:
+        return IngestResponse(
+            status="dry_run",
+            summary=IngestSummary(total=len(body.distribution_links), inserted=0, updated=0, errors=0),
+            results=[
+                {
+                    "upstream_external_id": row.upstream_external_id,
+                    "downstream_external_id": row.downstream_external_id,
+                    "item_external_id": row.item_external_id,
+                    "action": "dry_run",
+                }
+                for row in body.distribution_links
+            ],
+        )
+
+    results: list[dict] = []
+    inserted = updated = 0
+
+    for row in body.distribution_links:
+        upstream_id = loc_map[row.upstream_external_id]
+        downstream_id = loc_map[row.downstream_external_id]
+        item_id = item_map[row.item_external_id] if row.item_external_id else None
+        min_qty = row.minimum_shipment_qty if row.minimum_shipment_qty is not None else 1.0
+        multiple = row.transfer_multiple if row.transfer_multiple is not None else 1.0
+        priority = row.priority if row.priority is not None else 100
+
+        existing = db.execute(
+            """
+            SELECT distribution_link_id FROM distribution_links
+            WHERE upstream_location_id = %s
+              AND downstream_location_id = %s
+              AND item_id IS NOT DISTINCT FROM %s
+            """,
+            (upstream_id, downstream_id, item_id),
+        ).fetchone()
+
+        if existing:
+            distribution_link_id = existing["distribution_link_id"]
+            db.execute(
+                """
+                UPDATE distribution_links
+                SET transit_lead_time_days = %s,
+                    minimum_shipment_qty = %s,
+                    transfer_multiple = %s,
+                    priority = %s,
+                    active = %s,
+                    updated_at = now()
+                WHERE distribution_link_id = %s
+                """,
+                (row.transit_lead_time_days, min_qty, multiple, priority, row.active, distribution_link_id),
+            )
+            action = "updated"
+            updated += 1
+        else:
+            distribution_link_id = uuid4()
+            db.execute(
+                """
+                INSERT INTO distribution_links
+                    (distribution_link_id, upstream_location_id, downstream_location_id, item_id,
+                     transit_lead_time_days, minimum_shipment_qty, transfer_multiple, priority, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (distribution_link_id, upstream_id, downstream_id, item_id,
+                 row.transit_lead_time_days, min_qty, multiple, priority, row.active),
+            )
+            action = "inserted"
+            inserted += 1
+
+        results.append({
+            "upstream_external_id": row.upstream_external_id,
+            "downstream_external_id": row.downstream_external_id,
+            "item_external_id": row.item_external_id,
+            "distribution_link_id": str(distribution_link_id),
+            "action": action,
+        })
+
+    logger.info(
+        "ingest.distribution_links total=%d inserted=%d updated=%d",
+        len(body.distribution_links), inserted, updated,
+    )
+    return _ok(inserted, updated, len(body.distribution_links), results)
