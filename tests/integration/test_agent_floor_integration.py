@@ -24,11 +24,9 @@ gate becomes genuinely enforceable:
   7. Generic missing-scope: a {read}-only token cannot even move to REVIEWED.
 
 Plus the #392 security-review fixes:
-  8. Staging L3 gate (defect: staging/approve.py had NO gate at all before
-     #392 — an agent token with the `ingest` scope could apply canonical
-     master-data changes). An agent token WITH `ingest` -> 403 on the human
-     gate; an agent token WITHOUT `ingest` -> 403 on the scope floor first
-     (never reaches the gate); a human token WITH `ingest` clears both floors.
+  8. Staging L3 gate — RETIRED (ADR-042: staging router unmounted, the
+     /v1/staging/* routes are 404 by design; see the section-8 banner below
+     and test_direct_ingest_fence_integration.py for the ingest fence).
   9. The legacy-window gate fallback (defect 9, ``resolve_gate_kind``) proven
      end-to-end: the shared legacy token honours a body-declared actor_kind
      for the HUMAN GATE ONLY (pre-#392 behaviour, preserved on purpose) —
@@ -62,7 +60,6 @@ there are no inter-test collisions. No wall-clock timing assertions anywhere.
 """
 from __future__ import annotations
 
-import io
 import os
 from uuid import UUID, uuid4
 
@@ -250,40 +247,6 @@ def _insert_recommendation(
             (reco_id, agent_name, run_id, scenario_id, uuid4(), action, status),
         )
     return str(reco_id), str(run_id)
-
-
-def _upload_and_validate_batch(api_client, source_system: str) -> str:
-    """Upload a minimal single-row items TSV via the LEGACY (admin) token,
-    then force the batch into 'validated' so it is approve-ready — mirrors
-    tests/integration/test_staging_approve.py::_upload_and_validate.
-
-    Deliberately a PURE INSERT (0% deletion ratio) so approval never needs
-    force=true — the point of these tests is the auth floor, not the diff
-    guard. Uses the LEGACY token for setup (admin holds every scope,
-    including `ingest`) so the fabricated test tokens are reserved for the
-    actual assertions under test.
-    """
-    external_id = f"AGENTFLOOR-{uuid4().hex[:8]}"
-    lines = [
-        "external_id\tname\titem_type\tuom\tstatus",
-        f"{external_id}\tAgent Floor Item\tcomponent\tEA\tactive",
-    ]
-    data = ("\n".join(lines) + "\n").encode("utf-8")
-    resp = api_client.post(
-        "/v1/staging/upload",
-        headers=_bearer(LEGACY_TOKEN),
-        files={"file": ("items.tsv", io.BytesIO(data), "text/plain")},
-        data={"entity_type": "items", "source_system": source_system},
-    )
-    assert resp.status_code == 202, resp.text
-    batch_id = resp.json()["batch_id"]
-    with _db_conn(os.environ["DATABASE_URL"]) as conn:
-        conn.execute(
-            "UPDATE ingest_batches SET status = 'validated', dq_status = 'validated' "
-            "WHERE batch_id = %s",
-            (batch_id,),
-        )
-    return batch_id
 
 
 # ---------------------------------------------------------------------------
@@ -564,85 +527,13 @@ class TestGenericMissingScope:
 
 
 # ===========================================================================
-# 8. Staging L3 gate (#392 security-review — staging/approve.py had NO gate
-#    at all before #392)
+# 8. Staging L3 gate — RETIRED (ADR-042, 2026-07-18). The staging router is
+#    UNMOUNTED (api/app.py no longer includes staging.router), so the
+#    /v1/staging/* routes these tests drove are 404 by design. The gate
+#    logic itself (approve_batch's human gate) lives on in the kept module
+#    src/ootils_core/staging/approve.py; the direct-ingest auth surface is
+#    now covered by test_direct_ingest_fence_integration.py.
 # ===========================================================================
-
-
-class TestStagingApproveGate:
-    def test_agent_with_ingest_scope_blocked_by_human_gate(self, api_client, tracker):
-        """An agent token holding `ingest` clears the scope floor -> reaches
-        the NEW human gate added by the security review -> 403."""
-        batch_id = _upload_and_validate_batch(
-            api_client, source_system=f"AGENTFLOOR-GATE-{uuid4().hex[:6]}"
-        )
-        clear, _ = tracker.token(actor_kind="agent", scopes=["ingest"])
-
-        resp = api_client.post(
-            f"/v1/staging/batches/{batch_id}/approve",
-            headers=_bearer(clear),
-            json={"approved_by": "shortage_watcher"},
-        )
-        assert resp.status_code == 403, resp.text
-        assert "human" in resp.json()["detail"].lower()
-
-        # Nothing was committed to canonical: the batch is still 'validated'.
-        with _db_conn(os.environ["DATABASE_URL"]) as conn:
-            row = conn.execute(
-                "SELECT status FROM ingest_batches WHERE batch_id = %s",
-                (batch_id,),
-            ).fetchone()
-        assert row["status"] == "validated"
-
-    @pytest.mark.parametrize("endpoint_suffix", ["approve", "reject", "diff"])
-    def test_agent_without_ingest_scope_blocked_by_scope_floor(
-        self, api_client, tracker, endpoint_suffix
-    ):
-        """Without `ingest` at all, the SCOPE floor fires first — the request
-        never even reaches the (approve-only) human gate."""
-        batch_id = _upload_and_validate_batch(
-            api_client, source_system=f"AGENTFLOOR-NOSCOPE-{uuid4().hex[:6]}"
-        )
-        clear, _ = tracker.token(actor_kind="agent", scopes=["read"])
-
-        if endpoint_suffix == "diff":
-            resp = api_client.get(
-                f"/v1/staging/batches/{batch_id}/diff", headers=_bearer(clear)
-            )
-        elif endpoint_suffix == "approve":
-            resp = api_client.post(
-                f"/v1/staging/batches/{batch_id}/approve",
-                headers=_bearer(clear),
-                json={"approved_by": "shortage_watcher"},
-            )
-        else:  # reject
-            resp = api_client.post(
-                f"/v1/staging/batches/{batch_id}/reject",
-                headers=_bearer(clear),
-                json={"rejected_by": "shortage_watcher", "reason": "test"},
-            )
-        assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == "missing scope 'ingest'"
-
-    def test_human_with_ingest_scope_clears_both_floors(self, api_client, tracker):
-        """A human token holding `ingest` passes the scope floor AND the human
-        gate — the request reaches the real approval logic. Assert it is NOT
-        an auth/gate 403 (the batch is a clean pure-insert, so this resolves
-        as 200; asserting 'not 403' first keeps the test robust to any
-        unrelated business-logic wrinkle in approve_batch)."""
-        batch_id = _upload_and_validate_batch(
-            api_client, source_system=f"AGENTFLOOR-HUMANOK-{uuid4().hex[:6]}"
-        )
-        clear, _ = tracker.token(actor_kind="human", scopes=["ingest"])
-
-        resp = api_client.post(
-            f"/v1/staging/batches/{batch_id}/approve",
-            headers=_bearer(clear),
-            json={"approved_by": "ngoineau"},
-        )
-        assert resp.status_code != 403, resp.text
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["counts"]["rows_inserted"] == 1
 
 
 # ===========================================================================

@@ -1,4 +1,31 @@
 """
+⚠️  DEPRECATED (ADR-042, 2026-07-18) — this router is UNMOUNTED, not deleted.
+
+ADR-042 decision 2.1 "enterre" the staging pipeline: `approve_batch`
+(`staging/approve.py`) requires `status == 'validated'`, a status nothing in
+the repo ever drove automatically outside a human clicking
+`POST /v1/staging/batches/{id}/approve` after `POST /v1/staging/upload` — in
+practice this path was never wired into production. It is superseded by the
+governed daily-run pipeline (Dropbox inbox ->
+`engine/ingest/daily_orchestrator.py`, ADR-042 §3). `staging.router` is no
+longer imported/included in `api/app.py` (PR-1) — every route below is
+unreachable in the running app.
+
+Kept intentionally, not dropped:
+  * the module and the `staging.*` tables stay (ADR-042 decision 2.1 — no
+    data/schema deletion);
+  * the two value-bearing guards this pipeline introduced were RELOGGED into
+    the new pipeline rather than lost — the 20% deletion-ratio guard
+    (`staging/diff.py`'s `DELETION_RATIO_THRESHOLD`) and the rejection audit
+    shape (`staging/reject.py`'s `rejected_by`/`rejection_reason`);
+  * `staging.parser`/`staging.diff` are still imported directly (not via
+    HTTP) by tests kept in the suite (`tests/test_staging_parser.py`,
+    `tests/test_daily_run_guards.py`).
+
+Do not re-mount this router — see docs/ADR-042-interface-doctrine.md §2
+point 1 ("Refus explicites en V1": "réanimation du pipeline staging servi en
+production").
+
 POST /v1/staging/* — file-upload entry point for the staging pipeline.
 
 This router is the HTTP surface of ADR-013. It orchestrates the

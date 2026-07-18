@@ -1,4 +1,11 @@
 """
+⚠️  DEPRECATED (ADR-042, 2026-07-18) — reachable only from the unmounted
+`api/routers/staging.py` (see that module's banner). The rejection audit
+shape below (`rejected_by`/`rejection_reason`) is the pattern the governed
+daily-run pipeline's own audit trail follows, but this module itself is not
+called from any live path. Module + `staging.*` tables are kept, not
+dropped; do not wire this back behind a live endpoint.
+
 reject.py — close out a batch as 'rejected' without writing to canonical.
 
 POST /v1/staging/batches/{id}/reject is the operator's way to decline

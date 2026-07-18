@@ -4,6 +4,17 @@ bulk_ingest.py — High-performance bulk loader for Ootils canonical V1 TSV.
 Bypasses the API layer and uses PostgreSQL COPY + INSERT ... ON CONFLICT DO UPDATE
 for raw speed. Suitable for INITIAL pilote loading and bulk refreshes.
 
+ADR-042 §2.3 confirms this role explicitly: an operator BOOTSTRAP tool,
+reserved for the initial pilot load and bulk refreshes, deliberately outside
+the governed daily-run pipeline (Dropbox inbox ->
+`engine/ingest/daily_orchestrator.py`). It bypasses the API entirely (no
+`require_direct_ingest`/`OOTILS_DIRECT_INGEST_ENABLED` gate applies — there is
+no HTTP call to gate), so it is unaffected by that kill switch and stays
+usable regardless of its setting; this is by design, not an oversight — see
+ADR-042 decision 2.3 ("scripts/bulk_ingest.py -> réservé au bootstrap
+opérateur. Rôle inchangé — chargement initial massif, hors chemin quotidien
+gouverné.").
+
 For incremental / agent-driven ingestion, use scripts/ingest_file.py (which goes
 through the API with DQ, idempotency, batch tracking).
 

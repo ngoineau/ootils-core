@@ -1,4 +1,12 @@
 """
+⚠️  DEPRECATED (ADR-042, 2026-07-18) — the staging PIPELINE is dead
+(`api/routers/staging.py` is unmounted, see its banner; the pipeline never
+reached `status='validated'` in production and is superseded by the governed
+daily-run pipeline). This PARSER remains directly imported (not via HTTP) by
+`tests/test_staging_parser.py` and `tests/test_ingest_status_lifecycle.py` to
+exercise the TSV/CSV/XLSX/JSON parsing logic in isolation. Module + tests are
+kept, not dropped; do not wire this back behind a live endpoint.
+
 parser.py — unified file parser for the staging pipeline (ADR-013 D1).
 
 Accepts file bytes + an optional format hint, returns a `ParseResult`

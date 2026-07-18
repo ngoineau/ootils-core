@@ -35,7 +35,7 @@ except ImportError:
 from ootils_core.api import metrics
 from ootils_core.api.auth import Principal, _expected_token, require_scope
 from ootils_core.api.dependencies import _get_ootils_db, get_db
-from ootils_core.api.routers import audit, bom, calc, calendars, daily_runs, demand, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, maintenance, me, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, staging, stream, tokens, ui
+from ootils_core.api.routers import audit, bom, calc, calendars, daily_runs, demand, demo, dq, drp, events, explain, forecasting, ghosts, graph, ingest, issues, maintenance, me, mrp, mrp_apics, outcomes, param_overrides, planning_params, projection, pyramide, rccp, recommendations, scenarios, simulate, snapshots, stream, tokens, ui
 from ootils_core.api.routers.graph import nodes_router
 from ootils_core.mps import router as mps_router
 from ootils_core.atp import atp_router
@@ -423,7 +423,11 @@ def create_app() -> FastAPI:
     application.include_router(graph.router)
     application.include_router(nodes_router)
     application.include_router(ingest.router)
-    application.include_router(staging.router)
+    # staging.router deliberately NOT mounted — ADR-042 decision 2.1 "enterre"
+    # the staging pipeline (never reached status='validated' in production;
+    # superseded by the governed daily-run pipeline). The module and its
+    # tables are kept, not deleted — see the deprecation banner at the top of
+    # api/routers/staging.py and src/ootils_core/staging/*.py.
     application.include_router(dq.router)
     application.include_router(bom.router)
     application.include_router(calendars.router)
