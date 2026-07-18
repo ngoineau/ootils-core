@@ -158,10 +158,17 @@ PURGE_WHITELIST: tuple[str, ...] = (
     "edges",
     "ghost_nodes",
     "events",
+    # DESC-1 (083): a fork's descent ledger references its fork nodes with
+    # ON DELETE RESTRICT — it MUST be swept before `nodes` or the purge
+    # fails on those FKs. Baseline rows have scenario_id NULL, untouched.
+    "demand_descent_lines",
     "nodes",
     "projection_series",
     "calc_runs",
     "scenario_planning_overrides",
+    # DESC-1 (083): a fork's alternative split percentages are simulation
+    # data — reclaimed with the fork, same family as the planning overlay.
+    "demand_split_pct",
 )
 
 # Tables carrying scenario_id (directly, or — for causal_steps/explanations —
