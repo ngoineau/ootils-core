@@ -318,6 +318,41 @@ def get_active_contract(conn: DictRowConnection, feed_key: str) -> FeedContract 
     return FeedContract(**row)
 
 
+def list_known_feed_keys(conn: DictRowConnection) -> set[str]:
+    """Every ``feed_key`` ever registered in ``feed_contracts`` — active OR
+    retired (``SELECT DISTINCT``, no ``WHERE active``). Distinguishes a
+    REGISTRY-KNOWN feed whose contract has since been deactivated (must be
+    refused explicitly — see ``engine.ingest.daily_orchestrator``'s
+    "contract deactivated" quarantine) from a feed_key the registry has
+    NEVER heard of at all (a referential/on-demand entity, or a genuinely
+    undeclared feed — still loaded ungoverned if the run is not escalated).
+    Writes nothing. Empty set is a valid, honest result (no feed ever
+    registered)."""
+    cur = conn.cursor(row_factory=dict_row)
+    rows = cur.execute("SELECT DISTINCT feed_key FROM feed_contracts").fetchall()
+    return {row["feed_key"] for row in rows}
+
+
+def list_active_contracts(conn: DictRowConnection) -> list[FeedContract]:
+    """Every currently active ``feed_contracts`` row, ordered by ``feed_key``
+    — the full "expected feeds" set a daily run cross-references its inbox
+    scan against (ADR-042 decision 3 step 2: "scan de l'inbox croisé avec
+    get_active_contract() ... pour chaque feed_key attendu"), consumed by
+    ``engine.ingest.daily_orchestrator``. Writes nothing. Empty list is a
+    valid, honest result (no feed registered yet) — callers must not treat
+    it as an error on its own."""
+    cur = conn.cursor(row_factory=dict_row)
+    rows = cur.execute(
+        "SELECT feed_contract_id, feed_key, version, entity_type, "
+        "source_system, format, key_columns, mandatory_columns, load_mode, "
+        "cadence, arrival_window_minutes, owner, criticality, "
+        "volume_guard_min_rows, volume_guard_max_pct_delta, depends_on, "
+        "active, created_at, updated_at "
+        "FROM feed_contracts WHERE active ORDER BY feed_key"
+    ).fetchall()
+    return [FeedContract(**row) for row in rows]
+
+
 def upsert_contract(conn: DictRowConnection, spec: FeedContractSpec) -> LoadOutcome:
     """Idempotently register ``spec`` as the (possibly new) active version of
     its ``feed_key``.
