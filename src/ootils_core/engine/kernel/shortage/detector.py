@@ -291,22 +291,57 @@ class ShortageDetector:
         db,
     ) -> int:
         """
-        Mark as 'resolved' all active shortages for this scenario that were
-        NOT generated (or refreshed) in the current calc_run_id.
+        Mark as 'resolved' the active shortages that BELONG to a series this
+        run recalculated but were NOT re-detected in it — i.e. the shortage
+        cleared. Resolution is scoped to the series ``calc_run_id`` actually
+        recomputed, never the whole scenario blindly.
+
+        Scoping (chantier C3 « moteur d'exception », 2026-07-19): a shortage is
+        retired ONLY when its ProjectedInventory node carries
+        ``last_calc_run_id = calc_run_id`` — the uniform stamp BOTH engines write
+        on every PI they recompute (Python: ``GraphStore.update_pi_result`` /
+        ``update_pi_results``, store.py:423/475; SQL: ``PROPAGATE_SQL``,
+        propagator_sql.py:233). This is the STRICT generalisation of the
+        historical full-run behaviour, and the prerequisite for the incremental
+        daily run:
+
+          * FULL recompute — every active PI carries the current run, so the
+            in-scope set is the whole scenario: byte-for-byte the pre-C3
+            behaviour (the ``calc_run_id != %s`` clause alone decided it, and
+            the new EXISTS is universally true).
+          * PARTIAL / incremental run — only the recomputed series are in scope;
+            a shortage on a series this run never touched keeps an earlier
+            ``last_calc_run_id`` and is LEFT UNTOUCHED instead of being wrongly
+            resolved. This also neutralises, BY CONSTRUCTION, the corruption
+            path where propagation is skipped entirely (an event with no trigger
+            node — ``POST /v1/calc/run`` with ``full_recompute=false``): zero PI
+            gets stamped, so zero shortage is resolved, rather than every active
+            shortage in the scenario being silently resolved and none
+            re-detected.
+
+        ``ShortageDetector`` stays the exclusive writer of the ``shortages``
+        table and its resolution lifecycle (ADR-021).
 
         Returns the count of rows updated.
         """
         now = self._clock.now()
         result = db.execute(
             """
-            UPDATE shortages
+            UPDATE shortages AS s
             SET status     = 'resolved',
                 updated_at = %s
-            WHERE scenario_id  = %s
-              AND status        = 'active'
-              AND calc_run_id  != %s
+            WHERE s.scenario_id  = %s
+              AND s.status        = 'active'
+              AND s.calc_run_id  != %s
+              AND EXISTS (
+                  SELECT 1
+                  FROM nodes n
+                  WHERE n.node_id          = s.pi_node_id
+                    AND n.scenario_id      = s.scenario_id
+                    AND n.last_calc_run_id = %s
+              )
             """,
-            (now, scenario_id, calc_run_id),
+            (now, scenario_id, calc_run_id, calc_run_id),
         )
         count = result.rowcount if hasattr(result, "rowcount") else 0
         logger.info(
