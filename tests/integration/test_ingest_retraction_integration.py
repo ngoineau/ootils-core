@@ -772,6 +772,18 @@ MIGRATION_080 = (
 
 
 class TestMigration080Backfill:
+    @pytest.mark.invariants_exempt(
+        reason="2026-07-18 (chantier moteur-d'exception CHANTIER 1): this test "
+        "DELIBERATELY seeds a pre-fix ProjectedInventory series with ZERO "
+        "feeds_forward edges (what every ingest-created series looked like "
+        "before the _ensure_projection_series fix) to prove the migration-080 "
+        "backfill. That pre-fix shape is exactly what the invariant_violations "
+        "net (migration 087) exists to flag as a broken chain, so the seed is "
+        "exempted at its source. The seed rides the function-scoped `conn` "
+        "(rolled back, all-zero balanced buckets), so no committed residue is "
+        "expected today — the marker documents the intentional pre-fix shape "
+        "and future-proofs the net against a variant that commits it."
+    )
     def test_backfill_exact_then_reexecution_is_noop(self, migrated_db, conn):
         """Backfill + defensive-idempotence contract of migration 080 (same
         NOT EXISTS guard as 019). Triple execution overall, mirroring

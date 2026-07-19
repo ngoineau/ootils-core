@@ -62,7 +62,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest ~= 9.0", "pytest-cov ~= 7.1"]
+# hypothesis powers the property-based exactness net (moteur-c1 C1): the pure
+# calculation cores (descent shares, DRP fair-share, MRP core, reschedule
+# dampening, projection kernel) are checked against invariants, not just fixed
+# goldens. Deterministic in CI via the 'ci' Hypothesis profile (derandomize),
+# registered in tests/conftest_hypothesis.py.
+dev = ["pytest ~= 9.0", "pytest-cov ~= 7.1", "hypothesis ~= 6.0"]
 forecast = [
     "statsforecast ~= 2.0",
     "mlforecast ~= 1.0",
@@ -109,6 +114,7 @@ markers = [
     "requires_db: marks tests that require a live DB connection",
     "live_db: tests that need a real Postgres + ootils-engine binary (engine_service battery)",
     "foundation: tests that REQUIRE the [foundation] extra + downloaded Chronos weights (dedicated CI job only; auto-skip when chronos is not importable)",
+    "invariants_exempt: a test that DELIBERATELY commits a pre-fix / invariant-violating state (chantier moteur-d'exception CHANTIER 1); the autouse invariant_violations net (tests/integration/conftest.py) downgrades its module's teardown assertion to a logged, dated exemption instead of a hard fail. Requires a reason=... kwarg.",
 ]
 
 [tool.coverage.run]
