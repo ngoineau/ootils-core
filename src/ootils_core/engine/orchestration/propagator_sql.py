@@ -250,8 +250,10 @@ SHORTAGES_SQL = """
 -- roll-up), then 1 (the Python detector's _UNIT_COST_PROXY fallback for
 -- unpriced items).
 -- shortage_date  = COALESCE(time_span_start, time_ref)
--- Restricted to the dirty subgraph for this calc_run; clean PIs' shortages
--- are left to RESOLVE_STALE_SQL below.
+-- Restricted to the dirty subgraph for this calc_run; shortages on PIs this
+-- run did NOT recompute are retired by ShortageDetector.resolve_stale at
+-- end-of-run (engine/kernel/shortage/detector.py) — the single live
+-- stale-resolution path, scoped by nodes.last_calc_run_id.
 -- safety_stock_qty (chantier #347 PR3, ADR-025): resolved through
 -- resolved_field_lateral_sql() instead of a raw item_planning_params
 -- LATERAL, so a scenario-scoped safety_stock_qty override (set via
@@ -405,13 +407,12 @@ ON CONFLICT (pi_node_id, calc_run_id) DO UPDATE SET
 """.format(ipp_ss_lateral=resolved_field_lateral_sql("safety_stock_qty", "ipp", "ipp_ss"))
 
 
-RESOLVE_STALE_SQL = """
-UPDATE shortages
-SET status = 'resolved', updated_at = now()
-WHERE scenario_id = %(scenario_id)s
-  AND status = 'active'
-  AND calc_run_id != %(calc_run_id)s
-"""
+# NOTE: the end-of-run stale-shortage resolution is NOT done in SQL here — the
+# single live path is ShortageDetector.resolve_stale, called from
+# PropagationEngine._finish_run for every flavour (sql/python/rust). A former
+# RESOLVE_STALE_SQL constant lived here but was dead (never executed); removed
+# in chantier C3 (2026-07-19) when resolve_stale gained last_calc_run_id
+# scoping, which a scenario-wide SQL UPDATE could not express.
 
 
 CLEAR_DIRTY_SQL = """
