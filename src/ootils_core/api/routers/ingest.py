@@ -33,7 +33,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from uuid import UUID, uuid4
 
 from psycopg import sql
@@ -546,9 +546,14 @@ def _emit_field_change(
             field_changed=fd.column, old_quantity=old_val, new_quantity=new_val,
         )
     elif fd.kind == _KIND_DATE:
+        # By construction (_changed_fields routes only _KIND_DATE columns
+        # here), old/new are date | None — cast narrows for mypy, no runtime
+        # coercion that could mask a wrong kind.
         _emit_ingest_event(
             db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
-            field_changed=fd.column, old_date=old_val, new_date=new_val,
+            field_changed=fd.column,
+            old_date=cast(Optional[date], old_val),
+            new_date=cast(Optional[date], new_val),
         )
     elif fd.kind == _KIND_BOOL:
         _emit_ingest_event(
@@ -559,7 +564,9 @@ def _emit_field_change(
     else:  # _KIND_TEXT
         _emit_ingest_event(
             db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
-            field_changed=fd.column, old_text=old_val, new_text=new_val,
+            field_changed=fd.column,
+            old_text=cast(Optional[str], old_val),
+            new_text=cast(Optional[str], new_val),
         )
 
 
