@@ -320,6 +320,15 @@ class TestScenarioFkRestrict:
 
 
 class TestMigration083Idempotent:
+    @pytest.mark.invariants_exempt(
+        reason="2026-07-18 (chantier moteur-d'exception CHANTIER 1): the "
+        "migration-083 idempotence proof COMMITS a lone demand_split_pct row "
+        "(pct=0.62500000) with no soft-delete flag and leaves it inert on the "
+        "obsoleted PREFIX item (see the finalizer note). A single share never "
+        "forms a Σ=1 split, so the invariant_violations net's "
+        "'demand_split_pct_sums_to_one' law (migration 087) legitimately "
+        "fires — this row is idempotence scaffolding, not a real plan."
+    )
     def test_triple_execution_preserves_schema_and_values(
         self, migrated_db, conn, request
     ):
