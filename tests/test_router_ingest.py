@@ -1015,7 +1015,7 @@ def test_ingest_on_hand_update_existing():
             return FakeCursor(fetchall_value=[{"external_id": "DC-1", "location_id": loc_id}])
         if "SELECT series_id FROM projection_series" in sql:
             return FakeCursor(fetchone_value={"series_id": series_id})
-        if "SELECT node_id FROM nodes" in sql and "OnHandSupply" in sql:
+        if "FROM nodes" in sql and "OnHandSupply" in sql:
             return FakeCursor(fetchone_value={"node_id": existing_node_id})
         if "SELECT node_id FROM nodes" in sql and "ProjectedInventory" in sql:
             return FakeCursor(fetchone_value=None)
@@ -1348,7 +1348,7 @@ def test_ingest_forecast_demand_update_existing():
             return FakeCursor(fetchall_value=[{"external_id": "DC-1", "location_id": loc_id}])
         if "SELECT series_id FROM projection_series" in sql:
             return FakeCursor(fetchone_value={"series_id": uuid4()})
-        if "SELECT node_id FROM nodes" in sql and "ForecastDemand" in sql:
+        if "FROM nodes" in sql and "ForecastDemand" in sql:
             return FakeCursor(fetchone_value={"node_id": existing_node_id})
         if "SELECT node_id FROM nodes" in sql and "ProjectedInventory" in sql:
             return FakeCursor(fetchone_value=None)

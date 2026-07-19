@@ -271,7 +271,32 @@ _COLUMNS: tuple[str, ...] = (
     "status",
     "confidence",
     "evidence",
+    "anchor_date",
+    "stream_seq_hwm",
 )
+
+
+def _current_stream_seq_hwm(conn: psycopg.Connection[Any], scenario: str) -> int:
+    """Current MAX(events.stream_seq) for a scenario — the decision-basis HWM
+    stamp (C2 §3).
+
+    Re-declared here (a one-line keyset read) rather than importing
+    scripts/agent_subscribe.current_max_seq: the recommendation layer sits ABOVE
+    the kernel and must not import upward from the watcher scripts — the same
+    "declare the invariant locally, never import upward" posture already applied
+    to _RECO_NAMESPACE above. The transfer watcher has no --subscribe mode, so
+    the HWM is simply the live max at emit time. Returns 0 on an empty stream
+    (COALESCE), never NULL. stream_seq is an opaque high-water mark (migration
+    063), compared with > only. Pinned to tuple_row so the positional read is
+    correct regardless of the parent connection's row_factory (same reason as
+    _resolve_coord_maps below).
+    """
+    cur = conn.cursor(row_factory=tuple_row)
+    row = cur.execute(
+        "SELECT COALESCE(MAX(stream_seq), 0) FROM events WHERE scenario_id = %s",
+        (scenario,),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def _resolve_coord_maps(
@@ -430,6 +455,13 @@ def emit_transfer_recommendations(
 
     item_id_by_coord, item_ext_by_coord, loc_id_by_coord = _resolve_coord_maps(conn)
 
+    # Decision-basis stamps (C2 §3) carried on every reco: anchor_date =
+    # data.horizon_start (the DRP as-of anchor) and stream_seq_hwm = the current
+    # events high-water mark for this scenario. Computed once per run; the
+    # transfer watcher has no --subscribe mode, so this is the live max at emit.
+    anchor_date = data.horizon_start
+    stream_seq_hwm = _current_stream_seq_hwm(conn, scenario)
+
     rows: list[tuple[Any, ...]] = []
     unresolved = 0
     for sig in signals:
@@ -460,6 +492,7 @@ def emit_transfer_recommendations(
             reco.deficit_qty, reco.recommended_qty, reco.proposed_date,
             reco.action, reco.decision_level, reco.source_location_id,
             reco.dest_location_id, "DRAFT", reco.confidence, Jsonb(reco.evidence),
+            anchor_date, stream_seq_hwm,
         ))
 
     inserted, affirmed = _upsert(conn, rows)

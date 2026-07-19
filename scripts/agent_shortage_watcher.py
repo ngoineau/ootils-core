@@ -117,6 +117,16 @@ def main(argv=None) -> int:
         short = core.first_shortage(d, gross)   # for the true deficit-to-safety per item
         today = d.horizon_start
 
+        # Decision-basis stamps (C2 §3), carried on every reco below: anchor_date
+        # = today (d.horizon_start, the plan's as-of date) and stream_seq_hwm =
+        # the events high-water mark this run decided against — the drained
+        # --subscribe cursor when present, else the current MAX(stream_seq) for
+        # baseline (agent_subscribe.current_max_seq, the single HWM source).
+        stream_seq_hwm = (
+            seed_cursor if seed_cursor is not None
+            else agent_subscribe.current_max_seq(conn, core.BASELINE)
+        )
+
         # FG procurement signal sourced from the TIME-PHASED engine (nets to safety,
         # lot-sized, lead-time offset) — not a single-bucket deficit, so the order is
         # correctly sized for the coverage the engine planned. Scope: items carrying
@@ -194,7 +204,8 @@ def main(argv=None) -> int:
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
                              c["need_date"], c["deficit"], c["qty"], c["cost"], c["ccy"], c["sid"], c["sext"],
                              c["lt"], c["runway"], c["margin"],
-                             action, decision_level(action), "DRAFT", conf, Jsonb(evidence)))
+                             action, decision_level(action), "DRAFT", conf, Jsonb(evidence),
+                             today, stream_seq_hwm))
                 display.append({"ext": d.names.get(item, str(item)[:8]), "fsd": c["need_date"], "qty": c["qty"],
                                 "cost": c["cost"], "ccy": c["ccy"], "action": action, "conf": conf,
                                 "margin": c["margin"]})
@@ -209,7 +220,8 @@ def main(argv=None) -> int:
                 ["agent_name", "agent_run_id", "scenario_id", "item_id", "item_external_id",
                  "shortage_date", "deficit_qty", "recommended_qty", "estimated_cost", "currency",
                  "supplier_id", "supplier_external_id", "lead_time_days", "runway_days", "margin_days",
-                 "action", "decision_level", "status", "confidence", "evidence"],
+                 "action", "decision_level", "status", "confidence", "evidence",
+                 "anchor_date", "stream_seq_hwm"],
                 recs,
             )
             metrics = {"recommendations": len(recs), "superseded_prior_drafts": superseded,

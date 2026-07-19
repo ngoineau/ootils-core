@@ -56,6 +56,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 import mrp_core as core
+import agent_subscribe
 from agent_governance import decision_level, governed_run
 
 from ootils_core.engine.recommendation.reschedule import (
@@ -90,6 +91,8 @@ _COLUMNS = (
     "status",
     "confidence",
     "evidence",
+    "anchor_date",
+    "stream_seq_hwm",
 )
 
 
@@ -191,6 +194,14 @@ def main(argv=None) -> int:
         gross = core.consume_demand(d)
         signals = core.reschedule_signals(d, gross)
 
+        # Decision-basis stamps (C2 §3) carried on every reco: anchor_date =
+        # d.horizon_start (the plan's as-of date) and stream_seq_hwm = the events
+        # high-water mark this run decided against. No --subscribe mode here, so
+        # it is the current MAX(stream_seq) for this scenario
+        # (agent_subscribe.current_max_seq, the single fleet-wide HWM source).
+        anchor_date = d.horizon_start
+        stream_seq_hwm = agent_subscribe.current_max_seq(conn, scenario)
+
         rows: list[tuple] = []
         display: list[dict] = []
         by_action: defaultdict[str, int] = defaultdict(int)
@@ -221,6 +232,7 @@ def main(argv=None) -> int:
                     reco.decision_level, reco.target_node_id,
                     reco.current_receipt_date, reco.proposed_date, "DRAFT",
                     reco.confidence, Jsonb(reco.evidence),
+                    anchor_date, stream_seq_hwm,
                 ))
                 recos_by_id[reco.recommendation_id] = reco
                 by_action[action] += 1
