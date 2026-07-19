@@ -102,9 +102,14 @@ def trigger_calc_run(
             message=f"Full recompute: {calc_run.nodes_recalculated or 0} nodes recalculated",
         )
     else:
-        # Process all pending events
-        calc_run = engine.process_event(
-            event_id=trigger_event_id,
+        # Coalesce + propagate ALL pending events in ONE run (C3-PR2). The old
+        # path handed the synthetic no-trigger `calc_triggered` event above to
+        # process_event, which saw a NULL trigger_node_id and SKIPPED
+        # propagation. process_pending instead coalesces every unprocessed event
+        # (including that synthetic one, which contributes no series) and dirties
+        # the WHOLE series of each real pending event's trigger node — ONE lock,
+        # ONE calc_run, ONE ANALYZE. full_recompute=True keeps its inline path.
+        calc_run = engine.process_pending(
             scenario_id=scenario_id,
             db=db,
         )
