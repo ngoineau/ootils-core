@@ -55,7 +55,7 @@ def test_calc_run_incremental_success():
     fake_calc_run.nodes_unchanged = 1
 
     fake_engine = MagicMock()
-    fake_engine.process_event.return_value = fake_calc_run
+    fake_engine.process_pending.return_value = fake_calc_run
 
     with patch(
         "ootils_core.api.routers.events._build_propagation_engine",
@@ -72,12 +72,12 @@ def test_calc_run_incremental_success():
 
 
 def test_calc_run_incremental_locked_returns_locked_status():
-    """engine.process_event returns None → locked."""
+    """engine.process_pending returns None → locked."""
     db = _make_db_mock()
     db.execute.return_value = MagicMock()
 
     fake_engine = MagicMock()
-    fake_engine.process_event.return_value = None
+    fake_engine.process_pending.return_value = None
 
     with patch(
         "ootils_core.api.routers.events._build_propagation_engine",
@@ -211,7 +211,7 @@ def test_calc_run_default_body_is_incremental():
     fake_calc_run.nodes_unchanged = 0
 
     fake_engine = MagicMock()
-    fake_engine.process_event.return_value = fake_calc_run
+    fake_engine.process_pending.return_value = fake_calc_run
 
     with patch(
         "ootils_core.api.routers.events._build_propagation_engine",

@@ -36,6 +36,75 @@ logger = logging.getLogger(__name__)
 # audit finding F-057 — new code imports it, never re-declares the UUID).
 
 
+# ---------------------------------------------------------------------------
+# Batch dirty-set seeding for process_pending (chantier C3-PR2).
+#
+# Kept as module-level SQL constants (same convention as propagator_sql.py) so
+# the WHOLE-SERIES dirtying rule is readable in one place. process_pending
+# recomputes ENTIRE SERIES, not the targeted downstream subgraph process_event
+# expands. A "series" is one (item_id, location_id) pair's active
+# ProjectedInventory chain — projection_series carries
+# UNIQUE(item_id, location_id, scenario_id) (migration 002), so a pair maps to
+# exactly one series per scenario. We dirty EVERY active PI bucket of each
+# affected series, from bucket_sequence 0 up, for three reasons:
+#   * PROPAGATE_SQL (propagator_sql.py) seeds each series from its LOWEST dirty
+#     bucket and chains forward via a window function — it ASSUMES a series's
+#     dirty buckets are contiguous from that seed. A whole series is trivially
+#     contiguous.
+#   * the pi_chain_continuity invariant (migration 087 (b)) requires
+#     opening(bucket n) == closing(bucket n-1) across feeds_forward edges; a
+#     partial-series recompute could leave a stale boundary bucket and trip the
+#     net at teardown. Recomputing the whole series can never break the chain.
+#   * it makes an incremental (item, location)-scoped run BIT-IDENTICAL, per
+#     series, to a --full run restricted to those series — the coherence PR1
+#     (#489)'s last_calc_run_id-scoped resolve_stale relies on.
+#
+# Set-based: ONE `INSERT … SELECT` instead of loading node_ids into Python and
+# round-tripping them back through DirtyFlagManager.flush_to_postgres (the
+# dirty set is the whole graph on --full). Because we bypass flush_to_postgres,
+# the mandatory ANALYZE dirty_nodes (#455) is run by process_pending itself
+# right after — see the method. `now()` is server-side (marked_at is
+# bookkeeping only, never read by the deterministic projection).
+# ---------------------------------------------------------------------------
+
+# full=False: dirty every active PI of each (item_id, location_id) series
+# touched by a pending event's trigger node. `(pi.item_id, pi.location_id) IN
+# (SELECT DISTINCT …)` is a row-constructor subquery match; the inner
+# `IS NOT NULL` guards keep NULL trigger dimensions (e.g. a no-trigger
+# calc_triggered / ingestion_complete event) out of the IN-list so they never
+# accidentally match a NULL-dimensioned PI.
+_DIRTY_PENDING_SERIES_SQL = """
+INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
+SELECT %(calc_run_id)s, pi.node_id, pi.scenario_id, now()
+FROM nodes pi
+WHERE pi.scenario_id = %(scenario_id)s
+  AND pi.node_type = 'ProjectedInventory'
+  AND pi.active = TRUE
+  AND (pi.item_id, pi.location_id) IN (
+      SELECT DISTINCT trig.item_id, trig.location_id
+      FROM events e
+      JOIN nodes trig
+        ON trig.node_id = e.trigger_node_id
+       AND trig.scenario_id = e.scenario_id
+      WHERE e.event_id = ANY(%(event_ids)s)
+        AND trig.item_id IS NOT NULL
+        AND trig.location_id IS NOT NULL
+  )
+ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
+"""
+
+# full=True: dirty every active PI of the scenario (the reconciliation path).
+_DIRTY_FULL_SQL = """
+INSERT INTO dirty_nodes (calc_run_id, node_id, scenario_id, marked_at)
+SELECT %(calc_run_id)s, pi.node_id, pi.scenario_id, now()
+FROM nodes pi
+WHERE pi.scenario_id = %(scenario_id)s
+  AND pi.node_type = 'ProjectedInventory'
+  AND pi.active = TRUE
+ON CONFLICT (calc_run_id, node_id, scenario_id) DO NOTHING
+"""
+
+
 class PropagationEngine:
     """
     Orchestrates: event → dirty → topo sort → compute → persist → cascade.
@@ -183,6 +252,130 @@ class PropagationEngine:
         except Exception as exc:
             logger.exception("Propagation failed for event %s: %s", event_id, exc)
             db.execute("ROLLBACK TO SAVEPOINT propagation_start")
+            self._calc_run_mgr.fail_calc_run(calc_run, str(exc), db)
+            raise
+
+    def process_pending(
+        self,
+        scenario_id: UUID,
+        db: DictRowConnection,
+        *,
+        full: bool = False,
+    ) -> Optional[CalcRun]:
+        """
+        Batch entry point: coalesce EVERY pending event for a scenario into ONE
+        calc run and propagate the affected WHOLE SERIES in a single pass.
+
+        This is the daily-recompute / manual `POST /v1/calc/run` path (chantier
+        C3-PR2), distinct from `process_event` (the per-event streaming path).
+        A manual recompute (and the VM's daily timer) must drain the backlog of
+        unprocessed events in ONE deterministic run: ONE advisory lock, ONE
+        calc_run, ONE ANALYZE, ONE calc_run_finished — never N. It also repairs
+        the old broken path where a synthetic no-trigger `calc_triggered` event
+        was handed to `process_event`, which then skipped propagation entirely.
+
+        Pipeline:
+          start_calc_run  — acquires the scenario advisory lock and COALESCES
+                            all unprocessed events into
+                            calc_run.triggered_by_event_ids (calc_run.py, reused
+                            as-is: it also stamps the C2 decision basis
+                            anchor_date/engine_flavor/code_version). Returns None
+                            (→ we return None) if another run holds the lock.
+          seed dirty set  — one set-based `INSERT … SELECT` into dirty_nodes:
+                            * full=False → every active PI of each (item_id,
+                              location_id) series touched by a pending event's
+                              trigger node (WHOLE series; _DIRTY_PENDING_SERIES_SQL).
+                            * full=True  → every active PI of the scenario
+                              (_DIRTY_FULL_SQL, the reconciliation path).
+          ANALYZE         — dirty_nodes, MANDATORY (#455): we seeded set-based,
+                            bypassing DirtyFlagManager.flush_to_postgres where the
+                            streaming path's ANALYZE lives (dirty.py). Without
+                            fresh stats the planner sees rows=1 and
+                            PROPAGATE_SQL/SHORTAGES_SQL collapse to O(N²).
+          _propagate      — POLYMORPHIC: the sql / python / in-process rust
+                            engines override only `_propagate`, so each computes
+                            the SAME dirty set with its own backend, unchanged.
+          _finish_run     — resolve_stale (PR1 #489, last_calc_run_id-scoped —
+                            coherent by construction with the whole-series
+                            granularity), events marked processed, calc_run
+                            completed, advisory lock released, fleet events
+                            emitted.
+
+        Returns the CalcRun on success, None if the scenario is already locked.
+
+        rust-svc is OUT OF SCOPE: RustServicePropagationEngine overrides
+        `process_event` WHOLESALE and does NOT override `_propagate`, so calling
+        process_pending under OOTILS_ENGINE=rust-svc would fall through to the
+        BASE pure-Python `_propagate` (its in-RAM graph never touched) — the
+        same known correctness/perf trap the CLAUDE.md rust-svc note documents
+        for `full_recompute`/`simulate`. The default engine is `sql`; this path
+        is invoked only by the sql/python/rust-capable calc:run flow.
+        """
+        calc_run = self._calc_run_mgr.start_calc_run(
+            scenario_id=scenario_id,
+            event_ids=[],
+            db=db,
+        )
+        if calc_run is None:
+            logger.info(
+                "Scenario %s is already locked — skipping process_pending", scenario_id,
+            )
+            return None
+
+        try:
+            db.execute("SAVEPOINT process_pending_start")
+
+            params = {
+                "calc_run_id": calc_run.calc_run_id,
+                "scenario_id": scenario_id,
+                "event_ids": list(calc_run.triggered_by_event_ids or []),
+            }
+
+            # Seed dirty_nodes set-based. `event_ids` is unused by _DIRTY_FULL_SQL
+            # — psycopg silently ignores unused keys in a named-parameter mapping,
+            # so one params dict serves both statements.
+            seeded = False
+            if full:
+                db.execute(_DIRTY_FULL_SQL, params)
+                seeded = True
+            elif params["event_ids"]:
+                db.execute(_DIRTY_PENDING_SERIES_SQL, params)
+                seeded = True
+            # else: not a full run and nothing pending → nothing to dirty; the
+            # run completes cleanly below as a 0-node no-op.
+
+            if seeded:
+                # MANDATORY (#455) — see the docstring and dirty.py's own ANALYZE.
+                db.execute("ANALYZE dirty_nodes")
+
+            # Read the dirty set back: the Python engine consumes the set
+            # directly, the sql/rust engines re-read dirty_nodes but still use it
+            # for the empty-set guard + counters, and it sizes dirty_node_count.
+            dirty_rows = db.execute(
+                "SELECT node_id FROM dirty_nodes WHERE calc_run_id = %s AND scenario_id = %s",
+                (calc_run.calc_run_id, scenario_id),
+            ).fetchall()
+            dirty_node_ids = {UUID(str(r["node_id"])) for r in dirty_rows}
+
+            calc_run.dirty_node_count = len(dirty_node_ids)
+            db.execute(
+                "UPDATE calc_runs SET dirty_node_count = %s WHERE calc_run_id = %s",
+                (calc_run.dirty_node_count, calc_run.calc_run_id),
+            )
+
+            # POLYMORPHIC — sql/python/rust inherit process_pending and override
+            # only _propagate. An empty set short-circuits inside _propagate.
+            self._propagate(calc_run, dirty_node_ids, db)
+
+            self._finish_run(calc_run, scenario_id, db)
+            return calc_run
+
+        except Exception as exc:
+            logger.exception(
+                "process_pending failed for scenario %s (full=%s): %s",
+                scenario_id, full, exc,
+            )
+            db.execute("ROLLBACK TO SAVEPOINT process_pending_start")
             self._calc_run_mgr.fail_calc_run(calc_run, str(exc), db)
             raise
 
