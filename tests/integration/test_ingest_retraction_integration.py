@@ -14,9 +14,12 @@ Proof cycles here (each on its own item so projections never interfere):
           external_id as 'received' → node inactive AND the projection has
           FORGOTTEN the quantity (closing stock back to the no-PO state).
   (c)     CO open → outflow counted; re-ingest 'shipped' → demand gone.
-  (d)     PO confirmed → in_transit (non-terminal): stays active, quantity
-          counted EXACTLY once (the duplicate-edge regression proof), one
-          single replenishes edge.
+  (d)     PO confirmed → in_transit (non-terminal) AND re-dated: stays
+          active, the ONE replenishes edge is RETARGETED to the new bucket
+          (old bucket drained, quantity counted EXACTLY once — the
+          duplicate-edge regression proof, re-date flavour; the
+          identical-columns re-ingest is a C2 no-op proven in
+          test_c2_changed_only_ingest_integration.py).
   (e)     planning params: CREATED with omitted cells → DB DEFAULTs applied
           (forecast_consumption_strategy='max_only', consumption_window_days=7);
           SCD2 rotation with an omitted cell → previous value preserved.
@@ -478,11 +481,20 @@ def test_co_shipped_retracts_demand_from_projection(api_client, seed):
 
 
 def test_po_confirmed_to_in_transit_stays_active_no_double_count(api_client, seed):
+    # C2 (changed-only ingest) note: a re-ingest whose compared node columns
+    # are all identical is now a structural no-op ("unchanged" — no UPDATE, no
+    # event, no is_dirty, no re-wire); that semantics has its own proof in
+    # test_c2_changed_only_ingest_integration.py. To keep exercising the #468
+    # anti-duplicate-edge guard, THIS re-ingest changes the delivery date, so
+    # the UPDATE path + _wire_node_to_pi really run — and the proof is now
+    # STRONGER: the re-date must RETARGET the one replenishes edge to the new
+    # bucket (dedup #468), never insert a parallel edge nor leave the old one.
     po_ext = _ext("PO-2")
     delivery = TODAY + timedelta(days=7)
+    delivery2 = TODAY + timedelta(days=9)
     qty = 25
 
-    def po_payload(status: str) -> dict:
+    def po_payload(status: str, when) -> dict:
         return {
             "purchase_orders": [{
                 "external_id": po_ext,
@@ -491,18 +503,22 @@ def test_po_confirmed_to_in_transit_stays_active_no_double_count(api_client, see
                 "supplier_external_id": seed["sup"],
                 "quantity": qty,
                 "uom": "EA",
-                "expected_delivery_date": delivery.isoformat(),
+                "expected_delivery_date": when.isoformat(),
                 "status": status,
             }]
         }
 
-    resp = api_client.post("/v1/ingest/purchase-orders", json=po_payload("confirmed"), headers=AUTH)
+    resp = api_client.post(
+        "/v1/ingest/purchase-orders", json=po_payload("confirmed", delivery), headers=AUTH
+    )
     assert resp.status_code == 200, resp.text
     _recalc(api_client)
     assert _pi_bucket(seed["item_noreg"], seed["loc"], delivery)["inflows"] == qty
 
-    # confirmed → in_transit: same date, same qty — must stay active.
-    resp = api_client.post("/v1/ingest/purchase-orders", json=po_payload("in_transit"), headers=AUTH)
+    # confirmed → in_transit AND re-dated: must stay active, must be "updated".
+    resp = api_client.post(
+        "/v1/ingest/purchase-orders", json=po_payload("in_transit", delivery2), headers=AUTH
+    )
     assert resp.status_code == 200, resp.text
     assert resp.json()["results"][0]["action"] == "updated"
 
@@ -510,13 +526,19 @@ def test_po_confirmed_to_in_transit_stays_active_no_double_count(api_client, see
     assert node["active"] is True, "non-terminal in_transit must NOT retract the PO"
 
     _recalc(api_client)
-    bucket = _pi_bucket(seed["item_noreg"], seed["loc"], delivery)
-    # THE duplicate-edge regression proof: before the _wire_node_to_pi fix,
-    # each re-ingest at an unchanged date INSERTed a parallel replenishes
-    # edge and inflows_agg summed the quantity once PER EDGE (2 × qty here).
-    assert bucket["inflows"] == qty, (
-        f"expected inflows == {qty} exactly once; a duplicated edge would "
-        f"double-count (got {bucket['inflows']})"
+    # THE duplicate-edge regression proof (#468), re-date flavour: before the
+    # _wire_node_to_pi dedup, a re-ingest INSERTed a parallel replenishes edge
+    # and inflows_agg summed the quantity once PER EDGE. After the fix the ONE
+    # edge is retargeted: full qty lands in the NEW bucket, ZERO stays behind.
+    new_bucket = _pi_bucket(seed["item_noreg"], seed["loc"], delivery2)
+    assert new_bucket["inflows"] == qty, (
+        f"expected inflows == {qty} exactly once in the re-dated bucket; a "
+        f"duplicated edge would double-count (got {new_bucket['inflows']})"
+    )
+    old_bucket = _pi_bucket(seed["item_noreg"], seed["loc"], delivery)
+    assert old_bucket["inflows"] == 0, (
+        f"old bucket must be drained after the re-date retarget "
+        f"(got {old_bucket['inflows']} — stale edge left behind)"
     )
     assert _last_pi_closing(seed["item_noreg"], seed["loc"]) == qty
 

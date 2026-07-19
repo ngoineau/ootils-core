@@ -9,6 +9,9 @@ State machine: pending → running → completed | completed_stale | interrupted
 """
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
@@ -16,6 +19,65 @@ from uuid import UUID, uuid4
 from ootils_core.db.types import DictRowConnection
 from ootils_core.engine.events import emit_stream_event
 from ootils_core.models import CalcRun, Scenario
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_code_version() -> str:
+    """Resolve the code identity ONCE, at module import (decision basis, C2 §3).
+
+    Precedence: the OOTILS_CODE_VERSION env var (the production-safe path — a
+    deployment stamps it), else the short git sha of the working tree, else the
+    literal 'unknown'. The git call is a subprocess run EXACTLY ONCE here at
+    import — never per calc run — and is fully guarded (timeout + broad except),
+    so a non-repo deploy (installed wheel, no git binary) degrades to 'unknown'
+    rather than raising. Output is captured so the child stays silent (no
+    stdout/stderr leak into the process, honouring the no-print rule).
+    """
+    env = os.environ.get("OOTILS_CODE_VERSION")
+    if env and env.strip():
+        return env.strip()
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        sha = completed.stdout.strip()
+        if sha:
+            return sha
+    except Exception:  # noqa: BLE001 — git absent / not a repo / timeout => 'unknown'
+        logger.debug("code_version: git short sha unavailable, defaulting to 'unknown'")
+    return "unknown"
+
+
+# Resolved ONCE at import (C2 §3: "code_version résolu UNE FOIS à l'import …
+# JAMAIS un subprocess par run"). Every calc run stamps this constant.
+_CODE_VERSION: str = _resolve_code_version()
+
+
+def _resolve_engine_flavor() -> str:
+    """Normalised OOTILS_ENGINE flavour that ran this run — provenance stamp.
+
+    Mirrors the dispatch in api/routers/events._build_propagation_engine (the
+    authority): 'sql'/'' -> sql, 'python' -> python, 'rust' -> rust,
+    'rust-svc'/'rust_svc' -> rust-svc, anything else -> sql (the SAME silent
+    fallback the dispatcher applies), so the stamp reflects the engine that
+    ACTUALLY ran, not the raw env string. A per-run env read is a cheap
+    deterministic string op (not a subprocess).
+    """
+    flavor = os.environ.get("OOTILS_ENGINE", "sql").strip().lower()
+    if flavor in ("sql", ""):
+        return "sql"
+    if flavor == "python":
+        return "python"
+    if flavor == "rust":
+        return "rust"
+    if flavor in ("rust-svc", "rust_svc"):
+        return "rust-svc"
+    return "sql"
 
 
 class CalcRunManager:
@@ -75,18 +137,31 @@ class CalcRunManager:
             created_at=now,
         )
 
+        # Decision-basis stamps (C2 §3). anchor_date is resolved IN-SQL as
+        # COALESCE(scenarios.as_of_date, CURRENT_DATE) so the PAST-principle
+        # anchor is the DB's own date (no app/DB timezone drift) and matches the
+        # projection kernel's own "today"; a scenario_id absent from `scenarios`
+        # (never expected — baseline + forks are always present) still degrades
+        # cleanly to CURRENT_DATE via COALESCE. engine_flavor + code_version are
+        # provenance, NULL-honest for any pre-C2 / uninstrumented caller.
         db.execute(
             """
             INSERT INTO calc_runs (
                 calc_run_id, scenario_id, triggered_by_event_ids,
                 is_full_recompute, dirty_node_count,
                 nodes_recalculated, nodes_unchanged,
-                status, started_at, created_at
+                status, started_at, created_at,
+                anchor_date, engine_flavor, code_version
             ) VALUES (
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
-                %s, %s, %s
+                %s, %s, %s,
+                COALESCE(
+                    (SELECT s.as_of_date FROM scenarios s WHERE s.scenario_id = %s),
+                    CURRENT_DATE
+                ),
+                %s, %s
             )
             """,
             (
@@ -100,6 +175,9 @@ class CalcRunManager:
                 run.status,
                 run.started_at,
                 run.created_at,
+                run.scenario_id,           # anchor_date COALESCE subquery arg
+                _resolve_engine_flavor(),  # engine_flavor
+                _CODE_VERSION,             # code_version (resolved once at import)
             ),
         )
 

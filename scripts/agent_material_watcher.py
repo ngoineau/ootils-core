@@ -104,6 +104,16 @@ def main(argv=None) -> int:
         r = core.run_timephased(d, gross)                 # planned orders
         hs = d.horizon_start
 
+        # Decision-basis stamps (C2 §3), carried on every reco below: anchor_date
+        # = hs (d.horizon_start, the plan's as-of date) and stream_seq_hwm = the
+        # events high-water mark this run decided against — the drained
+        # --subscribe cursor when present, else the current MAX(stream_seq) for
+        # baseline (agent_subscribe.current_max_seq, the single HWM source).
+        stream_seq_hwm = (
+            seed_cursor if seed_cursor is not None
+            else agent_subscribe.current_max_seq(conn, core.BASELINE)
+        )
+
         # aggregate PAST-DUE planned orders per component item (LLC >= 1)
         pastdue_qty = defaultdict(float)
         pastdue_need = {}
@@ -174,7 +184,8 @@ def main(argv=None) -> int:
                 recs.append((AGENT_NAME, run.run_id, core.BASELINE, item, d.names.get(item, str(item)[:8]),
                              c["need_date"], c["qty"], c["qty"], c["cost"], c["ccy"], c["sid"], c["sext"],
                              c["lt"], c["runway"], c["margin"],
-                             "EXPEDITE", decision_level("EXPEDITE"), "DRAFT", conf, Jsonb(evidence)))
+                             "EXPEDITE", decision_level("EXPEDITE"), "DRAFT", conf, Jsonb(evidence),
+                             hs, stream_seq_hwm))
                 display.append({"ext": d.names.get(item, str(item)[:8]), "kind": c["kind"], "llc": c["llc"],
                                 "qty": c["qty"], "cost": c["cost"], "ccy": c["ccy"], "need": str(c["need_date"]),
                                 "peg": c["peg"][0]["fg"] if c["peg"] else "—",
@@ -186,7 +197,8 @@ def main(argv=None) -> int:
                 ["agent_name", "agent_run_id", "scenario_id", "item_id", "item_external_id",
                  "shortage_date", "deficit_qty", "recommended_qty", "estimated_cost", "currency",
                  "supplier_id", "supplier_external_id", "lead_time_days", "runway_days", "margin_days",
-                 "action", "decision_level", "status", "confidence", "evidence"],
+                 "action", "decision_level", "status", "confidence", "evidence",
+                 "anchor_date", "stream_seq_hwm"],
                 recs,
             )
             run_metrics = {

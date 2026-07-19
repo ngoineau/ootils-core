@@ -30,7 +30,9 @@ import hashlib
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -135,6 +137,9 @@ class IngestSummary(BaseModel):
     inserted: int
     updated: int
     errors: int
+    # C2: rows re-pushed byte-identical — skipped (no UPDATE/event/is_dirty).
+    # Additive/optional so every non-node endpoint keeps an unchanged payload.
+    unchanged: int = 0
 
 
 class IngestResponse(BaseModel):
@@ -153,10 +158,10 @@ class IngestResponse(BaseModel):
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
-def _ok(inserted: int, updated: int, total: int, results: list[dict], batch_id: UUID | None = None, dq_status: str | None = None, aliases_upserted: int = 0) -> IngestResponse:
+def _ok(inserted: int, updated: int, total: int, results: list[dict], batch_id: UUID | None = None, dq_status: str | None = None, aliases_upserted: int = 0, unchanged: int = 0) -> IngestResponse:
     return IngestResponse(
         status="ok",
-        summary=IngestSummary(total=total, inserted=inserted, updated=updated, errors=0),
+        summary=IngestSummary(total=total, inserted=inserted, updated=updated, errors=0, unchanged=unchanged),
         results=results,
         batch_id=batch_id,
         dq_status=dq_status,
@@ -353,15 +358,227 @@ _ensure_projection_series = ensure_projection_series
 _wire_node_to_pi = wire_node_to_pi
 
 
-def _emit_ingestion_event(db: DictRowConnection, scenario_id: UUID, node_id: UUID) -> None:
-    """Create an unprocessed ingestion_complete event to trigger recalculation."""
-    from datetime import datetime, timezone
+# ─────────────────────────────────────────────────────────────
+# C2 — changed-only ingest + value-ledger events (moteur d'exception)
+# ─────────────────────────────────────────────────────────────
+# DOCTRINE (DOSSIER-MOTEUR-EXCEPTION-2026-07-19 §A1): re-pushing a node whose
+# business values are byte-identical to what is already stored must emit
+# NOTHING — no UPDATE, no event, no is_dirty — so the graph stops reacting to
+# unchanged feed lines. When a value DID move, we emit ONE typed event per
+# changed field, filling the old_*/new_* ledger columns that have existed
+# (empty) since migration 002, so a /v1/stream subscriber sees which field
+# moved and by how much, filterable by event_type.
+
+# Every event_type this router emits. `_emit_ingest_event` validates against
+# it (fail-loudly) so a typo in a diff spec surfaces here, before the DB CHECK.
+# The four *_status/_uom/demand_date types new to C2 are added to
+# events.event_type's CHECK by migration 088 (a separate volet); the other
+# five already exist since migration 002.
+_C2_INGEST_EVENT_TYPES = frozenset({
+    "ingestion_complete",     # node creation — new_* filled, old_* NULL
+    "onhand_updated",         # OnHand quantity or uom
+    "supply_qty_changed",     # PO / WO / Transfer quantity
+    "supply_date_changed",    # PO / WO / Transfer expected/scheduled date
+    "supply_status_changed",  # PO / WO / Transfer active flag            (088)
+    "supply_uom_changed",     # PO qty_uom                                (088)
+    "demand_qty_changed",     # Forecast / CO quantity
+    "demand_date_changed",    # CO requested date                        (088)
+    "demand_status_changed",  # CO active flag                           (088)
+})
+
+# Ledger "kind" → which typed event columns carry a field's old/new value.
+_KIND_QUANTITY = "quantity"  # NUMERIC nodes.quantity -> old/new_quantity
+_KIND_DATE = "date"          # DATE nodes.time_ref    -> old/new_date
+_KIND_TEXT = "text"          # TEXT nodes.qty_uom     -> old/new_text
+_KIND_BOOL = "bool"          # BOOLEAN nodes.active   -> old/new_text ('true'/'false')
+
+
+@dataclass(frozen=True)
+class _FieldDiff:
+    """One diffable business field on a supply/demand node.
+
+    ``column`` is the ``nodes`` column read for the old value AND the event's
+    ``field_changed`` label; ``event_type`` is the typed event emitted when the
+    value moved; ``kind`` selects the ledger column pair.
+    """
+    column: str
+    event_type: str
+    kind: str
+
+
+# Per-family diff specs. Tuple ORDER is the (deterministic) emission order when
+# several fields move on one row: quantity, then date, then status, then uom.
+# Fields compared per entity (derived from each upsert's UPDATE column list):
+#   on_hand : quantity, qty_uom          (time_ref/as_of_date DELIBERATELY
+#             excluded — it bumps every daily snapshot by construction; diffing
+#             it would dirty the graph on every re-push of the largest feed,
+#             defeating C2. It is provenance on a timeless balance, not a
+#             projection input. `active` does not exist for on_hand.)
+#   PO      : quantity, time_ref, active, qty_uom
+#   WO / CO / transfer : quantity, time_ref, active   (no uom column)
+#   forecast: quantity only  (bucket_date + time_grain are the lookup KEY — a
+#             change there is a different node, an INSERT; time_span_* are
+#             derived from that key, never independent inputs)
+_ONHAND_DIFF = (
+    _FieldDiff("quantity", "onhand_updated", _KIND_QUANTITY),
+    _FieldDiff("qty_uom", "onhand_updated", _KIND_TEXT),
+)
+_SUPPLY_DIFF = (
+    _FieldDiff("quantity", "supply_qty_changed", _KIND_QUANTITY),
+    _FieldDiff("time_ref", "supply_date_changed", _KIND_DATE),
+    _FieldDiff("active", "supply_status_changed", _KIND_BOOL),
+)
+_PO_DIFF = _SUPPLY_DIFF + (
+    _FieldDiff("qty_uom", "supply_uom_changed", _KIND_TEXT),
+)
+_CO_DIFF = (
+    _FieldDiff("quantity", "demand_qty_changed", _KIND_QUANTITY),
+    _FieldDiff("time_ref", "demand_date_changed", _KIND_DATE),
+    _FieldDiff("active", "demand_status_changed", _KIND_BOOL),
+)
+_FORECAST_DIFF = (
+    _FieldDiff("quantity", "demand_qty_changed", _KIND_QUANTITY),
+)
+
+
+def _as_decimal(value: object) -> Optional[Decimal]:
+    """Normalize a NUMERIC (Decimal from psycopg) or an incoming float to a
+    Decimal for exact value comparison.
+
+    ``Decimal(str(f))`` uses Python's shortest round-trip repr — the SAME
+    shortest representation psycopg3 sends (FloatDumper.dump(10.1) == b'10.1')
+    and PostgreSQL 16 parses exactly into NUMERIC — so a re-pushed identical
+    quantity compares equal (Decimal ``==`` is value-based; trailing zeros from
+    the column scale do not matter).
+    """
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _bool_text(value: object) -> str:
+    """Serialize a boolean status into the text ledger ('true' / 'false')."""
+    return "true" if value else "false"
+
+
+def _values_equal(kind: str, old: object, new: object) -> bool:
+    if kind == _KIND_QUANTITY:
+        return _as_decimal(old) == _as_decimal(new)
+    if kind == _KIND_BOOL:
+        return bool(old) == bool(new)
+    return old == new  # date == date, text == text (None-safe)
+
+
+def _changed_fields(
+    old_row: dict,
+    incoming: dict,
+    spec: tuple[_FieldDiff, ...],
+) -> list[tuple[_FieldDiff, object, object]]:
+    """Return the (field, old_value, new_value) triples that moved.
+
+    Empty list ⇒ every compared field is identical ⇒ the caller emits nothing
+    (no UPDATE, no event, no is_dirty).
+    """
+    changed: list[tuple[_FieldDiff, object, object]] = []
+    for fd in spec:
+        old_val = old_row.get(fd.column)
+        new_val = incoming[fd.column]
+        if not _values_equal(fd.kind, old_val, new_val):
+            changed.append((fd, old_val, new_val))
+    return changed
+
+
+def _emit_ingest_event(
+    db: DictRowConnection,
+    scenario_id: UUID,
+    node_id: UUID,
+    event_type: str,
+    *,
+    field_changed: Optional[str] = None,
+    old_quantity: object = None,
+    new_quantity: object = None,
+    old_date: Optional[date] = None,
+    new_date: Optional[date] = None,
+    old_text: Optional[str] = None,
+    new_text: Optional[str] = None,
+) -> None:
+    """Insert ONE unprocessed ingestion event, filling the migration-002 value
+    ledger. ``processed=FALSE`` ⇒ the next calc run coalesces it and propagates
+    exactly as ``ingestion_complete`` always has (``start_calc_run`` coalesces
+    unprocessed events regardless of type). Not routed through
+    ``emit_stream_event``: that helper is the run-granular fleet whitelist and
+    carries no old_* ledger columns.
+    """
+    if event_type not in _C2_INGEST_EVENT_TYPES:
+        raise ValueError(f"event_type {event_type!r} is not a C2 ingest event type")
     db.execute(
         """
-        INSERT INTO events (event_id, event_type, scenario_id, trigger_node_id, processed, source, created_at)
-        VALUES (%s, 'ingestion_complete', %s, %s, FALSE, 'ingestion', %s)
+        INSERT INTO events (
+            event_id, event_type, scenario_id, trigger_node_id,
+            field_changed, old_quantity, new_quantity,
+            old_date, new_date, old_text, new_text,
+            processed, source, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, 'ingestion', now())
         """,
-        (uuid4(), scenario_id, node_id, datetime.now(timezone.utc)),
+        (
+            uuid4(), event_type, scenario_id, node_id,
+            field_changed, old_quantity, new_quantity,
+            old_date, new_date, old_text, new_text,
+        ),
+    )
+
+
+def _emit_field_change(
+    db: DictRowConnection,
+    node_id: UUID,
+    fd: _FieldDiff,
+    old_val: object,
+    new_val: object,
+) -> None:
+    """Emit the typed event for one changed field, routing the old/new pair to
+    the ledger columns for its kind. Baseline-scoped like every ingest write."""
+    if fd.kind == _KIND_QUANTITY:
+        _emit_ingest_event(
+            db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
+            field_changed=fd.column, old_quantity=old_val, new_quantity=new_val,
+        )
+    elif fd.kind == _KIND_DATE:
+        _emit_ingest_event(
+            db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
+            field_changed=fd.column, old_date=old_val, new_date=new_val,
+        )
+    elif fd.kind == _KIND_BOOL:
+        _emit_ingest_event(
+            db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
+            field_changed=fd.column,
+            old_text=_bool_text(old_val), new_text=_bool_text(new_val),
+        )
+    else:  # _KIND_TEXT
+        _emit_ingest_event(
+            db, BASELINE_SCENARIO_ID, node_id, fd.event_type,
+            field_changed=fd.column, old_text=old_val, new_text=new_val,
+        )
+
+
+def _emit_ingestion_event(
+    db: DictRowConnection,
+    scenario_id: UUID,
+    node_id: UUID,
+    *,
+    new_quantity: object = None,
+    new_date: Optional[date] = None,
+) -> None:
+    """Emit the node-CREATION event (``ingestion_complete``) with the new value
+    in the ledger (old_* NULL — nothing existed before). The create arms call
+    this; the update arms emit per-field typed events via ``_emit_field_change``
+    instead. Kept unprocessed so it triggers recalculation as before.
+    """
+    _emit_ingest_event(
+        db, scenario_id, node_id, "ingestion_complete",
+        new_quantity=new_quantity, new_date=new_date,
     )
 
 
@@ -1198,7 +1415,7 @@ def ingest_on_hand(
     )
 
     results = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for row in body.on_hand:
         item_id = item_map[row.item_external_id]
@@ -1210,7 +1427,7 @@ def ingest_on_hand(
         # Upsert: one OnHandSupply node per (item, location, scenario)
         existing = db.execute(
             """
-            SELECT node_id FROM nodes
+            SELECT node_id, quantity, qty_uom FROM nodes
             WHERE node_type = 'OnHandSupply'
               AND item_id = %s AND location_id = %s
               AND scenario_id = %s
@@ -1222,6 +1439,19 @@ def ingest_on_hand(
 
         if existing:
             node_id = existing["node_id"]
+            changes = _changed_fields(
+                existing, {"quantity": row.quantity, "qty_uom": row.uom}, _ONHAND_DIFF,
+            )
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({
+                    "item_external_id": row.item_external_id,
+                    "location_external_id": row.location_external_id,
+                    "node_id": str(node_id),
+                    "action": "unchanged",
+                })
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -1230,7 +1460,8 @@ def ingest_on_hand(
                 """,
                 (row.quantity, row.uom, row.as_of_date, node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, node_id, fd, old_val, new_val)
             _wire_node_to_pi(db, node_id, "OnHandSupply", item_id, location_id, BASELINE_SCENARIO_ID, row.as_of_date)
             results.append({
                 "item_external_id": row.item_external_id,
@@ -1251,7 +1482,7 @@ def ingest_on_hand(
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
                  row.quantity, row.uom, row.as_of_date),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=row.quantity, new_date=row.as_of_date)
             _wire_node_to_pi(db, node_id, "OnHandSupply", item_id, location_id, BASELINE_SCENARIO_ID, row.as_of_date)
             results.append({
                 "item_external_id": row.item_external_id,
@@ -1262,11 +1493,11 @@ def ingest_on_hand(
             inserted += 1
 
     logger.info(
-        "ingest.on_hand total=%d inserted=%d updated=%d",
-        len(body.on_hand), inserted, updated,
+        "ingest.on_hand total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.on_hand), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.on_hand), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.on_hand), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
@@ -1375,15 +1606,18 @@ def ingest_purchase_orders(
     po_ext_ids = [po.external_id for po in body.purchase_orders]
     existing_refs_rows = db.execute(
         """
-        SELECT external_id, internal_id FROM external_references
-        WHERE entity_type = 'purchase_order' AND external_id = ANY(%s)
+        SELECT er.external_id, er.internal_id,
+               n.quantity, n.qty_uom, n.time_ref, n.active
+        FROM external_references er
+        LEFT JOIN nodes n ON n.node_id = er.internal_id
+        WHERE er.entity_type = 'purchase_order' AND er.external_id = ANY(%s)
         """,
         (po_ext_ids,),
     ).fetchall()
-    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+    existing_refs: dict[str, dict] = {r["external_id"]: r for r in existing_refs_rows}
 
     results: list[dict] = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for po in body.purchase_orders:
         item_id = item_map[po.item_external_id]
@@ -1394,7 +1628,23 @@ def ingest_purchase_orders(
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
 
         if po.external_id in existing_refs:
-            node_id = existing_refs[po.external_id]
+            old_row = existing_refs[po.external_id]
+            node_id = old_row["internal_id"]
+            changes = _changed_fields(
+                old_row,
+                {
+                    "quantity": po.quantity,
+                    "time_ref": po.expected_delivery_date,
+                    "active": active,
+                    "qty_uom": po.uom,
+                },
+                _PO_DIFF,
+            )
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({"external_id": po.external_id, "node_id": str(node_id), "action": "unchanged"})
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -1404,7 +1654,8 @@ def ingest_purchase_orders(
                 """,
                 (po.quantity, po.uom, po.expected_delivery_date, active, node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, node_id, fd, old_val, new_val)
             _wire_node_to_pi(db, node_id, "PurchaseOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, po.expected_delivery_date)
             results.append({"external_id": po.external_id, "node_id": str(node_id), "action": "updated"})
             updated += 1
@@ -1420,7 +1671,7 @@ def ingest_purchase_orders(
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
                  po.quantity, po.uom, po.expected_delivery_date, active),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=po.quantity, new_date=po.expected_delivery_date)
             _wire_node_to_pi(db, node_id, "PurchaseOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, po.expected_delivery_date)
             # Register external reference
             db.execute(
@@ -1437,11 +1688,11 @@ def ingest_purchase_orders(
             inserted += 1
 
     logger.info(
-        "ingest.purchase_orders total=%d inserted=%d updated=%d",
-        len(body.purchase_orders), inserted, updated,
+        "ingest.purchase_orders total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.purchase_orders), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.purchase_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.purchase_orders), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
@@ -1585,7 +1836,7 @@ def ingest_forecast_demand(
     )
 
     results: list[dict] = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for fc in body.forecasts:
         item_id = item_map[fc.item_external_id]
@@ -1598,7 +1849,7 @@ def ingest_forecast_demand(
 
         existing = db.execute(
             """
-            SELECT node_id FROM nodes
+            SELECT node_id, quantity FROM nodes
             WHERE node_type = 'ForecastDemand'
               AND item_id = %s AND location_id = %s
               AND scenario_id = %s
@@ -1611,6 +1862,17 @@ def ingest_forecast_demand(
 
         if existing:
             fc_node_id = existing["node_id"]
+            changes = _changed_fields(existing, {"quantity": fc.quantity}, _FORECAST_DIFF)
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({
+                    "item_external_id": fc.item_external_id,
+                    "bucket_date": str(fc.bucket_date),
+                    "node_id": str(fc_node_id),
+                    "action": "unchanged",
+                })
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -1620,7 +1882,8 @@ def ingest_forecast_demand(
                 """,
                 (fc.quantity, time_span_start, time_span_end, fc_node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, fc_node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, fc_node_id, fd, old_val, new_val)
             _wire_node_to_pi(
                 db, fc_node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID,
                 fc.bucket_date, time_span_start=time_span_start, time_span_end=time_span_end,
@@ -1645,7 +1908,7 @@ def ingest_forecast_demand(
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
                  fc.quantity, fc.time_grain, fc.bucket_date, time_span_start, time_span_end),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=fc.quantity, new_date=fc.bucket_date)
             _wire_node_to_pi(
                 db, node_id, "ForecastDemand", item_id, location_id, BASELINE_SCENARIO_ID,
                 fc.bucket_date, time_span_start=time_span_start, time_span_end=time_span_end,
@@ -1659,11 +1922,11 @@ def ingest_forecast_demand(
             inserted += 1
 
     logger.info(
-        "ingest.forecast_demand total=%d inserted=%d updated=%d",
-        len(body.forecasts), inserted, updated,
+        "ingest.forecast_demand total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.forecasts), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.forecasts), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.forecasts), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
@@ -1924,15 +2187,18 @@ def ingest_work_orders(
     wo_ext_ids = [wo.external_id for wo in body.work_orders]
     existing_refs_rows = db.execute(
         """
-        SELECT external_id, internal_id FROM external_references
-        WHERE entity_type = 'work_order' AND external_id = ANY(%s)
+        SELECT er.external_id, er.internal_id,
+               n.quantity, n.qty_uom, n.time_ref, n.active
+        FROM external_references er
+        LEFT JOIN nodes n ON n.node_id = er.internal_id
+        WHERE er.entity_type = 'work_order' AND er.external_id = ANY(%s)
         """,
         (wo_ext_ids,),
     ).fetchall()
-    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+    existing_refs: dict[str, dict] = {r["external_id"]: r for r in existing_refs_rows}
 
     results: list[dict] = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for wo in body.work_orders:
         item_id = item_map[wo.item_external_id]
@@ -1942,7 +2208,22 @@ def ingest_work_orders(
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
 
         if wo.external_id in existing_refs:
-            node_id = existing_refs[wo.external_id]
+            old_row = existing_refs[wo.external_id]
+            node_id = old_row["internal_id"]
+            changes = _changed_fields(
+                old_row,
+                {
+                    "quantity": wo.quantity,
+                    "time_ref": wo.scheduled_completion_date,
+                    "active": active,
+                },
+                _SUPPLY_DIFF,
+            )
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({"external_id": wo.external_id, "node_id": str(node_id), "action": "unchanged"})
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -1952,7 +2233,8 @@ def ingest_work_orders(
                 """,
                 (wo.quantity, wo.scheduled_completion_date, active, node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, node_id, fd, old_val, new_val)
             _wire_node_to_pi(db, node_id, "WorkOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, wo.scheduled_completion_date)
             results.append({"external_id": wo.external_id, "node_id": str(node_id), "action": "updated"})
             updated += 1
@@ -1968,7 +2250,7 @@ def ingest_work_orders(
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
                  wo.quantity, wo.scheduled_completion_date, active),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=wo.quantity, new_date=wo.scheduled_completion_date)
             _wire_node_to_pi(db, node_id, "WorkOrderSupply", item_id, location_id, BASELINE_SCENARIO_ID, wo.scheduled_completion_date)
             db.execute(
                 """
@@ -1984,11 +2266,11 @@ def ingest_work_orders(
             inserted += 1
 
     logger.info(
-        "ingest.work_orders total=%d inserted=%d updated=%d",
-        len(body.work_orders), inserted, updated,
+        "ingest.work_orders total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.work_orders), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.work_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.work_orders), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
@@ -2084,15 +2366,18 @@ def ingest_customer_orders(
     co_ext_ids = [co.external_id for co in body.customer_orders]
     existing_refs_rows = db.execute(
         """
-        SELECT external_id, internal_id FROM external_references
-        WHERE entity_type = 'customer_order' AND external_id = ANY(%s)
+        SELECT er.external_id, er.internal_id,
+               n.quantity, n.qty_uom, n.time_ref, n.active
+        FROM external_references er
+        LEFT JOIN nodes n ON n.node_id = er.internal_id
+        WHERE er.entity_type = 'customer_order' AND er.external_id = ANY(%s)
         """,
         (co_ext_ids,),
     ).fetchall()
-    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+    existing_refs: dict[str, dict] = {r["external_id"]: r for r in existing_refs_rows}
 
     results: list[dict] = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for co in body.customer_orders:
         item_id = item_map[co.item_external_id]
@@ -2102,7 +2387,22 @@ def ingest_customer_orders(
         _ensure_projection_series(db, item_id, location_id, BASELINE_SCENARIO_ID)
 
         if co.external_id in existing_refs:
-            node_id = existing_refs[co.external_id]
+            old_row = existing_refs[co.external_id]
+            node_id = old_row["internal_id"]
+            changes = _changed_fields(
+                old_row,
+                {
+                    "quantity": co.quantity,
+                    "time_ref": co.requested_delivery_date,
+                    "active": active,
+                },
+                _CO_DIFF,
+            )
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({"external_id": co.external_id, "node_id": str(node_id), "action": "unchanged"})
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -2112,7 +2412,8 @@ def ingest_customer_orders(
                 """,
                 (co.quantity, co.requested_delivery_date, active, node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, node_id, fd, old_val, new_val)
             _wire_node_to_pi(db, node_id, "CustomerOrderDemand", item_id, location_id, BASELINE_SCENARIO_ID, co.requested_delivery_date)
             results.append({"external_id": co.external_id, "node_id": str(node_id), "action": "updated"})
             updated += 1
@@ -2128,7 +2429,7 @@ def ingest_customer_orders(
                 (node_id, BASELINE_SCENARIO_ID, item_id, location_id,
                  co.quantity, co.requested_delivery_date, active),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=co.quantity, new_date=co.requested_delivery_date)
             _wire_node_to_pi(db, node_id, "CustomerOrderDemand", item_id, location_id, BASELINE_SCENARIO_ID, co.requested_delivery_date)
             db.execute(
                 """
@@ -2144,11 +2445,11 @@ def ingest_customer_orders(
             inserted += 1
 
     logger.info(
-        "ingest.customer_orders total=%d inserted=%d updated=%d",
-        len(body.customer_orders), inserted, updated,
+        "ingest.customer_orders total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.customer_orders), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.customer_orders), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.customer_orders), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
@@ -2255,15 +2556,18 @@ def ingest_transfers(
     tr_ext_ids = [t.external_id for t in body.transfers]
     existing_refs_rows = db.execute(
         """
-        SELECT external_id, internal_id FROM external_references
-        WHERE entity_type = 'transfer' AND external_id = ANY(%s)
+        SELECT er.external_id, er.internal_id,
+               n.quantity, n.qty_uom, n.time_ref, n.active
+        FROM external_references er
+        LEFT JOIN nodes n ON n.node_id = er.internal_id
+        WHERE er.entity_type = 'transfer' AND er.external_id = ANY(%s)
         """,
         (tr_ext_ids,),
     ).fetchall()
-    existing_refs: dict[str, UUID] = {r["external_id"]: r["internal_id"] for r in existing_refs_rows}
+    existing_refs: dict[str, dict] = {r["external_id"]: r for r in existing_refs_rows}
 
     results: list[dict] = []
-    inserted = updated = 0
+    inserted = updated = unchanged = 0
 
     for t in body.transfers:
         item_id = item_map[t.item_external_id]
@@ -2274,7 +2578,22 @@ def ingest_transfers(
         _ensure_projection_series(db, item_id, to_location_id, BASELINE_SCENARIO_ID)
 
         if t.external_id in existing_refs:
-            node_id = existing_refs[t.external_id]
+            old_row = existing_refs[t.external_id]
+            node_id = old_row["internal_id"]
+            changes = _changed_fields(
+                old_row,
+                {
+                    "quantity": t.quantity,
+                    "time_ref": t.expected_delivery_date,
+                    "active": active,
+                },
+                _SUPPLY_DIFF,
+            )
+            if not changes:
+                # Identical re-push — no UPDATE, no event, no is_dirty (C2).
+                results.append({"external_id": t.external_id, "node_id": str(node_id), "action": "unchanged"})
+                unchanged += 1
+                continue
             db.execute(
                 """
                 UPDATE nodes
@@ -2284,7 +2603,8 @@ def ingest_transfers(
                 """,
                 (t.quantity, t.expected_delivery_date, active, node_id),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            for fd, old_val, new_val in changes:
+                _emit_field_change(db, node_id, fd, old_val, new_val)
             _wire_node_to_pi(db, node_id, "TransferSupply", item_id, to_location_id, BASELINE_SCENARIO_ID, t.expected_delivery_date)
             results.append({"external_id": t.external_id, "node_id": str(node_id), "action": "updated"})
             updated += 1
@@ -2300,7 +2620,7 @@ def ingest_transfers(
                 (node_id, BASELINE_SCENARIO_ID, item_id, to_location_id,
                  t.quantity, t.expected_delivery_date, active),
             )
-            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id)
+            _emit_ingestion_event(db, BASELINE_SCENARIO_ID, node_id, new_quantity=t.quantity, new_date=t.expected_delivery_date)
             _wire_node_to_pi(db, node_id, "TransferSupply", item_id, to_location_id, BASELINE_SCENARIO_ID, t.expected_delivery_date)
             db.execute(
                 """
@@ -2322,11 +2642,11 @@ def ingest_transfers(
             inserted += 1
 
     logger.info(
-        "ingest.transfers total=%d inserted=%d updated=%d",
-        len(body.transfers), inserted, updated,
+        "ingest.transfers total=%d inserted=%d updated=%d unchanged=%d",
+        len(body.transfers), inserted, updated, unchanged,
     )
     dq_status = _trigger_dq(db, batch_id)
-    ingest_response = _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status)
+    ingest_response = _ok(inserted, updated, len(body.transfers), results, batch_id=batch_id, dq_status=dq_status, unchanged=unchanged)
     _finalize_ingest_batch(db, batch_id, ingest_response)
     return ingest_response
 
