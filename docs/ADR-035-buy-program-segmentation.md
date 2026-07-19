@@ -42,7 +42,7 @@ Deux contraintes du cadrage pèsent directement sur la conception :
 
 `pyramide/segmentation.py:buy_program_bucket(order_type)` est la **seule** fonction de classification programme Buy du dépôt ; tout consommateur (ce lecteur, le harness, un futur watcher) doit y passer — une seconde copie serait exactement le type de divergence silencieuse que la discipline « deux vérités » d'ADR-021 existe à empêcher ailleurs.
 
-Reprise de `scripts/forecast_program_poc.py:38-48` (mêmes marqueurs substring case-insensitive : `SPRING BUY`, `SUMMER BUY`, `EARLY BUY`, `FWD BUY`/`FORWARD BUY`), avec **une correction délibérée** :
+Reprise du POC `forecast_program_poc.py` (retiré du dépôt le 2026-07-19 — chantier hygiène, voir l'historique git) (mêmes marqueurs substring case-insensitive : `SPRING BUY`, `SUMMER BUY`, `EARLY BUY`, `FWD BUY`/`FORWARD BUY`), avec **une correction délibérée** :
 
 - Le POC fait `(ot or "").upper()` puis, faute de correspondance à un marqueur, retombe sur `"BASE"` — y compris pour `order_type IS NULL` ou une chaîne vide. Un `order_type` manquant est alors **indistinguable** d'un `order_type` réellement classifié `"STANDARD"`/`"VISTA"` : un bug d'honnêteté (None-honnête violé) hérité tel quel dans le POC.
 - `buy_program_bucket()` sépare les deux cas : `order_type is None` ou vide (après `strip()`) → bucket `BUCKET_UNKNOWN` **explicite** ; `order_type` présent mais ne matchant aucun marqueur programme → `BUCKET_BASE` (une vraie classification : un ordre standard, pas une absence de donnée).
@@ -131,5 +131,5 @@ Le harness est le seul point qui touche une connexion DB (hors le SELECT du lect
 - `src/ootils_core/pyramide/repository.py:193-213` — `_warehouse_codes_subquery()`, réutilisé pour la résolution de site.
 - `src/ootils_core/pyramide/repository.py:427-436` — `_DEMAND_HISTORY_BUSINESS_PREDICATES`, réutilisé tel quel.
 - `scripts/prove_segmentation_fva.py` — le harness CLI read-only.
-- `scripts/forecast_program_poc.py:38-48` — le POC d'origine (`bucket()`), dont `buy_program_bucket()` corrige le bug d'honnêteté.
+- ex-`scripts/forecast_program_poc.py` (retiré 2026-07-19, historique git) — le POC d'origine (`bucket()`), dont `buy_program_bucket()` corrige le bug d'honnêteté.
 - `src/ootils_core/db/migrations/048_demand_history_entity_program.sql` — `demand_history.order_type`, la colonne source, jamais modifiée par ce PR.

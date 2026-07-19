@@ -85,7 +85,7 @@ class TestTaxonomy:
     @pytest.mark.parametrize(
         ("order_type", "expected"),
         [
-            # Every POC marker (scripts/forecast_program_poc.py:38-48),
+            # Every POC marker (ex-forecast_program_poc.py, retire 2026-07-19 — historique git),
             # substring match, real ERP-shaped values included.
             ("SPRING BUY", BUCKET_SPRING),
             ("2025 SPRING BUY", BUCKET_SPRING),

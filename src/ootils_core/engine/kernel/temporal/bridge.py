@@ -1,4 +1,10 @@
 """
+GELÉ (2026-07-19) — jamais branché en production ; candidat de réactivation :
+#433 (re-agrégation grain/cadence) ; ne pas compter en couverture.
+En sursis lors de l'enterrement de l'elastic-time (ADR-002d, chantier moteur-c7) :
+le module compile et ses tests unitaires passent, mais aucun chemin servi ne
+l'appelle. Voir docs/CARTE-CODE.md.
+
 bridge.py — TemporalBridge: presentation layer, read-only.
 
 Aggregates and disaggregates PI nodes at query time.

@@ -7,6 +7,11 @@ name: Rust kernel build
 #
 # Triggered on any PR that touches:
 # - rust/** (all 3 workspace crates)
+# - src/ootils_core/engine/orchestration/** (calc_run/propagators) +
+#   engine/kernel/** + engine/scenario/param_overlay.py — every parity-invalidating path
+#   path. A change to Python propagation semantics must re-run the Rust-vs-SQL
+#   parity proof (test_rust_parity_integration.py); otherwise the in-process
+#   Rust flavour could silently drift from the Python/SQL contract (moteur-c7).
 # - tests/engine_service/** (the gRPC engine-service battery)
 # - tests/test_rust_kernel_smoke.py
 # - src/ootils_core/_grpc/** (generated gRPC stubs — drift-checked, not hand-edited)
@@ -14,13 +19,19 @@ name: Rust kernel build
 # - this workflow file
 #
 # Deliberately NOT path-filtered on plain Python changes elsewhere in
-# src/ootils_core — those are covered by ci.yml.
+# src/ootils_core (outside the propagation / kernel compute path above) —
+# those are covered by ci.yml.
 
 on:
   push:
     branches: [main]
     paths:
       - "rust/**"
+      # Python propagation / kernel compute path — a semantic change here must
+      # re-run the Rust-vs-SQL parity proof (moteur-c7).
+      - "src/ootils_core/engine/orchestration/**"
+      - "src/ootils_core/engine/scenario/param_overlay.py"
+      - "src/ootils_core/engine/kernel/**"
       - "tests/engine_service/**"
       - "tests/test_rust_kernel_smoke.py"
       - "src/ootils_core/_grpc/**"
@@ -29,6 +40,11 @@ on:
   pull_request:
     paths:
       - "rust/**"
+      # Python propagation / kernel compute path — a semantic change here must
+      # re-run the Rust-vs-SQL parity proof (moteur-c7).
+      - "src/ootils_core/engine/orchestration/**"
+      - "src/ootils_core/engine/scenario/param_overlay.py"
+      - "src/ootils_core/engine/kernel/**"
       - "tests/engine_service/**"
       - "tests/test_rust_kernel_smoke.py"
       - "src/ootils_core/_grpc/**"
