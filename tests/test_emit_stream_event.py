@@ -233,13 +233,16 @@ def test_fleet_types_present_in_migration_check() -> None:
     076 (PURGE-1) added the 6th (purge_executed); migration 079 (ADR-042
     PR-3 / ADR-037 INT-1 PR3) added the 7th (daily_run_completed); migration
     084 (ADR-043, DESC-1 PR-B) added the 8th (demand_descended); migration
-    085 (ADR-042 decision 4, PR-5) added the 9th (export_executed). A type is
-    expected to appear in EXACTLY ONE of these (the migration that
-    introduced it), but this check only needs "present in at least one" —
-    the CHECK constraint itself is always the FULL cumulative list (each
-    widening migration reproduces every earlier type verbatim), so a type
-    missing from every widening migration this test scans is the real drift
-    signal.
+    085 (ADR-042 decision 4, PR-5a) added the 9th (export_executed); migration
+    086 (ADR-042 decision 4, PR-5b) added the 10th (reconciliation_completed;
+    its real emission site, run_reconciliation in
+    engine/reconciliation/matcher.py, ships in the same PR — see migration
+    086's header). A type is expected to appear in EXACTLY
+    ONE of these (the migration that introduced it), but this check only
+    needs "present in at least one" — the CHECK constraint itself is always
+    the FULL cumulative list (each widening migration reproduces every
+    earlier type verbatim), so a type missing from every widening migration
+    this test scans is the real drift signal.
     """
     from pathlib import Path
 
@@ -254,7 +257,10 @@ def test_fleet_types_present_in_migration_check() -> None:
             "079_daily_run_completed_event.sql",
             "084_demand_descended_event.sql",
             "085_export_executed_event.sql",
+            "086_reconciliation.sql",
         )
     )
     missing = [t for t in FLEET_EVENT_TYPES if f"'{t}'" not in sql]
-    assert not missing, f"types absent from migrations 071/076/079/084/085 CHECK: {missing}"
+    assert not missing, (
+        f"types absent from migrations 071/076/079/084/085/086 CHECK: {missing}"
+    )

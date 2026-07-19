@@ -64,7 +64,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ootils_core.constants import BASELINE_SCENARIO_ID
 from ootils_core.db.types import DictRowConnection
@@ -77,6 +77,13 @@ from ootils_core.engine.ingest.daily_orchestrator import (
 )
 from ootils_core.engine.scenario.manager import ScenarioManager
 from ootils_core.interfaces.guards import compute_expected_arrival_deadline
+
+if TYPE_CHECKING:
+    # Annotation-only import (never executed at runtime, so no import cycle
+    # through engine.reporting -> engine.reconciliation.matcher ->
+    # engine.reporting.outbound_export): the renderer stays DB-free and merely
+    # reads the four scalar counts off the result via duck typing.
+    from ootils_core.engine.reconciliation.matcher import ReconciliationRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +420,48 @@ def _render_shortages(shortages_summary: Optional[Sequence[Mapping[str, Any]]]) 
     return lines
 
 
+def _render_reconciliation(reconciliation: Optional["ReconciliationRunResult"]) -> list[str]:
+    """The reconciliation section (ADR-042 decision 4, PR-5b). Honest: real
+    counts when the matcher ran, ``n/a`` when it did not (kill switch off,
+    failure, or a dry-run/preview daily run where nothing was loaded to
+    reconcile) — never a fabricated tally. The ambiguity count is published,
+    never hidden (ADR-042 decision 4: "le taux de matchs ambigus est un chiffre
+    publié, jamais caché")."""
+    lines = ["## Réconciliation sortant", ""]
+    if reconciliation is None:
+        lines.append(
+            "Non exécutée pour ce run (rapprochement désactivé, en échec, ou run "
+            "en aperçu) — aucun bon de commande (PO) entrant n'a été rapproché "
+            "des recommandations exportées. Comptes : n/a."
+        )
+        lines.append("")
+        return lines
+
+    lines.append(
+        "Rapprochement heuristique des bons de commande (PO) entrants de l'ERP "
+        "avec les recommandations déjà exportées, sur des attributs métier "
+        "(article, quantité ± tolérance, date ± fenêtre). Observation seule : "
+        "aucun statut de recommandation n'est modifié, seul un repère de "
+        "réalisation est posé."
+    )
+    lines.append("")
+    lines.append("| Candidates | Rapprochées | Ambiguës | Non rapprochées |")
+    lines.append("|---|---|---|---|")
+    lines.append(
+        f"| {reconciliation.candidates} | {reconciliation.matched} "
+        f"| {reconciliation.ambiguous} | {reconciliation.unmatched} |"
+    )
+    lines.append("")
+    if reconciliation.ambiguous > 0:
+        lines.append(
+            f"_{reconciliation.ambiguous} rapprochement(s) ambigu(s) NON "
+            "appliqué(s) — plusieurs candidats plausibles d'un côté ou de "
+            "l'autre ; aucun repère posé, à examiner manuellement._"
+        )
+        lines.append("")
+    return lines
+
+
 def _render_footer(evaluation: DailyRunEvaluation) -> list[str]:
     if evaluation.is_applied:
         ids = sorted(
@@ -446,6 +495,7 @@ def render_daily_report(
     load_outcomes: Sequence[FeedLoadOutcome],
     *,
     shortages_summary: Optional[Sequence[Mapping[str, Any]]] = None,
+    reconciliation: Optional["ReconciliationRunResult"] = None,
     generated_at: datetime,
 ) -> str:
     """Render one run_date's Markdown compte-rendu — DETERMINISTIC, DB-free.
@@ -470,6 +520,14 @@ def render_daily_report(
     ``build_shortages_summary`` for the DB-touching counterpart that builds
     this structure; the renderer trusts the caller's ordering/limit (no
     re-sort, no re-limit — "le rendu ne fait aucune requête").
+
+    ``reconciliation`` (ADR-042 decision 4, PR-5b) is None-honest the same
+    way: ``None`` means the outbound reconciliation was not executed for this
+    run (kill switch off, a best-effort failure, or a dry-run/preview run
+    where nothing was loaded to reconcile) — the section reads "n/a"; a
+    ``ReconciliationRunResult`` means it ran, and its four counts
+    (candidates / matched / ambiguous / unmatched) are rendered verbatim,
+    including the published ambiguity signal that ADR-042 forbids hiding.
     """
     lines: list[str] = []
     lines.extend(_render_header(evaluation, generated_at))
@@ -481,6 +539,7 @@ def render_daily_report(
     lines.extend(_render_scan_issues(evaluation))
     lines.extend(_render_volumes(evaluation, load_outcomes))
     lines.extend(_render_shortages(shortages_summary))
+    lines.extend(_render_reconciliation(reconciliation))
     lines.extend(_render_footer(evaluation))
 
     return "\n".join(lines).rstrip("\n") + "\n"
