@@ -8,6 +8,22 @@
 
 ---
 
+## Amendment (2026-07-19, chantier moteur-c7 — hygiène)
+
+**Elastic time non shippé, enterré 2026-07-19, bridge.py en sursis.**
+
+The elastic-time model designed here was never wired into a served path. Its
+calendar roll-forward engine (`ZoneTransitionEngine`,
+`engine/kernel/temporal/zone_transition.py`, ~706 LOC + ~2050 LOC of dedicated
+tests) had zero production callers and is removed. The read-only presentation
+layer `TemporalBridge` (`bridge.py`) is kept **frozen, en sursis** — it is a
+candidate for reactivation under #433 (grain/cadence re-aggregation), carries a
+dated `GELÉ` banner, and is not counted in coverage. The DB table
+`zone_transition_runs` (migrations 002/003) is untouched by this amendment.
+See `docs/CARTE-CODE.md`.
+
+---
+
 ## Context and Evolution
 
 Three attempts to design the elastic time model:

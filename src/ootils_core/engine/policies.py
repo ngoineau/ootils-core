@@ -1,4 +1,10 @@
 """
+GELÉ (2026-07-19) — jamais branché en production ; candidat de réactivation :
+MEIO (chantier 6b) ; ne pas compter en couverture.
+Aucun chemin servi n'importe ce module (seuls des tests le référencent). Gelé
+lors du chantier moteur-c7 ; le code est laissé intact volontairement. Voir
+docs/CARTE-CODE.md.
+
 Inventory replenishment policies.
 
 All functions are pure (no side-effects) so they can be called freely by

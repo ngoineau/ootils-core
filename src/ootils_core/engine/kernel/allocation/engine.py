@@ -1,4 +1,10 @@
 """
+GELÉ (2026-07-19) — jamais branché en production ; candidat de réactivation :
+substitution N-way ; ne pas compter en couverture.
+Aucun chemin servi n'instancie AllocationEngine (la seule mention hors tests est
+l'exemple de docstring de _clock.py). Gelé lors du chantier moteur-c7 ; voir
+docs/CARTE-CODE.md.
+
 engine.py — AllocationEngine: priority-ordered, deterministic demand allocation.
 
 Algorithm (per ADR-003 §4 and PROPOSAL §1.6 step 4):

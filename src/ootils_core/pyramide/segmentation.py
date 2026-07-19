@@ -113,7 +113,8 @@ BUY_PROGRAM_BUCKETS: tuple[str, ...] = (
 
 def buy_program_bucket(order_type: str | None) -> str:
     """Classify one ``demand_history.order_type`` value into a buy-program
-    bucket. Reprises ``scripts/forecast_program_poc.py:38-48`` (SPRING/
+    bucket. Reprises du POC ``forecast_program_poc.py`` (retire 2026-07-19,
+    historique git) (SPRING/
     SUMMER/EARLY/FWD BUY marker matching), corrected for a None-honesty bug:
     the POC folded a missing/blank ``order_type`` into ``BASE`` silently —
     indistinguishable from a genuinely classified "not a buy program"
