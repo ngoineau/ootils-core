@@ -271,3 +271,26 @@ Le bloc **PR-5** du plan (§ Plan de PRs) est livré **en partie** — le périm
 - `src/ootils_core/db/migrations/039_agent_recommendations.sql`, `061_reschedule_and_fpo.sql`, `066_transfer_recommendations.sql` — absence de colonne site générique sur `recommendations` (039/061) vs. `source_location_id`/`dest_location_id` réservés à `TRANSFER` (066).
 - `src/ootils_core/db/migrations/005_m4_shortages.sql:9` — `shortages.location_id`, le site connu en amont mais non propagé jusqu'à `recommendations`.
 - `docs/contracts/po_drafts/format-po-drafts-tsv.md`, `docs/contracts/reschedule_messages/format-reschedule-messages-tsv.md`, `docs/contracts/transfers_out/format-transfers-out-tsv.md` — les 3 specs de fichiers sortants, livrées avec ce PR.
+
+---
+
+## Amendement 2026-07-19 — PR-5b LIVRÉE : la réconciliation heuristique observation-only
+
+**Statut du gap ci-dessus : résolu par l'option (a)** — composer sans le site pour `po_drafts`/`reschedule_messages` (rapprochement item+fournisseur+quantité+date), site exigé pour la seule famille `TRANSFER` (`dest_location`, migration 066). Le taux d'ambiguïté est mesuré et publié à chaque run, jamais caché — exactement ce que la décision 4 exigeait.
+
+**Ce qui est livré :**
+
+- **Le matcher** (`engine/reconciliation/matcher.py`) : cœur PUR `match_candidates` (déterministe — tris stables des deux côtés, tolérances `Decimal` ±5 % qty / ±7 j date, constantes module 🎯) + orchestration `run_reconciliation` (seul écrivain, ne commit jamais — le caller possède la transaction). Candidat = reco baseline `exported_at IS NOT NULL AND fulfilled_at IS NULL` (SQL calqué sur `_PENDING_EXPORT_SQL`) ; PO plausible = même item, fournisseur égal *si les deux côtés le portent*, quantité dans la tolérance, date dans la fenêtre, et `nodes.created_at > exported_at` STRICT (un PO upserté pré-existant garde son `created_at` et est correctement exclu — il était connu de l'ERP avant notre export).
+- **La sémantique d'ambiguïté deux-côtés** (en-tête migration 086) : ≥2 PO plausibles pour une reco OU ≥2 recos plausibles pour un PO ⇒ rien n'est stampé, les deux compteurs `ambiguous_*` publient chaque côté ; les quatre compteurs de `reconciliation_runs` ne forment PAS une partition (une reco au PO contesté reste en limbe — reconsidérée au run suivant). `matched + ambiguous + unmatched ≠ candidates` par construction.
+- **Observation, jamais statut** : seuls `fulfilled_at`/`fulfilled_erp_id` sont stampés ; `recommendations.status` et la machine à états (`HUMAN_ONLY_TARGETS`) ne sont touchés par AUCUN chemin. Un run = UNE ligne `reconciliation_runs` + UN event `reconciliation_completed` (`new_text`=run_id, `new_quantity`=matched, `old_text`=`ambiguous=N,unmatched=N`), atomiques avec les stamps.
+- **Câblage quotidien best-effort** (`scripts/run_daily_ingest.py`, APRÈS `load_eligible_feeds` — les PO du jour sont là — avant le rapport) : commit/rollback isolés, un échec de réconciliation ne fait JAMAIS échouer le daily run ; section française « Réconciliation sortant » dans le compte-rendu (`daily_report.py`), `n/a` honnête si non exécutée. CLI `scripts/reconcile_outbound.py` dry-run par défaut, `--apply` gaté `OOTILS_RECONCILIATION_ENABLED` (défaut ON — observation, pattern outcomes).
+- **Gap fournisseur découvert et documenté** (jumeau du gap-location PR-5a, en-tête 086) : `ingest_purchase_orders` VALIDE `supplier_external_id` mais ne le PERSISTE pas sur le nœud — côté PO le fournisseur est toujours NULL en V1, le critère ne contraint jamais aujourd'hui (ambiguïté potentiellement plus élevée, publiée). Le cœur pur garde la comparaison : elle s'active sans changement de code le jour où l'ingest le stocke (chip posée).
+- **Différé explicite** : le chaînage des faits de réconciliation vers `recommendation_outcomes` (évaluateur ADR-030) n'est PAS livré — l'évaluateur ne lit pas `fulfilled_at` aujourd'hui.
+
+### Références (amendement PR-5b)
+
+- `src/ootils_core/engine/reconciliation/matcher.py` — cœur pur + orchestration, tolérances 🎯, note perf O(R×P) avec piste de bucketing par item.
+- `src/ootils_core/db/migrations/086_reconciliation.sql` — `fulfilled_at`/`fulfilled_erp_id` (observation, jamais un statut), `reconciliation_runs` append-only, CHECK events élargi (24 types), gap fournisseur en en-tête.
+- `scripts/reconcile_outbound.py` — CLI dry-run/`--apply`, exit codes pattern `purge_maintenance.py`.
+- `scripts/run_daily_ingest.py` — `_run_reconciliation` best-effort ; `src/ootils_core/engine/reporting/daily_report.py` — section « Réconciliation sortant ».
+- `tests/test_reconciliation_matcher.py` (23 purs : bornes exactes ±5 %/±7 j, strict `>`, limbe, déterminisme sous permutation) ; `tests/integration/test_reconciliation_integration.py` (stamp+ledger+event, re-run 0 nouveau stamp, statut INCHANGÉ, dry_run n'écrit rien).

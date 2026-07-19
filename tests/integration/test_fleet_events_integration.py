@@ -31,7 +31,12 @@ The seven cases (one per backend contract, per the AN-1 hand-off):
      NEVER a raw ``INSERT INTO events`` that would bypass the site under test.
      (demand_descended, migration 084/ADR-043, has no real emission site yet —
      DESC-1 PR-B's run is not wired in this PR — so it is exercised only by
-     case 7 below, via emit_stream_event directly, same as every other type.)
+     case 7 below, via emit_stream_event directly, same as every other type.
+     reconciliation_completed, migration 086/ADR-042 decision 4 PR-5b, HAS
+     its real emission site in this PR — run_reconciliation in
+     engine/reconciliation/matcher.py — but is exercised here via case 7
+     (emit_stream_event directly) because the matcher's end-to-end path has
+     its own dedicated file, test_reconciliation_integration.py.)
   2. RUN granularity — a calc run with 0 shortages emits calc_run_finished
      ALONE; a run persisting N shortages adds ONE shortage_detected with
      new_quantity=N (proof it is run-level, not one-per-shortage).
@@ -49,15 +54,19 @@ The seven cases (one per backend contract, per the AN-1 hand-off):
      event skips (no agent_runs row); a tick after a calc_run_finished runs and
      advances the persisted cursor; and WITHOUT the flag the metrics stay
      byte-identical to legacy (no cursor key).
-  7. Migration-071/076/079/084/085 CHECK — emit_stream_event succeeds for
-     each of the nine FLEET_EVENT_TYPES against the real constraint, catching
+  7. Migration-071/076/079/084/085/086 CHECK — emit_stream_event succeeds for
+     each of the TEN FLEET_EVENT_TYPES against the real constraint, catching
      any drift between FLEET_EVENT_TYPES (emitter) <-> VALID_EVENT_TYPES
      (events router) <-> the events.event_type CHECK (migrations 071 + 076 +
-     079 + 084 + 085). (export_executed, migration 085/ADR-042 decision 4,
-     has no real emission site yet in this worktree — PR-5's outbound-export
+     079 + 084 + 085 + 086). (export_executed, migration 085/ADR-042 decision
+     4, has no real emission site yet in this worktree — PR-5's outbound-export
      write path is not wired in this PR — so it is exercised only by case 7,
      via emit_stream_event directly, same posture as demand_descended before
-     it.)
+     it. reconciliation_completed, migration 086/ADR-042 decision 4 PR-5b:
+     its real emission site, run_reconciliation in
+     engine/reconciliation/matcher.py, ships in this same PR; here it is
+     exercised via case 7 like the other types, and end-to-end through its
+     dedicated file test_reconciliation_integration.py.)
 
 Coverage note (justified level-below, case 5): the POST /v1/drp/run endpoint's
 recommendation_created emission uses the IDENTICAL, already-proven shared helper
@@ -914,9 +923,9 @@ def test_subscribe_flag_off_is_byte_identical_no_cursor(seeded_baseline):
 @pytest.mark.parametrize("event_type", sorted(FLEET_EVENT_TYPES))
 def test_migration_071_check_accepts_every_fleet_type(event_type, migrated_db):
     """Each of the FLEET_EVENT_TYPES must INSERT cleanly against the real
-    events.event_type CHECK (migrations 071 + 076 + 079 + 084 + 085). A CHECK
-    that lags the emitter would surface here as a psycopg CheckViolation, not
-    a silent miss."""
+    events.event_type CHECK (migrations 071 + 076 + 079 + 084 + 085 + 086). A
+    CHECK that lags the emitter would surface here as a psycopg
+    CheckViolation, not a silent miss."""
     with _db_conn(migrated_db) as c:
         fork = _seed_fork(c, "fe-071")
         eid = emit_stream_event(
@@ -948,5 +957,6 @@ def test_fleet_event_types_do_not_drift_from_router_valid_set():
         "purge_executed",  # PURGE-1 (ADR-039, migration 076)
         "daily_run_completed",  # ADR-042 PR-3 / ADR-037 INT-1 PR3 (migration 079)
         "demand_descended",  # ADR-043, DESC-1 PR-B (migration 084)
-        "export_executed",  # ADR-042 decision 4, PR-5 (migration 085) -- added 2026-07-18, consciously in this PR
+        "export_executed",  # ADR-042 decision 4, PR-5a (migration 085) -- added 2026-07-18, consciously in this PR
+        "reconciliation_completed",  # ADR-042 decision 4, PR-5b (migration 086) -- added 2026-07-18, consciously ahead of the matcher engine wiring
     }

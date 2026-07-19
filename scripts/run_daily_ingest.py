@@ -45,6 +45,19 @@ module docstring — but nothing here re-runs propagation across the whole
 graph). A future PR may wire this explicitly; today it is a conscious
 omission, not an oversight.
 
+RECONCILIATION (ADR-042 decision 4, PR-5b): after the feeds are loaded (in
+``--apply`` mode — today's inbound POs are now in the DB) and BEFORE the daily
+report (so its counts feed the compte-rendu), a best-effort call to
+``engine.reconciliation.matcher.run_reconciliation`` heuristically pairs each
+inbound ERP PO with an already-exported recommendation and stamps
+``fulfilled_at`` for the unambiguous matches (an OBSERVATION — never a status
+change). It is gated by ``OOTILS_RECONCILIATION_ENABLED`` (default ON — an
+observation, not a destructive write, unlike the OFF-by-default write
+switches) and is strictly best-effort: any failure is caught, rolled back, and
+reported as "n/a" in the daily report — a reconciliation failure NEVER fails
+the daily run. In dry-run mode nothing was loaded, so reconciliation does not
+run (the report's section reads "n/a").
+
 OUTBOUND EXPORT (ADR-042 decision 4, PR-5): a THIRD phase, run AFTER the
 daily report, calls ``engine.reporting.outbound_export.execute_export`` —
 idempotent (``WHERE status IN ('APPROVED','APPLIED') AND exported_at IS
@@ -107,6 +120,10 @@ from ootils_core.engine.ingest.daily_orchestrator import (
     load_eligible_feeds,
     plan_daily_run,
 )
+from ootils_core.engine.reconciliation.matcher import (
+    ReconciliationRunResult,
+    run_reconciliation,
+)
 from ootils_core.engine.reporting import build_shortages_summary, render_daily_report
 from ootils_core.engine.reporting.outbound_export import execute_export
 
@@ -135,6 +152,61 @@ def _outbound_export_enabled() -> bool:
     return os.environ.get("OOTILS_OUTBOUND_EXPORT_ENABLED", "0").strip().lower() in {
         "1", "true", "yes", "on",
     }
+
+
+def _reconciliation_enabled() -> bool:
+    """Kill switch, default ON (an observation, not a destructive write —
+    mirrors ``api/routers/outcomes.py``, unlike the OFF-by-default write
+    switches ``OOTILS_DAILY_RUN_ENABLED``/``OOTILS_OUTBOUND_EXPORT_ENABLED``).
+    Same truthy-set shape as every other kill switch in the repo."""
+    return os.environ.get("OOTILS_RECONCILIATION_ENABLED", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _run_reconciliation(
+    conn: DictRowConnection,
+    run_date: date,
+    *,
+    apply: bool,
+) -> ReconciliationRunResult | None:
+    """ADR-042 decision 4 (PR-5b) — best-effort outbound reconciliation, run
+    AFTER the feeds are loaded (today's inbound POs are now in the DB). A
+    failure here NEVER fails the daily run (the reconciliation is an
+    observation, not part of the load contract): it is caught, rolled back so
+    the shared connection stays usable for the report/export phases, logged,
+    and reported as ``None`` (the daily report's section then reads "n/a").
+
+    Only runs under ``--apply`` (in dry-run nothing was loaded, so there is
+    nothing new to reconcile) and only when ``OOTILS_RECONCILIATION_ENABLED``
+    is not disabled. Commits its OWN writes on success (independent of the
+    export phase that follows) — the stamp + ``reconciliation_runs`` row + the
+    ``reconciliation_completed`` event are one atomic observation.
+    """
+    if not apply:
+        return None
+    if not _reconciliation_enabled():
+        logger.warning(
+            "reconciliation.skipped reason=OOTILS_RECONCILIATION_ENABLED_disabled"
+        )
+        return None
+    try:
+        result = run_reconciliation(conn, run_date)
+        conn.commit()
+        logger.info(
+            "reconciliation.done run_date=%s candidates=%d matched=%d ambiguous=%d "
+            "unmatched=%d run_id=%s",
+            run_date, result.candidates, result.matched, result.ambiguous,
+            result.unmatched, result.run_id,
+        )
+        return result
+    except Exception:  # noqa: BLE001 — best-effort observation, never fatal to the run
+        conn.rollback()
+        logger.warning(
+            "reconciliation.failed run_date=%s — best-effort observation skipped, "
+            "daily run continues", run_date, exc_info=True,
+        )
+        return None
 
 
 def _report_evaluation(evaluation: DailyRunEvaluation) -> None:
@@ -197,6 +269,7 @@ def _emit_daily_report(
     *,
     apply: bool,
     outbox_dir: Path,
+    reconciliation: ReconciliationRunResult | None = None,
 ) -> None:
     """Render the deterministic daily report and either print it (dry-run —
     STDOUT ONLY, nothing written) or write it to ``--outbox`` (``--apply``).
@@ -206,13 +279,16 @@ def _emit_daily_report(
     — the CLI's own progress messages already go through ``logger``
     everywhere else in this file. ``build_shortages_summary`` is SELECT-only
     and safe to call in both modes (returns ``[]``, never raises, when the
-    baseline has no completed calc_run yet).
+    baseline has no completed calc_run yet). ``reconciliation`` is the
+    best-effort outbound-reconciliation result (``None`` in dry-run or on
+    failure — the report's section then reads "n/a").
     """
     shortages_summary = build_shortages_summary(conn, limit=_SHORTAGES_TOP_N)
     report = render_daily_report(
         evaluation,
         outcomes,
         shortages_summary=shortages_summary,
+        reconciliation=reconciliation,
         generated_at=datetime.now(timezone.utc),
     )
 
@@ -340,7 +416,14 @@ def main(argv: list[str] | None = None) -> int:
             assert token is not None  # guarded above
             outcomes = load_eligible_feeds(evaluation, token=token, inbox_dir=inbox_dir)
             _report_load_outcomes(outcomes)
-            _emit_daily_report(evaluation, outcomes, conn, apply=True, outbox_dir=outbox_dir)
+            # Reconciliation runs AFTER the load (today's inbound POs are now in
+            # the DB) and BEFORE the report (so its counts feed the compte-rendu)
+            # — best-effort, never fatal to the run.
+            reconciliation = _run_reconciliation(conn, run_date, apply=True)
+            _emit_daily_report(
+                evaluation, outcomes, conn, apply=True, outbox_dir=outbox_dir,
+                reconciliation=reconciliation,
+            )
             _run_outbound_export(conn, apply=True, outbox_dir=outbox_dir)
     except FileNotFoundError as exc:
         logger.error("REFUSED: %s", exc)

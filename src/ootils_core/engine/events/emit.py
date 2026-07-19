@@ -112,6 +112,45 @@ sync with the migration 071 header block):
                         emit_recommendation_created_for_run below, so the
                         events table does not accumulate a zero-content row
                         on the (common) days nothing was approved
+  reconciliation_completed:
+      field_changed   = 'reconciliation_completed' (discriminant, constant —
+                        like demand_descended/export_executed there is only
+                        one kind of reconciliation run in V1, migration 086,
+                        ADR-042 decision 4, PR-5b)
+      new_text        = reconciliation_runs.run_id (UUID as text) — UNLIKE
+                        daily_run_completed/export_executed (no companion
+                        audit table), a companion table DOES exist here
+                        (reconciliation_runs, migration 086) — same "run ref
+                        in new_text" idiom as calc_run_finished/
+                        shortage_detected/outcome_evaluated/demand_descended,
+                        so a subscriber joins reconciliation_runs for the
+                        full candidates/matched/ambiguous/unmatched breakdown
+                        instead of a single flat count
+      new_quantity    = matched — the count of recommendations the matcher
+                        heuristically paired with an inbound PO and stamped
+                        fulfilled_at this run (the "good news" number a
+                        subscriber wants without a join; the ambiguous/
+                        unmatched buckets, always published never hidden per
+                        ADR-042 decision 4, travel in old_text below and in
+                        full in reconciliation_runs)
+      old_text        = 'ambiguous=<n>,unmatched=<n>' — the two buckets that
+                        need human review (multiple plausible pairings on
+                        either side, or none at all), deterministic string,
+                        same "what needs attention" role as purge_executed's
+                        old_text=executed_by / daily_run_completed's
+                        old_text=culprit feed_keys / demand_descended's
+                        old_text=failed item_ids — never omitted (unlike
+                        those three, ambiguous/unmatched are always present,
+                        even when both are 0, since a reconciliation run
+                        always has a definite tally, never a "nothing to
+                        report" case the way an all-green daily_run_completed
+                        has no culprits)
+      EMISSION SITE (2026-07-18, reworded at review 2026-07-19): the one
+      real emission site is ``run_reconciliation`` in
+      ``engine/reconciliation/matcher.py``, delivered in the SAME PR as
+      migration 086 (the schema landed a few commits ahead of the engine in
+      the same branch; an earlier draft of this note said "not written yet"
+      — no longer true).
 
 ``scenario_id`` (NOT NULL, migration 002) scopes the event to the fork/baseline.
 snapshot_captured / outcome_evaluated are baseline-only by nature (ADR-030) but
@@ -125,10 +164,13 @@ own delete, never per shortage row). demand_descended is forkable (ADR-043
 scenario_id, never replayed onto baseline by promote() (L0, simulation-only,
 same doctrine as the ADR-025 overlay). export_executed is baseline-only in
 V1 (the outbound export reads APPROVED recommendations off baseline — ADR-042
-decision 4, PR-5), like snapshot_captured/outcome_evaluated.
+decision 4, PR-5), like snapshot_captured/outcome_evaluated. reconciliation_completed
+is baseline-only for the same reason (the matcher pairs baseline-only exported
+recommendations against observed inbound ERP POs — ADR-042 decision 4, PR-5b;
+migration 086's header), like export_executed/snapshot_captured/outcome_evaluated.
 
 Keep FLEET_EVENT_TYPES in sync with the events.event_type CHECK constraint
-(migrations 071 + 076 + 079 + 084 + 085) and with VALID_EVENT_TYPES in
+(migrations 071 + 076 + 079 + 084 + 085 + 086) and with VALID_EVENT_TYPES in
 api/routers/events.py.
 """
 from __future__ import annotations
@@ -142,11 +184,11 @@ import psycopg
 
 # The fleet-emission types added by migration 071 (#401 AN-1) + migration 076
 # (PURGE-1) + migration 079 (ADR-042 PR-3) + migration 084 (ADR-043, DESC-1
-# PR-B) + migration 085 (ADR-042 decision 4, PR-5). Validated locally so a
-# typo fails loudly in Python (ValueError) rather than as an opaque psycopg
-# CHECK violation at INSERT time. This set is the subset emit_stream_event is
-# meant to write; the DB CHECK (migrations 071/076/079/084/085) is the full
-# authoritative list.
+# PR-B) + migration 085 (ADR-042 decision 4, PR-5a) + migration 086 (ADR-042
+# decision 4, PR-5b). Validated locally so a typo fails loudly in Python
+# (ValueError) rather than as an opaque psycopg CHECK violation at INSERT
+# time. This set is the subset emit_stream_event is meant to write; the DB
+# CHECK (migrations 071/076/079/084/085/086) is the full authoritative list.
 FLEET_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "recommendation_created",
@@ -158,6 +200,7 @@ FLEET_EVENT_TYPES: frozenset[str] = frozenset(
         "daily_run_completed",
         "demand_descended",
         "export_executed",
+        "reconciliation_completed",
     }
 )
 
