@@ -72,7 +72,7 @@ forecast = [
     "statsforecast ~= 2.0",
     "mlforecast ~= 1.0",
     "lightgbm ~= 4.0",
-    "pandas ~= 2.3",
+    "pandas >= 2.3,< 4.0",
     # Optional MinT-shrink reconciliation backend (Pyramide axis A, PR3).
     # Lazy-imported by pyramide/hierarchy/reconcile.py with a fallback to
     # the deterministic middle-out path when absent (ADR-022).
