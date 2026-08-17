@@ -30,7 +30,7 @@ dependencies = [
     "psycopg[binary] ~= 3.3",
     "psycopg-pool ~= 3.3",
     "pydantic ~= 2.12",
-    "openai ~= 2.15",
+    "openai >= 2.15,< 4.0",
     "slowapi ~= 0.1",
     # Prometheus metrics for /metrics (#392 AN-2). Run dependency, not an extra:
     # the request middleware records counters/histograms unconditionally.
